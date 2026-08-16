@@ -10,13 +10,13 @@ Build plan milestones (architecture doc §11). v1 definition of done is M0–M5.
 
 - [x] **M0 — Skeleton**: SQLite schema (sessions, event log, documents/cache, spans, DAG, ledger), content-addressed blob store, Pydantic models (§4 schema rules enforced at construction), model gateway with cost capture, event-log replay test.
 - [x] **M1 — Single-agent loop**: explicit state machine with budget/turn/wall-clock gates, tool layer (`search_broad` stub + live cached `fetch`), span-addressed ingestion, fetch cache record/replay modes, citation checking with one repair round-trip, ReportClaim→SourceSpan DAG writes, CLI. *Exit test green: one query → cited answer, every claim resolving to a cached span, replayed byte-identically with zero HTTP calls; tampered-span negative test flags the run as partial.*
-- [ ] **M2 — Evidence DAG + structural verification**: tiers 1–2 (Premise/Finding) written from the loop, full stage-1 checks, exact-match number/quote validation, writer constrained to ReportClaims.
+- [x] **M2 — Evidence DAG + structural verification**: facts enter the DAG only via the harness-validated `record_premises` tool (tier-1 Premise nodes with `extracts` edges; numbers/quotes must match spans exactly or carry a transform note); the writer phase is a context firewall — it sees only the query + recorded premises, never raw spans or the research transcript, and cites `[premise:<id>]` per sentence (tier-4 ReportClaims with `aggregates` edges); stage-1 structural verification (acyclicity, claim→premise→span path completeness, tier/edge rules, corpus integrity, containment re-check) runs at the end of every session and on demand via `parsec verify`. *Exit test green: corrupt a cached span after the run → `parsec verify` mechanically flags both the corruption and the dependent claim, by ID, no model involved.*
 - [ ] **M3 — Fan-out**: decomposer, subagent pool (contract schema already defined and tested), coverage ledger, self-pruning, notebook.
 - [ ] **M4 — Credence + omission**: priors, propagation, dedup clustering, bottom-up omission traversal, stakes-tiered rendering.
 - [ ] **M5 — Eval harness**: frozen corpora, 3-axis scoring, regression runner.
 - [ ] **M6 — Polish** (post-v1): compaction ladder, steering, fork/rewind UX, judge pass, gap-fill loop, TUI.
 
-Test suite: 80 tests, no network or API keys required, plus an opt-in live smoke test. "Byte-identical replay" is defined as byte-equality of a canonical projection of the event stream (timestamps and wall-clock ledger rows stripped; token/USD debits kept) plus the final answer blob.
+Test suite: 106 tests, no network or API keys required, plus an opt-in live smoke test. "Byte-identical replay" is defined as byte-equality of a canonical projection of the event stream (timestamps and wall-clock ledger rows stripped; token/USD debits kept) plus the final answer blob.
 
 ## Setup
 
@@ -39,6 +39,10 @@ uv run parsec ask "your question" --search-fixtures fixtures/queries.json
 # Re-run a recorded session against the frozen corpus and verify the replay
 # is byte-identical (event-stream projection + answer bytes):
 uv run parsec replay <session-id>
+
+# Re-verify a session's evidence DAG against the stored corpus (stage-1
+# structural checks — catches corpus corruption after the fact):
+uv run parsec verify <session-id>
 
 # Inspect
 uv run parsec sessions list
@@ -69,5 +73,6 @@ uv run pytest -m live tests/integration/test_live_smoke.py
 - `src/parsec/db/`, `src/parsec/store/` — the durable core: SQLite schema (sessions, event log, documents/cache, spans, evidence DAG, budget ledger), content-addressed blob store, replay projection.
 - `src/parsec/gateway/` — the single door to any model: adapters (Anthropic, fake, replay; OpenAI judge slot reserved for M5), cost capture, ledger debits.
 - `src/parsec/retrieval/` — search-provider seam (fixture-stubbed), cache-routed fetcher, deterministic extraction, span indexer.
-- `src/parsec/tools/` — tool registry: schema validation, truncation policy, `search_broad` + `fetch`.
-- `src/parsec/loop/` — the deliberately thin, rippable part: state machine, prompt assembly, citation checking, single-agent loop.
+- `src/parsec/tools/` — tool registry: schema validation, truncation policy, `search_broad` + `fetch` + `record_premises`.
+- `src/parsec/verify/` — stage-1 structural verification: mechanical containment checks (numbers/quotes) and whole-DAG integrity walks. No model, no judgment.
+- `src/parsec/loop/` — the deliberately thin, rippable part: state machine, research/writer prompt assembly, citation checking, single-agent loop.

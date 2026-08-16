@@ -14,9 +14,17 @@ def test_finding_without_premises_rejected():
 
 def test_report_claim_needs_refs_unless_narrative():
     with pytest.raises(ValidationError):
-        ReportClaimNode(text="a fact", span_refs=[])
-    ReportClaimNode(text="In summary,", span_refs=[], narrative=True)
-    ReportClaimNode(text="a fact", span_refs=["doc:abc123def456#0-10"])
+        ReportClaimNode(text="a fact", premise_refs=[])
+    ReportClaimNode(text="In summary,", premise_refs=[], narrative=True)
+    ReportClaimNode(text="a fact", premise_refs=["premise:abcd1234abcd1234"])
+
+
+def test_premise_draft_atomicity_cap():
+    from parsec.models.report import PremiseDraft
+
+    with pytest.raises(ValidationError):
+        PremiseDraft(text="x" * 301, span_refs=["doc:abc123def456#0-10"])
+    PremiseDraft(text="short fact", span_refs=["doc:abc123def456#0-10"], transform_note="derived")
 
 
 def test_subagent_report_parses_spec_example():

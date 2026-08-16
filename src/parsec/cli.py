@@ -34,6 +34,7 @@ from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
+from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
 
 console = Console()
@@ -66,6 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("session_id")
     replay.add_argument("--data-dir", type=Path, default=Path("data"))
     replay.add_argument("--no-verify", action="store_true")
+
+    verify = sub.add_parser(
+        "verify", help="Run stage-1 structural verification over a session's evidence DAG"
+    )
+    verify.add_argument("session_id")
+    verify.add_argument("--data-dir", type=Path, default=Path("data"))
+    verify.add_argument("--json", action="store_true", dest="as_json")
 
     sessions = sub.add_parser("sessions", help="Inspect sessions")
     sessions_sub = sessions.add_subparsers(dest="sessions_command", required=True)
@@ -119,7 +127,7 @@ def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> Sing
     adapter = make_adapter(config)
     gateway = ModelGateway(adapter, event_log, blobs, ledger, config)
     fetcher = Fetcher(documents, blobs, clock, config.cache_mode, transport=fetch_transport)
-    tools: list = [FetchTool(fetcher, spans)]
+    tools: list = [FetchTool(fetcher, spans), RecordPremisesTool(dag, spans, documents)]
     if config.search_fixtures is not None:
         tools.append(SearchBroadTool(FixtureSearchProvider(config.search_fixtures)))
     registry = ToolRegistry(tools)
@@ -164,6 +172,7 @@ def cmd_ask(args) -> int:
                     "answer": result.answer,
                     "claims_total": result.claims_total,
                     "unresolved": result.unresolved,
+                    "violations": result.violations,
                     "turns": result.turns,
                     "totals": totals,
                 }
@@ -176,6 +185,7 @@ def cmd_ask(args) -> int:
             f"{int(totals.get('input_tokens', 0))} in / {int(totals.get('output_tokens', 0))} out tokens · "
             f"${totals.get('usd', 0.0):.4f} · claims {result.claims_total}"
             + (f" · [red]{len(result.unresolved)} unresolved[/red]" if result.unresolved else "")
+            + (f" · [red]{len(result.violations)} verification violations[/red]" if result.violations else "")
             + "[/dim]"
         )
     if result.status == "done":
@@ -203,6 +213,32 @@ def cmd_replay(args) -> int:
     if not outcome.answers_match:
         console.print("answer blobs differ")
     return EXIT_ERROR
+
+
+def cmd_verify(args) -> int:
+    from parsec.verify.structural import verify_session
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    if SessionStore(conn, clock).get(args.session_id) is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    report = verify_session(conn, blobs, args.session_id)
+    if args.as_json:
+        print(json.dumps(report.to_payload()))
+    else:
+        console.print(
+            f"checked {report.checked_claims} claims, {report.checked_premises} premises, "
+            f"{report.checked_spans} spans"
+        )
+        if report.ok:
+            console.print("[green]verification passed: every claim traces to intact spans[/green]")
+        else:
+            table = Table("check", "subject", "detail")
+            for v in report.violations:
+                table.add_row(v.check, v.subject, v.detail)
+            console.print(table)
+    return EXIT_OK if report.ok else EXIT_PARTIAL
 
 
 def cmd_sessions(args) -> int:
@@ -255,7 +291,13 @@ def cmd_spans(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    handlers = {"ask": cmd_ask, "replay": cmd_replay, "sessions": cmd_sessions, "spans": cmd_spans}
+    handlers = {
+        "ask": cmd_ask,
+        "replay": cmd_replay,
+        "verify": cmd_verify,
+        "sessions": cmd_sessions,
+        "spans": cmd_spans,
+    }
     return handlers[args.command](args)
 
 

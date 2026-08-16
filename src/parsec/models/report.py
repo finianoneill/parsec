@@ -14,9 +14,14 @@ from pydantic import BaseModel, ConfigDict, Field
 class PremiseDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    text: str = Field(min_length=1)
+    # Atomicity guard (§10.1): one subject, one predicate — enforced softly via
+    # a hard length cap; specificity itself is an eval metric, not a schema rule.
+    text: str = Field(min_length=1, max_length=300)
     span_refs: list[str] = Field(min_length=1)
     claim_class: Literal["stable", "volatile"] = "stable"
+    # Exempts the premise from the exact-number containment check; stored on
+    # the extracts edge so the derivation stays auditable (§6 stage 1).
+    transform_note: str | None = None
 
 
 class FindingDraft(BaseModel):

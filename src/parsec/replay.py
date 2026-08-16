@@ -25,6 +25,7 @@ from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
+from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
 
 
@@ -75,7 +76,7 @@ async def run_replay(
     gateway = ModelGateway(adapter, event_log, blobs, ledger, replay_config)
 
     fetcher = Fetcher(documents, blobs, clock, CacheMode.REPLAY)
-    tools: list = [FetchTool(fetcher, spans)]
+    tools: list = [FetchTool(fetcher, spans), RecordPremisesTool(dag, spans, documents)]
     if replay_config.search_fixtures is not None:
         tools.append(SearchBroadTool(FixtureSearchProvider(replay_config.search_fixtures)))
     registry = ToolRegistry(tools)

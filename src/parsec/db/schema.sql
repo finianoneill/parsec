@@ -56,25 +56,30 @@ CREATE TABLE IF NOT EXISTS spans (
 );
 CREATE INDEX IF NOT EXISTS ix_spans_doc ON spans(doc_hash);
 
+-- node_id/edge_id are content-derived and deliberately NOT session-unique:
+-- a replayed session re-creates identical nodes under its own session_id,
+-- and recorded answers embed premise IDs — so IDs must be reproducible.
 CREATE TABLE IF NOT EXISTS nodes (
-  node_id      TEXT PRIMARY KEY,             -- "<type>:<hash16>"
+  node_id      TEXT NOT NULL,                -- "<type>:<hash16>"
   session_id   TEXT NOT NULL REFERENCES sessions(session_id),
   tier         INTEGER NOT NULL,             -- 0 SourceSpan .. 4 ReportClaim
   node_type    TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   credence     REAL,                         -- NULL until M4
-  created_seq  INTEGER NOT NULL
+  created_seq  INTEGER NOT NULL,
+  PRIMARY KEY (node_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS ix_nodes_session ON nodes(session_id, tier);
 
 CREATE TABLE IF NOT EXISTS edges (
-  edge_id      TEXT PRIMARY KEY,
+  edge_id      TEXT NOT NULL,
   session_id   TEXT NOT NULL REFERENCES sessions(session_id),
   src_node_id  TEXT NOT NULL,                -- child (derived)
   dst_node_id  TEXT NOT NULL,                -- parent (evidence)
   edge_type    TEXT NOT NULL,                -- extracts|deduces|induces|temporal|aggregates|contradicts
   payload_json TEXT NOT NULL DEFAULT '{}',
-  created_seq  INTEGER NOT NULL
+  created_seq  INTEGER NOT NULL,
+  PRIMARY KEY (edge_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS ix_edges_src ON edges(session_id, src_node_id);
 

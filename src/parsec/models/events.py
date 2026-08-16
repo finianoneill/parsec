@@ -19,6 +19,7 @@ class EventType(StrEnum):
     NODE_ADDED = "node_added"
     EDGE_ADDED = "edge_added"
     BUDGET_DEBIT = "budget_debit"
+    VERIFICATION_COMPLETED = "verification_completed"
     ANSWER_EMITTED = "answer_emitted"
     USER_ABORT = "user_abort"
     ERROR = "error"
