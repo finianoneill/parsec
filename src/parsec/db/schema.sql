@@ -1,0 +1,91 @@
+-- Parsec durable schema. One SQLite file (WAL) holds everything:
+-- sessions, event log, documents + fetch-cache index, spans, evidence DAG, budget ledger.
+-- All timestamps are ISO-8601 UTC text. All *_json columns hold canonical JSON.
+
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id        TEXT PRIMARY KEY,
+  created_ts        TEXT NOT NULL,
+  query             TEXT NOT NULL,
+  config_json       TEXT NOT NULL,
+  status            TEXT NOT NULL,           -- running | done | partial | halted_budget | halted_error | halted_user
+  answer_blob       TEXT,                    -- sha256 of final answer bytes in blob store
+  parent_session_id TEXT,                    -- set for replay runs
+  finished_ts       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id   TEXT NOT NULL REFERENCES sessions(session_id),
+  idx          INTEGER NOT NULL,             -- 0-based per-session ordinal; replay keys off this
+  ts           TEXT NOT NULL,
+  actor        TEXT NOT NULL,                -- harness | model | tool:<name> | user
+  event_type   TEXT NOT NULL,
+  payload_json TEXT NOT NULL,                -- canonical JSON; large bodies referenced by blob sha
+  parent_seq   INTEGER,
+  UNIQUE(session_id, idx)
+);
+CREATE INDEX IF NOT EXISTS ix_events_session ON events(session_id, idx);
+
+CREATE TABLE IF NOT EXISTS documents (
+  doc_hash     TEXT PRIMARY KEY,             -- sha256 of raw fetched bytes
+  url          TEXT NOT NULL,                -- canonical URL actually fetched
+  fetched_ts   TEXT NOT NULL,
+  content_type TEXT,
+  status_code  INTEGER NOT NULL,
+  byte_len     INTEGER NOT NULL,
+  raw_blob     TEXT NOT NULL,                -- == doc_hash
+  text_blob    TEXT NOT NULL,                -- sha256 of extracted text
+  meta_json    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS cache_index (
+  cache_key    TEXT PRIMARY KEY,             -- sha256(canonical_url)
+  url          TEXT NOT NULL,
+  doc_hash     TEXT NOT NULL REFERENCES documents(doc_hash),
+  fetched_ts   TEXT NOT NULL,
+  mode         TEXT NOT NULL                 -- record | live_prefer_cache
+);
+
+CREATE TABLE IF NOT EXISTS spans (
+  span_id      TEXT PRIMARY KEY,             -- "doc:<doc_hash[:12]>#<start>-<end>"
+  doc_hash     TEXT NOT NULL REFERENCES documents(doc_hash),
+  char_start   INTEGER NOT NULL,
+  char_end     INTEGER NOT NULL,
+  text         TEXT NOT NULL,                -- verbatim slice of extracted text
+  created_seq  INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_spans_doc ON spans(doc_hash);
+
+CREATE TABLE IF NOT EXISTS nodes (
+  node_id      TEXT PRIMARY KEY,             -- "<type>:<hash16>"
+  session_id   TEXT NOT NULL REFERENCES sessions(session_id),
+  tier         INTEGER NOT NULL,             -- 0 SourceSpan .. 4 ReportClaim
+  node_type    TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  credence     REAL,                         -- NULL until M4
+  created_seq  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_nodes_session ON nodes(session_id, tier);
+
+CREATE TABLE IF NOT EXISTS edges (
+  edge_id      TEXT PRIMARY KEY,
+  session_id   TEXT NOT NULL REFERENCES sessions(session_id),
+  src_node_id  TEXT NOT NULL,                -- child (derived)
+  dst_node_id  TEXT NOT NULL,                -- parent (evidence)
+  edge_type    TEXT NOT NULL,                -- extracts|deduces|induces|temporal|aggregates|contradicts
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_seq  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_edges_src ON edges(session_id, src_node_id);
+
+CREATE TABLE IF NOT EXISTS ledger (
+  entry_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id   TEXT NOT NULL REFERENCES sessions(session_id),
+  ts           TEXT NOT NULL,
+  category     TEXT NOT NULL,                -- input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|usd|wall_ms
+  amount       REAL NOT NULL,
+  actor        TEXT NOT NULL,                -- gateway:<model> | tool:<name> | harness
+  ref_seq      INTEGER,
+  note         TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ledger_session ON ledger(session_id, category);
