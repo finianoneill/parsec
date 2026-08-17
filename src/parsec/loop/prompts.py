@@ -45,6 +45,11 @@ Citation contract (mechanically enforced — violations are rejected):
 - Purely structural sentences (transitions, framing) must end with the tag [narrative].
 - If some subquestions are listed as unresolved, acknowledge the gap in [narrative] sentences; do not paper over it.
 
+Hedging register (each premise/finding carries a computed confidence tier — your wording must match it):
+- high: state it plainly ("X is Y").
+- moderate: hedge ("X is likely Y", "evidence indicates").
+- low or single-source: attribute it ("one source suggests", "according to <source>") — never state it as settled fact.
+
 Be concise. Answer directly."""
 
 SUBMIT_SUBQUESTIONS_SCHEMA = {
@@ -125,8 +130,12 @@ def writer_user_prompt(
     findings: list[sqlite3.Row],
     sources: dict[str, str],
     unresolved: list[tuple[str, str, str]],  # (sq_id, question, "status: reason")
+    confidence: dict[str, str] | None = None,  # node_id -> annotation, e.g. "high" / "low, single source"
 ) -> str:
-    """The writer's entire view of the world: query + distilled evidence + gaps."""
+    """The writer's entire view of the world: query + distilled evidence + gaps.
+    Confidence annotations are computed by the credence model (§6.5) — the
+    writer applies the register, it never invents the tier."""
+    confidence = confidence or {}
     lines = [f"Question: {query}", "", "Premises:"]
     if not premises:
         lines.append(
@@ -135,14 +144,18 @@ def writer_user_prompt(
     for row in premises:
         payload = json.loads(row["payload_json"])
         url = sources.get(row["node_id"], "")
-        suffix = f" (source: {url})" if url else ""
+        notes = [f"source: {url}"] if url else []
+        if row["node_id"] in confidence:
+            notes.append(f"confidence: {confidence[row['node_id']]}")
+        suffix = f" ({'; '.join(notes)})" if notes else ""
         lines.append(f"[{row['node_id']}] {payload['text']}{suffix}")
     if findings:
         lines += ["", "Findings (derived from premises):"]
         for row in findings:
             payload = json.loads(row["payload_json"])
             deps = ", ".join(payload["premise_ids"])
-            lines.append(f"[{row['node_id']}] {payload['text']} (from: {deps})")
+            conf = f"; confidence: {confidence[row['node_id']]}" if row["node_id"] in confidence else ""
+            lines.append(f"[{row['node_id']}] {payload['text']} (from: {deps}{conf})")
     if unresolved:
         lines += ["", "Unresolved subquestions (acknowledge these gaps in [narrative]):"]
         for sq_id, question, why in unresolved:
