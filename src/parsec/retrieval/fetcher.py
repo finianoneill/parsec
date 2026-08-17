@@ -54,6 +54,11 @@ class FetchedDoc:
     text: str
     title: str | None
     from_cache: bool
+    # Politeness 2.0 typed outcomes: "ok" | "blocked_by_robots" | "licensed".
+    # Non-ok outcomes are cached as content-addressed outcome documents so a
+    # replayed session reproduces them byte-identically.
+    outcome: str = "ok"
+    license_url: str | None = None
 
 
 class Fetcher:
@@ -64,12 +69,16 @@ class Fetcher:
         clock: Clock,
         mode: CacheMode,
         transport: httpx.AsyncBaseTransport | None = None,
+        robots=None,  # RobotsPolicy | None; None = don't consult robots
+        user_agent: str = USER_AGENT,
     ):
         self.documents = documents
         self.blobs = blobs
         self.clock = clock
         self.mode = mode
         self._transport = transport
+        self.robots = robots
+        self.user_agent = user_agent
         self._last_fetch_by_domain: dict[str, float] = {}
 
     async def fetch(self, url: str) -> FetchedDoc:
@@ -90,6 +99,8 @@ class Fetcher:
                     text=self.blobs.get_text(cached["text_blob"]),
                     title=meta.get("title"),
                     from_cache=True,
+                    outcome=meta.get("outcome", "ok"),
+                    license_url=meta.get("license_url"),
                 )
             if self.mode == CacheMode.REPLAY:
                 raise CacheMiss(canonical_url)
@@ -98,6 +109,13 @@ class Fetcher:
 
     async def _live_fetch(self, canonical_url: str, cache_key: str) -> FetchedDoc:
         from parsec.retrieval.extract import EXTRACTOR_VERSION, extract_text
+
+        if self.robots is not None:
+            decision = await self.robots.check(canonical_url)
+            if not decision.allowed:
+                return self._record_outcome(
+                    canonical_url, cache_key, "blocked_by_robots", 999, decision.license_url
+                )
 
         domain = urlsplit(canonical_url).netloc
         last = self._last_fetch_by_domain.get(domain)
@@ -111,9 +129,15 @@ class Fetcher:
             transport=self._transport,
             follow_redirects=True,
             timeout=FETCH_TIMEOUT_S,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": self.user_agent},
         ) as client:
             resp = await client.get(canonical_url)
+
+        if resp.status_code == 402:  # machine-negotiable licensing (Cloudflare 402 / RSL)
+            license_url = None
+            if self.robots is not None:
+                license_url = (await self.robots.check(canonical_url)).license_url
+            return self._record_outcome(canonical_url, cache_key, "licensed", 402, license_url)
 
         raw = resp.content
         content_type = resp.headers.get("content-type")
@@ -137,4 +161,42 @@ class Fetcher:
             text=text,
             title=title,
             from_cache=False,
+        )
+
+    def _record_outcome(
+        self,
+        canonical_url: str,
+        cache_key: str,
+        outcome: str,
+        status_code: int,
+        license_url: str | None,
+    ) -> FetchedDoc:
+        """Cache a non-ok fetch outcome as a content-addressed outcome document
+        (unique raw bytes per URL+outcome) so replays reproduce it exactly."""
+        raw = f"parsec-outcome:{outcome}:{canonical_url}".encode()
+        doc_hash = ids.doc_hash(raw)
+        self.blobs.put(raw)
+        text_blob = self.blobs.put("")
+        meta: dict = {"outcome": outcome}
+        if license_url:
+            meta["license_url"] = license_url
+        self.documents.put_document(
+            doc_hash, canonical_url, None, status_code, len(raw), text_blob, meta
+        )
+        self.documents.cache_put(
+            cache_key,
+            canonical_url,
+            doc_hash,
+            self.mode.value if self.mode != CacheMode.REPLAY else "record",
+        )
+        return FetchedDoc(
+            doc_hash=doc_hash,
+            canonical_url=canonical_url,
+            status_code=status_code,
+            content_type=None,
+            text="",
+            title=None,
+            from_cache=False,
+            outcome=outcome,
+            license_url=license_url,
         )

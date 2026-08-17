@@ -63,3 +63,5 @@ class FetchOutcome(BaseModel):
     span_ids: list[str] = Field(default_factory=list)
     text_chars: int = 0
     from_cache: bool = False
+    outcome: str = "ok"  # ok | blocked_by_robots | licensed
+    license_url: str | None = None

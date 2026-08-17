@@ -15,6 +15,7 @@ from parsec.gateway.gateway import ModelGateway
 from parsec.loop.agent import OrchestratorLoop
 from parsec.models.events import EventType
 from parsec.replay import run_replay
+from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
 from parsec.retrieval.fetcher import Fetcher
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
@@ -24,6 +25,7 @@ from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
+from parsec.tools.search_within import SearchWithinTool
 from tests.conftest import make_config
 
 DOC_TEXT = "I measured it myself: water boils at 99 degrees Celsius on my stove at home."
@@ -61,8 +63,13 @@ def env(db, blobs, event_log, ledger, sessions, clock):
         gateway = ModelGateway(adapter, event_log, blobs, ledger, config)
         dag = DagStore(db, event_log)
         fetcher = Fetcher(documents, blobs, clock, CacheMode.REPLAY)
+        # matches the registry replay/fork rebuild (tool schemas feed prompt hashes)
         registry = ToolRegistry(
-            [FetchTool(fetcher, spans), RecordPremisesTool(dag, spans, documents)]
+            [
+                FetchTool(fetcher, spans),
+                RecordPremisesTool(dag, spans, documents),
+                SearchWithinTool(spans, EmbeddingCache(db, HashedNgramEmbedder())),
+            ]
         )
         ctx = ToolContext(db, blobs, event_log, ledger, config, clock)
         return OrchestratorLoop(

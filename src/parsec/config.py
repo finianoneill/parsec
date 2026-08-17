@@ -49,6 +49,16 @@ class RunConfig(BaseModel):
     data_dir: Path = Path("data")
     search_fixtures: Path | None = None
     search_k_default: int = 5
+    # Live search providers (T11): provider responses are BORROWED data —
+    # cached TTL-bounded per provider policy, unlike the permanent
+    # self-fetch archive. API keys come from env (BRAVE_API_KEY, SERPER_API_KEY).
+    search_provider: Literal["fixture", "searxng", "brave", "serper"] = "fixture"
+    searxng_url: str | None = None
+    provider_cache_ttl_s: int = 7 * 24 * 3600
+    # Politeness 2.0: robots respected by purpose; contact appended to the UA.
+    respect_robots: bool = True
+    robots_ttl_s: int = 24 * 3600
+    contact: str | None = None
     # Pricing table pinned at session start so replay reproduces recorded costs.
     pricing_override: dict[str, dict[str, float]] | None = None
     # Credence model (§2.1, T3). source_tiers merges over the built-in domain

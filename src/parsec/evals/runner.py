@@ -20,6 +20,7 @@ from parsec.evals.scoring import AxisScores, score_session
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop.agent import OrchestratorLoop
+from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
 from parsec.retrieval.fetcher import Fetcher
 from parsec.retrieval.search_provider import FixtureSearchProvider
 from parsec.store.blobs import BlobStore
@@ -35,6 +36,7 @@ from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
+from parsec.tools.search_within import SearchWithinTool
 
 AdapterFactory = Callable[[RunConfig], ModelAdapter]
 
@@ -124,6 +126,7 @@ async def run_case(
         [
             FetchTool(fetcher, spans),
             RecordPremisesTool(dag, spans, documents),
+            SearchWithinTool(spans, EmbeddingCache(conn, HashedNgramEmbedder())),
             SearchBroadTool(FixtureSearchProvider(config.search_fixtures)),
         ]
     )
