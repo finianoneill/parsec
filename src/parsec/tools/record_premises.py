@@ -1,11 +1,19 @@
 """record_premises: the model's only way to get facts into the DAG.
 
 Each premise is validated by the harness (T1): every span ref must have
-been returned by fetch, and numbers/quotes must survive the mechanical
+been returned by fetch, the premise must survive the Claimify-style quality
+lints (M9 — ambiguous or vague premises are rejected with the reason, not
+recorded vaguely), and numbers/quotes must survive the mechanical
 containment check (§6 stage 1) — or the premise is rejected back to the
 model with the reason. Accepted premises become tier-1 Premise nodes with
 `extracts` edges to tier-0 SourceSpan nodes, and their IDs are what the
 writer later cites.
+
+On top of the hard gates, the grounded-NLI tier (M9, T9) checks whether the
+cited spans actually appear to SUPPORT each accepted premise; a
+non-supported verdict is returned to the subagent as an advisory NOTE —
+never a rejection, because NLI error rates are real and exact-match is the
+floor, not this.
 """
 
 from __future__ import annotations
@@ -18,6 +26,8 @@ from parsec.store.documents import DocumentStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext
 from parsec.verify.containment import check_containment
+from parsec.verify.lints import lint_premise
+from parsec.verify.nli import GroundedChecker, make_grounded_checker
 
 
 class RecordPremisesInput(BaseModel):
@@ -31,9 +41,11 @@ class RecordPremisesTool:
     description = (
         "Record atomic factual premises extracted from fetched spans. Each premise: one "
         "subject, one predicate, quantities stated exactly as the span states them (or add "
-        "transform_note explaining a derivation). span_refs must be span IDs returned by fetch. "
-        "Returns premise IDs — your final answer will cite these, so record every fact you "
-        "intend to use. Rejected premises include the reason; fix and re-record them."
+        "transform_note explaining a derivation). A premise must stand alone: name the "
+        "specific entity (never a bare 'it' or 'the study'), and state specifics instead of "
+        "vague terms like 'benefits' or 'significant'. span_refs must be span IDs returned by "
+        "fetch. Returns premise IDs — your final answer will cite these, so record every fact "
+        "you intend to use. Rejected premises include the reason; fix and re-record them."
     )
     input_model = RecordPremisesInput
     max_context_chars = 6000
@@ -42,9 +54,21 @@ class RecordPremisesTool:
         self.dag = dag
         self.spans = spans
         self.documents = documents
+        # Grounded checker selected by the session's frozen config, so replay
+        # reconstructs the identical advisory behavior. Cached per tool.
+        self._nli: GroundedChecker | None = None
+        self._nli_name: str | None = None
+
+    def _checker(self, ctx: ToolContext) -> GroundedChecker | None:
+        name = ctx.config.nli_checker
+        if name != self._nli_name:
+            self._nli = make_grounded_checker(name)
+            self._nli_name = name
+        return self._nli
 
     async def run(self, input: RecordPremisesInput, ctx: ToolContext) -> tuple[dict, str]:
         sid = ctx.config.session_id
+        checker = self._checker(ctx)
         results: list[dict] = []
         lines: list[str] = []
         span_node_ids: dict[str, str] = {}
@@ -64,7 +88,8 @@ class RecordPremisesTool:
                 lines.append(f"REJECTED premise {i}: {error}")
                 continue
 
-            problems = check_containment(
+            problems = lint_premise(draft.text)
+            problems += check_containment(
                 draft.text, [r["text"] for r in span_rows], draft.transform_note
             )
             if problems:
@@ -104,7 +129,22 @@ class RecordPremisesTool:
             )
             for ref in draft.span_refs:
                 self.dag.add_edge(sid, premise_id, span_node_ids[ref], "extracts", edge_payload)
-            results.append({"index": i, "premise_id": premise_id})
+            result: dict = {"index": i, "premise_id": premise_id}
             lines.append(f"[{premise_id}] recorded: {draft.text}")
+
+            if checker is not None:
+                verdict = checker.check(draft.text, [r["text"] for r in span_rows])
+                if verdict.flagged:
+                    result["support"] = {
+                        "verdict": verdict.verdict,
+                        "score": round(verdict.score, 4),
+                        "unsupported_terms": list(verdict.unsupported_terms),
+                        "checker": verdict.checker,
+                    }
+                    lines.append(
+                        f"NOTE [{premise_id}]: {verdict.describe()} — advisory: the cited "
+                        "span may not state this; cite a span that does, or revise the premise"
+                    )
+            results.append(result)
 
         return {"results": results}, "\n".join(lines)

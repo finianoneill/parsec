@@ -1,6 +1,11 @@
 import pytest
 
-from parsec.evals.support import MechanicalSupportChecker, score_claim_support
+from parsec.evals.support import (
+    GroundedSupportChecker,
+    MechanicalSupportChecker,
+    make_support_checker,
+    score_claim_support,
+)
 from parsec.store.dag import DagStore
 
 SPAN_TEXT = (
@@ -37,6 +42,32 @@ def test_low_overlap_partial_and_none():
 
 def test_no_evidence_is_none():
     assert MechanicalSupportChecker().grade("Anything at all.", []) == "none"
+
+
+def test_grounded_checker_keeps_exact_match_floor():
+    checker = GroundedSupportChecker()
+    # number mismatch is a hard fail regardless of prose overlap
+    assert checker.grade("Water boils at 90 degrees Celsius.", [SPAN_TEXT]) == "none"
+
+
+def test_grounded_checker_grades_via_verdicts():
+    checker = GroundedSupportChecker()
+    assert checker.grade("Water boils at 100 degrees Celsius at standard pressure.", [SPAN_TEXT]) == "full"
+    # paraphrased but unsupported: no numbers/quotes for the floor to catch,
+    # the grounded tier grades it none
+    assert checker.grade("Acme's profits doubled.", [SPAN_TEXT]) == "none"
+    # partial content overlap -> partial
+    assert checker.grade(
+        "Water pressure calibrates worldwide shipping lanes.", [SPAN_TEXT]
+    ) == "partial"
+    assert checker.grade("Anything.", []) == "none"
+
+
+def test_make_support_checker():
+    assert isinstance(make_support_checker("mechanical"), MechanicalSupportChecker)
+    assert isinstance(make_support_checker("grounded"), GroundedSupportChecker)
+    with pytest.raises(ValueError):
+        make_support_checker("bogus")
 
 
 @pytest.fixture

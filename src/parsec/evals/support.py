@@ -7,8 +7,9 @@ frozen fetch cache, so support checking is fully reproducible.
 
 `SupportChecker` is the seam: the default `MechanicalSupportChecker` grades
 with exact number/quote containment plus content-word overlap (no model,
-deterministic). M9 slots a grounded-NLI model (HHEM/FactCG class) into the
-same protocol.
+deterministic). `GroundedSupportChecker` (M9) keeps the exact-match floor
+and grades the prose with the grounded-NLI tier from `parsec.verify.nli` —
+select it with `parsec eval run --support-checker grounded`.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from parsec.verify.containment import extract_numbers, extract_quotes
+from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
 
 Grade = Literal["full", "partial", "none"]
 
@@ -49,17 +51,11 @@ class MechanicalSupportChecker:
     def grade(self, claim_text: str, evidence_texts: list[str]) -> Grade:
         if not evidence_texts:
             return "none"
-        evidence_blob = " ".join(evidence_texts)
-        evidence_numbers = set(extract_numbers(evidence_blob))
-        for num in extract_numbers(claim_text):
-            if num not in evidence_numbers:
-                return "none"
-        normalized_evidence = " ".join(evidence_blob.split())
-        for quote in extract_quotes(claim_text):
-            if quote not in normalized_evidence:
-                return "none"
+        if _hard_mismatch(claim_text, evidence_texts):
+            return "none"
 
         claim_words = _content_words(claim_text)
+        evidence_blob = " ".join(evidence_texts)
         if not claim_words:
             return "partial"
         evidence_words = _content_words(evidence_blob)
@@ -69,6 +65,50 @@ class MechanicalSupportChecker:
         if overlap >= OVERLAP_PARTIAL:
             return "partial"
         return "none"
+
+
+def _hard_mismatch(claim_text: str, evidence_texts: list[str]) -> bool:
+    """The exact-match floor (§10.2: never let NLI override it): a number or
+    quote in the claim that appears in NO evidence text is a hard fail."""
+    evidence_blob = " ".join(evidence_texts)
+    evidence_numbers = set(extract_numbers(evidence_blob))
+    for num in extract_numbers(claim_text):
+        if num not in evidence_numbers:
+            return True
+    normalized_evidence = " ".join(evidence_blob.split())
+    return any(quote not in normalized_evidence for quote in extract_quotes(claim_text))
+
+
+class GroundedSupportChecker:
+    """M9: the grounded-NLI tier behind the M8 seam. Exact-match floor first
+    (numbers/quotes must appear, non-negotiable), then the grounded checker's
+    verdict grades the prose: supported -> full, uncertain -> partial,
+    unsupported/contradicted -> none."""
+
+    def __init__(self, checker: GroundedChecker | None = None):
+        self.checker = checker or LexicalGroundedChecker()
+        self.name = f"grounded-{self.checker.name}"
+
+    def grade(self, claim_text: str, evidence_texts: list[str]) -> Grade:
+        if not evidence_texts:
+            return "none"
+        if _hard_mismatch(claim_text, evidence_texts):
+            return "none"
+        verdict = self.checker.check(claim_text, evidence_texts)
+        if verdict.verdict == "supported":
+            return "full"
+        if verdict.verdict == "uncertain":
+            return "partial"
+        return "none"
+
+
+def make_support_checker(name: str) -> SupportChecker:
+    """CLI seam for `parsec eval run --support-checker`."""
+    if name == "mechanical":
+        return MechanicalSupportChecker()
+    if name == "grounded":
+        return GroundedSupportChecker()
+    raise ValueError(f"unknown support checker {name!r}; expected mechanical | grounded")
 
 
 def _content_words(text: str) -> set[str]:

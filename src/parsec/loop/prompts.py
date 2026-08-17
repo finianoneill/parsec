@@ -34,6 +34,8 @@ Workflow:
 
 Rules:
 - Numbers and quoted phrases in a premise must appear exactly in a cited span, or carry a transform_note explaining the derivation.
+- A premise must stand alone: name the specific entity (never a bare "it", "they", or "the study"), state one statement per premise, and give specifics instead of vague terms like "benefits" or "significant" — vague or ambiguous premises are rejected.
+- Temporal ordering findings ("X before/after Y") must cite exactly two premises, in the order the events are mentioned, and the dates must appear in the premises or their spans.
 - Record premises for conflicting evidence too; report conflicts upward, never resolve them silently.
 - If you cannot find usable sources, submit_report with status "blocked" and your dead_ends. Do not fabricate.
 - Work only on your assigned subquestion."""

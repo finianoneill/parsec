@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="199 tests" src="https://img.shields.io/badge/tests-199%20passing-16a34a?style=flat-square">
+  <img alt="241 tests" src="https://img.shields.io/badge/tests-241%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -49,7 +49,7 @@ flowchart LR
 1. **Decompose.** The orchestrator splits the query into subquestions, each tracked in a coverage ledger (`open / answered / partial / blocked / dropped` — blocked requires an explicit reason, and the writer refuses to run while anything is still open).
 2. **Research in isolation.** Each subquestion gets a subagent with retrieval tools only — subagents are the *only* consumers of raw documents, and they cannot spawn subagents (the recursion ban is structural, not a prompt). Facts enter the system through one door: a `record_premises` tool that rejects any premise whose numbers or quotes don't match the cited span exactly.
 3. **Write behind a firewall.** The writer sees the query, the recorded premises/findings with computed confidence tiers, and the coverage gaps — never a raw document, never the research transcript. Every factual sentence must cite premise/finding IDs.
-4. **Verify mechanically.** Structural checks (every claim reaches an intact span), exact number/quote containment, credence propagation, and bottom-up omission detection — what did the report *fail* to say? — all run without a model. A claim below the stakes threshold becomes a search gradient: the harness localizes the weakest premise and dispatches one targeted gap-fill subagent.
+4. **Verify mechanically.** Structural checks (every claim reaches an intact span), exact number/quote containment, temporal-ordering checks against evidence dates, grounded-NLI support advisories (does the span actually *say* that?), credence propagation, and bottom-up omission detection — what did the report *fail* to say? — all run without a remote model. A claim below the stakes threshold becomes a search gradient: the harness localizes the weakest premise and dispatches one targeted gap-fill subagent.
 5. **Report honestly.** The answer ships with a harness-built appendix: per-claim confidence tiers, sources consulted but unused, premises recorded but uncited.
 
 ## Install
@@ -103,7 +103,7 @@ While a run is live, type on stdin to **steer** it — your message is injected 
 |---|---|
 | `parsec ask "…"` | Run a research query (`--live` for the progress view, `--max-usd`/`--max-tokens`/`--max-turns`/`--max-gap-rounds` for budgets, `--cache-mode record\|replay\|live-prefer-cache`) |
 | `parsec replay <session>` | Re-execute against the frozen corpus; verifies projections and answer bytes are identical |
-| `parsec verify <session>` | Stage-1 structural verification + credence + omission report over the stored evidence graph |
+| `parsec verify <session>` | Mechanical verification (structural, temporal ordering, grounded-NLI advisories) + credence + omission report over the stored evidence graph |
 | `parsec fork <session> --at-call N` | Rewind to model-call N and branch live (`--steer "…"` to redirect the branch) |
 | `parsec judge <session>` | Advisory judge pass (different model family) over `deduces`/`induces` derivations |
 | `parsec eval make-case <session>` | Snapshot a recorded session into a frozen eval case |
@@ -182,7 +182,7 @@ All seven milestones of the [architecture brief](RESEARCH_HARNESS_ARCHITECTURE.m
 ## Development
 
 ```sh
-uv run pytest                                        # 199 tests, no network/keys
+uv run pytest                                        # 241 tests, no network/keys
 uv run pytest -m live tests/integration/test_live_smoke.py   # one real query + replay (needs ANTHROPIC_API_KEY)
 ```
 
@@ -194,7 +194,7 @@ The research-backed v2 plan lives in [RESEARCH_HARNESS_V2_PLAN.md](RESEARCH_HARN
 
 - [x] **M7 — Live retrieval**: SearXNG/Brave/Serper adapters behind the extended provider protocol with TTL-bounded provider caches (T11: provider responses are borrowed data, the self-fetch archive is permanent); trafilatura main-content extraction with markdown output and stdlib fallback; `search_within` hybrid search over the fetched corpus (SQLite FTS5 BM25 + cached deterministic embeddings + reciprocal-rank fusion); politeness 2.0 — robots.txt respected per agent group, HTTP 402 and RSL `License:` terms surfaced as typed cached fetch outcomes (never circumvented), identity-honest UA with contact info. *Exit test green: a live-provider query end-to-end, replayed byte-identically with zero live calls; blocked and licensed URLs surface as typed outcomes that also replay.*
 - [x] **M8 — Evals 2.0**: gold is now weighted binary nugget rubrics (vital/okay) with **contradiction patterns** — a report asserting the opposite of the gold scores worse than silence; cases carry verified `gold_docs` and planted `distractor_docs` (hard negatives); a new **claim-support axis** grades every claim against the verbatim spans behind it from the frozen cache (deterministic mechanical checker behind a `SupportChecker` seam — the grounded-NLI implementation slots in at M9); **trajectory metrics** (gold-fetch fraction, distractor fraction, redundant searches, repeated calls, tokens/$) ride along in results; and the regression runner does **paired-difference statistics** — per-axis three-state verdicts (improved/regressed/inconclusive) from mean paired deltas with 95% CIs, epsilon fallback for single cases, `--runs N` per-case means. *Exit test green: a lucky retriever that fetched only the planted distractor keeps perfect claim support (its bad source does say 90°) but is caught by the nugget contradiction check and zero gold-fetch fraction; compare flags exactly `nugget_recall` as regressed with n=2 and a correct CI; comparing a run against itself reads all-inconclusive.*
-- [ ] **M9 — Verification depth**: grounded-NLI claim support, ambiguity-refusal lints, mechanical temporal validator.
+- [x] **M9 — Verification depth**: **grounded-NLI premise support** behind a two-tier local seam — a deterministic lexical checker always on (advisory NOTE back to the subagent at `record_premises` time, recorded stage-2 advisories in `parsec verify`) with span-level unsupported-term flags, plus HHEM-2.1-Open as opt-in escalation (`parsec[nli]` extra, `--nli-checker hhem`); per T9 the NLI tier is advisory and never sole-gates — exact-match containment stays the floor. **Claimify-style ambiguity-refusal lints**: a premise with a bare pronoun subject, an unnamed "the study"-class referent, vague degree words with no quantity or quote, or multiple sentences is *rejected at record time with the reason*, not recorded vaguely. **Mechanical temporal validator**: time expressions on premises (or their spans) become date intervals, and ordering findings on `temporal` edges are checked by conservative interval constraints — a definite contradiction is a real violation that condemns dependent claims, an undecidable finding is surfaced as an advisory, never guessed. **Dual-perspective gap-fill**: the targeted subagent now hunts the weak claim AND its negation, so conflicts feed `contradicts` edges instead of surfacing by accident. The eval claim-support axis can grade with the grounded tier (`eval run --support-checker grounded`) over the unchanged exact-match floor. *Exit test green: a paraphrased-but-unsupported premise that passes exact-match containment is caught by the NLI tier at record time and in verification; an ordering claim contradicted by evidence timestamps is mechanically flagged along with the claim resting on it; "The study showed benefits." is refused at record time with the reason.*
 - [ ] **M10 — Credence 2.0 + calibration**: syndication-aware corroboration, conflict-aware aggregation, learned source reliability, `parsec calibrate`.
 - [ ] **M11 — Deterministic parallelism**: per-subagent event streams with recorded join order.
 - [ ] **M12 — Orchestration polish**: research-brief gate, DAG-slice context reconstruction, effort-scaled dispatch.

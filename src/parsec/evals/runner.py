@@ -17,6 +17,7 @@ from parsec.config import Budgets, CacheMode, Clock, RunConfig
 from parsec.evals.case import FIXTURES_FILE, EvalCase, copy_corpus, load_case
 from parsec.evals.judge import judge_synthesis
 from parsec.evals.scoring import AxisScores, score_session
+from parsec.evals.support import SupportChecker
 from parsec.evals.trajectory import TrajectoryMetrics, compute_trajectory
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.gateway import ModelGateway
@@ -101,6 +102,7 @@ async def run_case(
     judge_adapter: ModelAdapter | None = None,
     judge_model: str = "",
     runs: int = 1,
+    support_checker: SupportChecker | None = None,
 ) -> CaseResult:
     """Run a case `runs` times (fresh corpus fork each); scores are per-run
     means — with frozen corpora the only residual variance is agent sampling."""
@@ -110,7 +112,7 @@ async def run_case(
         run_workdir = workdir / case.case_id / f"run-{r + 1}"
         result = await _run_once(
             case, case_dir, run_workdir, adapter_factory, clock, model,
-            judge_adapter, judge_model, run_index=r,
+            judge_adapter, judge_model, run_index=r, support_checker=support_checker,
         )
         results.append(result)
         if result.error is not None:
@@ -151,6 +153,7 @@ async def _run_once(
     judge_adapter: ModelAdapter | None,
     judge_model: str,
     run_index: int,
+    support_checker: SupportChecker | None = None,
 ) -> CaseResult:
     from parsec.db.connection import open_db
 
@@ -205,7 +208,8 @@ async def _run_once(
     if judge_adapter is not None and result.answer:
         synthesis = await judge_synthesis(judge_adapter, judge_model, case.query, result.answer)
     scores = score_session(
-        conn, blobs, session_id, case.must_find, synthesis, nuggets=case.nuggets
+        conn, blobs, session_id, case.must_find, synthesis,
+        nuggets=case.nuggets, support_checker=support_checker,
     )
     trajectory = compute_trajectory(
         conn, event_log, ledger, session_id, case.gold_docs, case.distractor_docs
@@ -226,13 +230,14 @@ async def run_cases(
     judge_adapter: ModelAdapter | None = None,
     judge_model: str = "",
     runs: int = 1,
+    support_checker: SupportChecker | None = None,
 ) -> EvalRun:
     run = EvalRun(label=label)
     for case_dir in case_dirs:
         run.results.append(
             await run_case(
                 case_dir, workdir, adapter_factory, clock, model,
-                judge_adapter, judge_model, runs=runs,
+                judge_adapter, judge_model, runs=runs, support_checker=support_checker,
             )
         )
     return run

@@ -69,6 +69,10 @@ class RunConfig(BaseModel):
     source_tiers: dict[str, float] | None = None
     stakes_threshold: float = 0.7
     volatile_penalty: float = 0.85
+    # Grounded-NLI premise support tier (M9, T9): "lexical" is the always-on
+    # deterministic checker, "hhem" escalates to HHEM-2.1-Open (needs the
+    # `nli` extra), "none" disables. Advisory only — it never gates.
+    nli_checker: Literal["lexical", "hhem", "none"] = "lexical"
     # Compaction ladder (§7), applied to subagent contexts. Decisions are a
     # pure function of the transcript (char counts), so compaction replays
     # deterministically. Rung 1 evicts old tool results down to markers;
