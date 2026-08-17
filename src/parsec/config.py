@@ -33,6 +33,7 @@ class Budgets(BaseModel):
     max_turns: int = 12          # global model-call cap (orchestrator + subagents + writer)
     max_turns_per_subagent: int = 6
     max_subquestions: int = 4
+    max_gap_rounds: int = 1      # §3 gap-filling: bounded rewrite rounds targeting weak evidence
 
 
 class RunConfig(BaseModel):
@@ -58,6 +59,13 @@ class RunConfig(BaseModel):
     source_tiers: dict[str, float] | None = None
     stakes_threshold: float = 0.7
     volatile_penalty: float = 0.85
+    # Compaction ladder (§7), applied to subagent contexts. Decisions are a
+    # pure function of the transcript (char counts), so compaction replays
+    # deterministically. Rung 1 evicts old tool results down to markers;
+    # rung 3 resets the context seeded from recorded evidence. Rung 2
+    # (model-written squeeze) is deferred — it would spend model calls.
+    max_context_chars: int = 60_000
+    evict_keep_last: int = 2
 
     def to_json_dict(self) -> dict:
         return self.model_dump(mode="json")

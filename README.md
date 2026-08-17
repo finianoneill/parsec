@@ -16,9 +16,9 @@ Build plan milestones (architecture doc §11). v1 definition of done is M0–M5.
 - [x] **M5 — Eval harness**: eval cases are self-contained frozen worlds — a recorded corpus (SQLite + blobs, forked by file copy per run), search fixtures, the query, and a gold `must_find` list — executed in replay cache mode so any fetch outside the corpus fails loudly. Three scoring axes ordered by trustworthiness: citation faithfulness (mechanical — fraction of claims untouched by structural-verification violations), coverage vs. gold (mechanical — substring/regex over claim texts), and synthesis via judge (a *different model family* — the reserved OpenAI adapter slot is now real, judge-only; scores are advisory, never gates, and degrade to null on any failure). `parsec eval run` scores a cases directory and writes a results file; `parsec eval compare` diffs two results files with an epsilon and exits nonzero on regression — run it across two git revisions on identical corpora and any harness change becomes measurable (T4's payoff). `parsec eval make-case` snapshots a recorded session into a new case. *Exit test green: a frozen case scores (1.0 citation, 2/3 coverage with the planted miss reported, 0.75 judge) with zero HTTP; a degraded writer on the identical corpus drops coverage and the regression runner catches exactly that axis.*
 
 **v1 definition of done (M0–M5) reached.**
-- [ ] **M6 — Polish** (post-v1): compaction ladder, steering, fork/rewind UX, judge pass, gap-fill loop, TUI.
+- [x] **M6 — Polish** (post-v1): the **compaction ladder** (§7) for subagent contexts — rung 1 evicts old tool results down to markers (evidence stays addressable in the store), rung 3 is a controlled restart seeded with the recorded premises; every decision is a pure function of transcript char counts, so compaction replays byte-identically (rung 2's model-written squeeze stays deferred). **Steering**: lines typed on stdin mid-run (or `loop.steer()`) are injected into the next model call without tearing down the turn, recorded with their turn index, and re-injected on replay — steered sessions still replay byte-identically. **Fork/rewind**: `parsec fork <session> --at-call N [--steer …]` replays the head with prompt-hash assertion (the branch provably rejoins history) then continues live from call N. **Gap-fill loop** (§3): a claim below the stakes threshold becomes a search gradient — the harness localizes the weakest supporting premise, dispatches exactly one targeted subagent (`sq-gap-N` in the coverage ledger), and rewrites; bounded by `max_gap_rounds` (superseded claims are deleted; their events remain as audit trail). **Judge pass** (§6 stage 5): `parsec judge <session>` has a different model family score `deduces`/`induces` derivations seeing only the local premise set; scores are stored as advisory edge weights and gate nothing. **TUI-lite**: `parsec ask --live` renders a live state/coverage/DAG/spend view. *Exit tests green: gap round targets the weak premise verbatim and supersedes claims; steered sessions replay byte-identically; forks rejoin history exactly then diverge; compaction reset carries recorded evidence forward.*
 
-Test suite: 142 tests, no network or API keys required, plus an opt-in live smoke test. "Byte-identical replay" is defined as byte-equality of a canonical projection of the event stream (timestamps and wall-clock ledger rows stripped; token/USD debits kept) plus the final answer blob.
+Test suite: 157 tests, no network or API keys required, plus an opt-in live smoke test. "Byte-identical replay" is defined as byte-equality of a canonical projection of the event stream (timestamps and wall-clock ledger rows stripped; token/USD debits kept) plus the final answer blob.
 
 ## Setup
 
@@ -45,6 +45,15 @@ uv run parsec replay <session-id>
 # Re-verify a session's evidence DAG against the stored corpus (stage-1
 # structural checks — catches corpus corruption after the fact):
 uv run parsec verify <session-id>
+
+# Rewind a recorded session to model-call N and branch live from there
+# (optionally steering the branch); typing on stdin during `ask` steers
+# the run without tearing down the turn:
+uv run parsec fork <session-id> --at-call 4 --steer "focus on primary sources"
+
+# Advisory judge pass (different model family) over deduces/induces
+# derivations — scores stored on edges, gates nothing:
+uv run parsec judge <session-id>
 
 # Read a session's notebook (append-only markdown: plan, per-subquestion
 # status, premise/finding IDs, dead ends):

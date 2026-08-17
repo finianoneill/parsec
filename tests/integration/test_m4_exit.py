@@ -155,6 +155,7 @@ def test_m4_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
             "--cache-mode", "record",
             "--data-dir", str(data_dir),
             "--search-fixtures", str(fixtures_path),
+            "--max-gap-rounds", "0",
             "--json",
         ]
     )
@@ -232,6 +233,7 @@ def test_source_tier_override_raises_confidence(tmp_path, transport, fixtures_pa
             "--cache-mode", "record",
             "--data-dir", str(data_dir),
             "--search-fixtures", str(fixtures_path),
+            "--max-gap-rounds", "0",
             "--json",
         ]
     )

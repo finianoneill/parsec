@@ -104,7 +104,7 @@ async def run_case(
         model=model,
         cache_mode=CacheMode.REPLAY,
         adapter="anthropic",  # informational; the factory decides
-        budgets=Budgets(max_turns=case.max_turns),
+        budgets=Budgets(max_turns=case.max_turns, max_gap_rounds=case.max_gap_rounds),
         data_dir=data_dir,
         search_fixtures=case_dir / FIXTURES_FILE,
     )
