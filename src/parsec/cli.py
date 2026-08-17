@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Synthesis judge (axis 3, advisory). openai needs OPENAI_API_KEY.",
     )
     ev_run.add_argument("--judge-model", default=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"))
+    ev_run.add_argument(
+        "--runs", type=int, default=1,
+        help="Runs per case (scores are means; frozen corpora leave only agent sampling variance)",
+    )
     ev_cmp = ev_sub.add_parser("compare", help="Compare two results files for regressions")
     ev_cmp.add_argument("results_a", type=Path)
     ev_cmp.add_argument("results_b", type=Path)
@@ -525,17 +529,24 @@ def _eval_run(args) -> int:
             run_cases(
                 case_dirs, Path(workdir), factory, clock, args.model,
                 label=args.label, judge_adapter=judge_adapter, judge_model=args.judge_model,
+                runs=args.runs,
             )
         )
     payload = run.to_payload()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    table = Table("case", "status", "citation", "coverage", "synthesis", "turns")
+    table = Table("case", "status", "citation", "coverage", "nuggets", "support", "synthesis", "gold%", "turns")
     for r in run.results:
         s = r.scores
         fmt = lambda v: "—" if v is None else f"{v:.2f}"  # noqa: E731
-        table.add_row(r.case_id, r.status, fmt(s.citation_faithfulness), fmt(s.coverage), fmt(s.synthesis), str(r.turns))
+        gold = fmt(r.trajectory.gold_fetch_fraction) if r.trajectory else "—"
+        table.add_row(
+            r.case_id, r.status, fmt(s.citation_faithfulness), fmt(s.coverage),
+            fmt(s.nugget_recall), fmt(s.claim_support), fmt(s.synthesis), gold, str(r.turns),
+        )
+        if s.nugget_contradictions:
+            console.print(f"[red]{r.case_id}: report contradicts gold: {s.nugget_contradictions}[/red]")
     console.print(table)
     console.print(f"aggregate: {payload['aggregate']}  →  {args.out}")
     return EXIT_OK if all(r.error is None for r in run.results) else EXIT_ERROR
@@ -550,21 +561,31 @@ def _eval_compare(args) -> int:
     if args.as_json:
         print(json.dumps(comparison.to_payload()))
     else:
-        table = Table("case", "axis", "before", "after", "delta", "regressed")
+        table = Table("case", "axis", "before", "after", "delta", "flag")
         for d in comparison.deltas:
             fmt = lambda v: "—" if v is None else f"{v:.2f}"  # noqa: E731
             table.add_row(
                 d.case_id, d.axis, fmt(d.before), fmt(d.after),
                 "—" if d.delta is None else f"{d.delta:+.2f}",
-                "[red]YES[/red]" if d.regressed else "no",
+                "[red]drop[/red]" if d.regressed else "",
             )
         console.print(table)
+        verdicts = Table("axis", "verdict", "n", "mean Δ", "±CI95")
+        for v in comparison.verdicts:
+            color = {"regressed": "red", "improved": "green"}.get(v.verdict, "yellow")
+            verdicts.add_row(
+                v.axis, f"[{color}]{v.verdict}[/{color}]", str(v.n_cases),
+                "—" if v.mean_delta is None else f"{v.mean_delta:+.3f}",
+                "—" if v.ci95 is None else f"{v.ci95:.3f}",
+            )
+        console.print(verdicts)
         if comparison.only_in_a or comparison.only_in_b:
             console.print(f"only in A: {comparison.only_in_a}  only in B: {comparison.only_in_b}")
         if comparison.ok:
-            console.print("[green]no regressions[/green]")
+            console.print("[green]no significant regressions[/green]")
         else:
-            console.print(f"[red]{len(comparison.regressions)} regressions (epsilon={args.epsilon})[/red]")
+            axes = ", ".join(v.axis for v in comparison.regressed_axes)
+            console.print(f"[red]significant regression on: {axes} (epsilon={args.epsilon})[/red]")
     return EXIT_OK if comparison.ok else EXIT_PARTIAL
 
 
