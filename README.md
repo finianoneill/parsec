@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="180 tests" src="https://img.shields.io/badge/tests-180%20passing-16a34a?style=flat-square">
+  <img alt="199 tests" src="https://img.shields.io/badge/tests-199%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -182,7 +182,7 @@ All seven milestones of the [architecture brief](RESEARCH_HARNESS_ARCHITECTURE.m
 ## Development
 
 ```sh
-uv run pytest                                        # 180 tests, no network/keys
+uv run pytest                                        # 199 tests, no network/keys
 uv run pytest -m live tests/integration/test_live_smoke.py   # one real query + replay (needs ANTHROPIC_API_KEY)
 ```
 
@@ -193,7 +193,7 @@ Changes should keep the whole suite green and — for anything touching the loop
 The research-backed v2 plan lives in [RESEARCH_HARNESS_V2_PLAN.md](RESEARCH_HARNESS_V2_PLAN.md) (milestones M7–M12; M7–M10 is the v2 definition of done):
 
 - [x] **M7 — Live retrieval**: SearXNG/Brave/Serper adapters behind the extended provider protocol with TTL-bounded provider caches (T11: provider responses are borrowed data, the self-fetch archive is permanent); trafilatura main-content extraction with markdown output and stdlib fallback; `search_within` hybrid search over the fetched corpus (SQLite FTS5 BM25 + cached deterministic embeddings + reciprocal-rank fusion); politeness 2.0 — robots.txt respected per agent group, HTTP 402 and RSL `License:` terms surfaced as typed cached fetch outcomes (never circumvented), identity-honest UA with contact info. *Exit test green: a live-provider query end-to-end, replayed byte-identically with zero live calls; blocked and licensed URLs surface as typed outcomes that also replay.*
-- [ ] **M8 — Evals 2.0**: nugget rubrics, hard negatives, claim-support axis vs. the frozen cache, paired-difference regression statistics.
+- [x] **M8 — Evals 2.0**: gold is now weighted binary nugget rubrics (vital/okay) with **contradiction patterns** — a report asserting the opposite of the gold scores worse than silence; cases carry verified `gold_docs` and planted `distractor_docs` (hard negatives); a new **claim-support axis** grades every claim against the verbatim spans behind it from the frozen cache (deterministic mechanical checker behind a `SupportChecker` seam — the grounded-NLI implementation slots in at M9); **trajectory metrics** (gold-fetch fraction, distractor fraction, redundant searches, repeated calls, tokens/$) ride along in results; and the regression runner does **paired-difference statistics** — per-axis three-state verdicts (improved/regressed/inconclusive) from mean paired deltas with 95% CIs, epsilon fallback for single cases, `--runs N` per-case means. *Exit test green: a lucky retriever that fetched only the planted distractor keeps perfect claim support (its bad source does say 90°) but is caught by the nugget contradiction check and zero gold-fetch fraction; compare flags exactly `nugget_recall` as regressed with n=2 and a correct CI; comparing a run against itself reads all-inconclusive.*
 - [ ] **M9 — Verification depth**: grounded-NLI claim support, ambiguity-refusal lints, mechanical temporal validator.
 - [ ] **M10 — Credence 2.0 + calibration**: syndication-aware corroboration, conflict-aware aggregation, learned source reliability, `parsec calibrate`.
 - [ ] **M11 — Deterministic parallelism**: per-subagent event streams with recorded join order.

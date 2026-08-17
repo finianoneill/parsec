@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,12 +32,34 @@ FIXTURES_FILE = "queries.json"
 DATA_DIR = "data"
 
 
+class Nugget(BaseModel):
+    """One binary gold rubric item (TREC-style nugget). `patterns` is the
+    mechanical matcher tier: substrings or "re:" regexes matched against the
+    run's claim texts. `contradiction_patterns` catch a report asserting the
+    OPPOSITE of the gold key point (matched claims count as contradicted,
+    which is worse than missing)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)  # the key point, human-legible
+    weight: Literal["vital", "okay"] = "vital"
+    patterns: list[str] = Field(min_length=1)
+    contradiction_patterns: list[str] = Field(default_factory=list)
+
+
 class EvalCase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     case_id: str = Field(min_length=1)
     query: str = Field(min_length=1)
+    # Strict legacy tier (kept): plain substring/"re:" matchers.
     must_find: list[str] = Field(default_factory=list)
+    # Nugget tier: weighted binary rubric items with contradiction checks.
+    nuggets: list[Nugget] = Field(default_factory=list)
+    # Hard-negative bookkeeping: URLs verified to support the gold answer vs.
+    # deliberately-planted distractors. Drives trajectory metrics.
+    gold_docs: list[str] = Field(default_factory=list)
+    distractor_docs: list[str] = Field(default_factory=list)
     max_turns: int = 20
     # Gap-fill rounds during eval runs; default 0 so a case's expected call
     # sequence stays fixed. Raise per case to eval the gap-fill loop itself.
