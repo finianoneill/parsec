@@ -11,6 +11,7 @@ import re
 from parsec.canonical import hash_obj, sha256_hex
 
 SPAN_ID_RE = re.compile(r"doc:(?P<hash12>[0-9a-f]{12})#(?P<start>\d+)-(?P<end>\d+)")
+PREMISE_REF_RE = re.compile(r"premise:[0-9a-f]{16}")
 
 
 def doc_hash(raw: bytes) -> str:

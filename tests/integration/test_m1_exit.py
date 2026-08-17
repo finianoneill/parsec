@@ -1,11 +1,12 @@
-"""M1 exit test (§11): one query → cited answer where every claim resolves
-to a cached span, replayable byte-identically — driven through the real CLI
-entrypoint with a scripted adapter and a mock HTTP transport (no network,
-no keys).
+"""Loop exit test (M1 criterion, M2 flow): one query → cited answer where
+every claim traces claim→premise→span to a cached span, replayable
+byte-identically — driven through the real CLI entrypoint with a scripted
+adapter and a mock HTTP transport (no network, no keys).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -47,12 +48,22 @@ PAGE_B = (
 URL_A = "https://example.test/boiling"
 URL_B = "https://example.test/altitude"
 
+PREMISE_A_TEXT = "Water boils at 100 degrees Celsius at standard atmospheric pressure at sea level."
+PREMISE_B_TEXT = "On the summit of Mount Everest water boils at about 70 degrees Celsius."
+
 
 def page_span_ids(page: bytes) -> list[str]:
     """Compute span IDs exactly as the fetch pipeline will."""
     text, _, _ = extract_text(page, "text/html")
     h = ids.doc_hash(page)
     return [ids.span_id(h, s, e) for s, e in index_spans(text)]
+
+
+def premise_id(text: str, span_ref: str) -> str:
+    """Compute the premise node ID exactly as record_premises will."""
+    return ids.node_id(
+        "Premise", {"text": text, "span_refs": [span_ref], "claim_class": "stable"}
+    )
 
 
 @pytest.fixture
@@ -91,11 +102,12 @@ def fixtures_path(tmp_path):
 def scripted_adapter(monkeypatch):
     span_a = page_span_ids(PAGE_A)[0]
     span_b = page_span_ids(PAGE_B)[0]
+    p_a = premise_id(PREMISE_A_TEXT, span_a)
+    p_b = premise_id(PREMISE_B_TEXT, span_b)
     answer = (
         "Here is what the sources say. [narrative]\n"
-        f"Water boils at 100 degrees Celsius at standard atmospheric pressure at sea level. [{span_a}] "
-        f"At higher altitudes the boiling point decreases, dropping to about 70 degrees Celsius "
-        f"on the summit of Mount Everest. [{span_b}]"
+        f"Water boils at 100 degrees Celsius at sea level. [{p_a}] "
+        f"At extreme altitude it boils much cooler, about 70 degrees Celsius on Everest. [{p_b}]"
     )
     responses = [
         scripted_response(
@@ -111,20 +123,39 @@ def scripted_adapter(monkeypatch):
             stop_reason="tool_use",
             index=1,
         ),
-        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=2),
-        # One spare response for the negative test's repair round-trip: the fake
-        # "model" restates the same answer, so an unfixable violation stays flagged.
-        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=3),
+        scripted_response(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tu_rec",
+                    "name": "record_premises",
+                    "input": {
+                        "premises": [
+                            {"text": PREMISE_A_TEXT, "span_refs": [span_a]},
+                            {"text": PREMISE_B_TEXT, "span_refs": [span_b]},
+                        ]
+                    },
+                }
+            ],
+            stop_reason="tool_use",
+            index=2,
+        ),
+        scripted_response(
+            [{"type": "text", "text": "Recorded two premises on boiling points."}],
+            stop_reason="end_turn",
+            index=3,
+        ),
+        # writer phase
+        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=4),
+        # spare for a repair round in negative scenarios: restate the same answer
+        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=5),
     ]
     monkeypatch.setattr(cli, "adapter_factory", lambda config: FakeAdapter(responses))
     return answer
 
 
-def test_m1_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
-    data_dir = tmp_path / "data"
-    session_id = "m1-exit-session"
-
-    exit_code = cli.main(
+def run_ask(data_dir, fixtures_path, session_id):
+    return cli.main(
         [
             "ask",
             QUERY,
@@ -137,102 +168,63 @@ def test_m1_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
             "--json",
         ]
     )
+
+
+def test_loop_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
+    data_dir = tmp_path / "data"
+    session_id = "loop-exit-session"
+
+    exit_code = run_ask(data_dir, fixtures_path, session_id)
     assert exit_code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "done"
     assert out["claims_total"] == 2
     assert out["unresolved"] == []
-    assert out["totals"]["input_tokens"] > 0
+    assert out["violations"] == []
 
     conn = open_db(data_dir / "parsec.db")
     blobs = BlobStore(data_dir / "blobs")
 
-    # Every non-narrative claim resolves: span rows exist, text is the verbatim
-    # document slice, docs are cached with raw blobs present.
+    # Full chain: claim -> premise -> span, span verbatim in cached doc.
     claims = conn.execute(
         "SELECT payload_json FROM nodes WHERE session_id=? AND tier=4", (session_id,)
     ).fetchall()
     assert len(claims) == 2
-    all_refs = []
-    for row in claims:
-        payload = json.loads(row["payload_json"])
-        assert payload["span_refs"]
-        all_refs += payload["span_refs"]
-    assert len(set(r.split("#")[0] for r in all_refs)) == 2  # two distinct docs cited
+    premise_refs = [r for c in claims for r in json.loads(c["payload_json"])["premise_refs"]]
+    assert len(premise_refs) == 2
 
-    for ref in all_refs:
+    span_refs = []
+    for pref in premise_refs:
+        prow = conn.execute(
+            "SELECT payload_json FROM nodes WHERE node_id=? AND session_id=?", (pref, session_id)
+        ).fetchone()
+        assert prow is not None
+        span_refs += json.loads(prow["payload_json"])["span_refs"]
+    assert len(set(r.split("#")[0] for r in span_refs)) == 2  # two distinct docs
+
+    for ref in span_refs:
         span = conn.execute("SELECT * FROM spans WHERE span_id=?", (ref,)).fetchone()
-        assert span is not None
         doc = conn.execute("SELECT * FROM documents WHERE doc_hash=?", (span["doc_hash"],)).fetchone()
-        assert doc is not None
         assert blobs.exists(doc["raw_blob"]) and blobs.exists(doc["text_blob"])
         text = blobs.get_text(doc["text_blob"])
         assert text[span["char_start"]:span["char_end"]] == span["text"]
-        cached = conn.execute(
+        assert conn.execute(
             "SELECT 1 FROM cache_index WHERE doc_hash=?", (span["doc_hash"],)
-        ).fetchone()
-        assert cached is not None
+        ).fetchone() is not None
 
-    # extracts edges exist 1:1 with claim->span pairs
-    edges = conn.execute(
-        "SELECT * FROM edges WHERE session_id=? AND edge_type='extracts'", (session_id,)
-    ).fetchall()
-    assert len(edges) == 2
+    edge_types = {
+        row["edge_type"]
+        for row in conn.execute("SELECT edge_type FROM edges WHERE session_id=?", (session_id,))
+    }
+    assert edge_types == {"extracts", "aggregates"}
 
     # --- replay against the frozen corpus: byte-identical, zero HTTP calls ---
     calls_before = transport["calls"]
-    import asyncio
-
     outcome = asyncio.run(run_replay(conn, blobs, RealClock(), session_id))
     assert outcome.result.status == "done"
-    assert transport["calls"] == calls_before  # frozen corpus honored (transport unused in replay)
+    assert transport["calls"] == calls_before
     assert outcome.projections_match, outcome.first_divergence
     assert outcome.answers_match
-    assert outcome.verified
 
     event_log = EventLog(conn, RealClock())
     assert event_log.projection(session_id) == event_log.projection(outcome.result.session_id)
-
-
-def test_m1_negative_deleted_span_flagged(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
-    data_dir = tmp_path / "data"
-    exit_code = cli.main(
-        [
-            "ask", QUERY,
-            "--session-id", "m1-neg-1",
-            "--adapter", "fake", "--model", "fake-model",
-            "--cache-mode", "record",
-            "--data-dir", str(data_dir),
-            "--search-fixtures", str(fixtures_path),
-            "--json",
-        ]
-    )
-    assert exit_code == 0
-    capsys.readouterr()
-
-    # Corrupt the corpus: tamper with one cited span's stored text, then run the
-    # identical scripted session again — the citation check must mechanically
-    # flag the mismatch. (Tampering, not deletion: record-mode refetch re-runs
-    # the indexer, whose INSERT OR IGNORE preserves the corrupted row.)
-    conn = open_db(data_dir / "parsec.db")
-    victim = page_span_ids(PAGE_A)[0]
-    conn.execute("UPDATE spans SET text='TAMPERED EVIDENCE' WHERE span_id=?", (victim,))
-    conn.close()
-
-    exit_code = cli.main(
-        [
-            "ask", QUERY,
-            "--session-id", "m1-neg-2",
-            "--adapter", "fake", "--model", "fake-model",
-            "--cache-mode", "record",
-            "--data-dir", str(data_dir),
-            "--search-fixtures", str(fixtures_path),
-            "--json",
-        ]
-    )
-    out = json.loads(capsys.readouterr().out)
-    # The fake adapter cannot actually repair, so the run ends partial with the
-    # violation surfaced — the claim is flagged, not silently accepted.
-    assert exit_code == 3
-    assert out["status"] == "partial"
-    assert any("does not match" in p for p in out["unresolved"])

@@ -1,13 +1,16 @@
-"""SingleAgentLoop: the M1 research loop.
+"""SingleAgentLoop: research → write → verify (M2 shape).
 
-The harness owns the cycle (T1): the model emits tool intents; the tool
-layer validates and executes; results are appended; the final answer must
-survive the citation check before the session is done. Stop-condition
-gates run before every model call and every tool execution.
+The harness owns the cycle (T1). Two model phases with separate immutable
+prefixes: a research phase (tool loop; facts enter the DAG only through the
+validated record_premises tool) and a writer phase that sees ONLY the query
+plus recorded premises (§6.5) — never raw spans or the research transcript.
+The answer must survive the citation check, then the whole session DAG gets
+a stage-1 structural verification pass before the session is done.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from parsec.config import RunConfig
@@ -17,13 +20,14 @@ from parsec.loop import prompts
 from parsec.loop.citations import check_citations, write_claims
 from parsec.loop.states import AgentState, StateMachine
 from parsec.models.events import EventType
-from parsec.models.gateway import ModelRequest, ModelResponse
+from parsec.models.gateway import ModelResponse
 from parsec.models.tools import ToolIntent
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
+from parsec.verify.structural import verify_session
 
 MAX_REPAIR_ROUNDS = 1
 
@@ -35,6 +39,7 @@ class RunResult:
     answer: str
     claims_total: int = 0
     unresolved: list[str] = field(default_factory=list)
+    violations: list[str] = field(default_factory=list)
     turns: int = 0
 
 
@@ -65,6 +70,7 @@ class SingleAgentLoop:
         self.blobs = tool_ctx.blobs
         self.clock = tool_ctx.clock
         self.halt_requested = False
+        self.turns = 0
 
     async def run(self) -> RunResult:
         cfg = self.config
@@ -77,42 +83,24 @@ class SingleAgentLoop:
             {"session_id": sid, "query": cfg.query, "config": cfg.to_json_dict()},
         )
         sm = StateMachine(self.event_log, sid)
-        start_mono = self.clock.monotonic()
-        tool_schemas = self.registry.export_schemas()
-        messages: list[dict] = [{"role": "user", "content": cfg.query}]
-        partial = False
-        turns = 0
+        self._start_mono = self.clock.monotonic()
 
         try:
             sm.transition(AgentState.RESEARCHING, "start")
-            answer: str | None = None
-            while answer is None:
-                forced = self._gate(sid, start_mono, turns)
-                if forced and not partial:
-                    partial = True
-                    messages.append({"role": "user", "content": prompts.FORCED_ANSWER_NUDGE})
-                resp = await self._call_model(tool_schemas, messages)
-                turns += 1
+            partial = await self._research_phase()
 
-                if resp.stop_reason == "tool_use" and not partial:
-                    messages.append({"role": "assistant", "content": resp.content})
-                    messages.append({"role": "user", "content": await self._run_tools(resp)})
-                    continue
-                if resp.stop_reason == "max_tokens":
-                    messages.append({"role": "assistant", "content": resp.content})
-                    messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
-                    if partial:
-                        answer = resp.text  # no budget for another retry round
-                    continue
-                if resp.stop_reason in ("end_turn", "stop_sequence") or partial:
-                    answer = resp.text
-                    continue
-                raise RuntimeError(f"unhandled stop_reason: {resp.stop_reason}")
+            sm.transition(AgentState.ANSWERING, "writer phase over recorded premises")
+            answer, writer_messages = await self._writer_phase()
 
-            sm.transition(AgentState.ANSWERING, "model emitted final text")
-            sm.transition(AgentState.CITE_CHECK, "structural citation check")
-            answer, check = await self._cite_check_with_repair(answer, messages, tool_schemas)
-            claims = write_claims(sid, check, self.dag, self.spans, self.documents)
+            sm.transition(AgentState.CITE_CHECK, "citation check + structural verification")
+            answer, check = await self._cite_check_with_repair(answer, writer_messages)
+            claims = write_claims(sid, check, self.dag)
+
+            vreport = verify_session(self.ctx.conn, self.blobs, sid)
+            self.event_log.append(
+                sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
+            )
+            violations = [f"{v.check}: {v.detail}" for v in vreport.violations]
 
             answer_blob = self.blobs.put(answer)
             self.event_log.append(
@@ -123,13 +111,14 @@ class SingleAgentLoop:
                     "answer_blob": answer_blob,
                     "claim_count": claims,
                     "unresolved": check.problems,
+                    "verification_ok": vreport.ok,
                     "partial": partial,
                 },
             )
-            status = "partial" if (partial or check.problems) else "done"
+            status = "done" if (not partial and check.ok and vreport.ok) else "partial"
             sm.transition(AgentState.DONE, status)
             self._finish(sid, status, answer_blob)
-            return RunResult(sid, status, answer, claims, check.problems, turns)
+            return RunResult(sid, status, answer, claims, check.problems, violations, self.turns)
 
         except BudgetExceeded as exc:
             answer = self._best_effort_answer(exc)
@@ -139,12 +128,12 @@ class SingleAgentLoop:
             )
             sm.transition(AgentState.HALTED, f"budget: {exc.category}")
             self._finish(sid, "halted_budget", answer_blob)
-            return RunResult(sid, "halted_budget", answer, 0, [str(exc)], turns)
+            return RunResult(sid, "halted_budget", answer, 0, [str(exc)], [], self.turns)
         except HaltRequested:
             self.event_log.append(sid, "user", EventType.USER_ABORT, {})
             sm.transition(AgentState.HALTED, "user abort")
             self._finish(sid, "halted_user", None)
-            return RunResult(sid, "halted_user", "", 0, [], turns)
+            return RunResult(sid, "halted_user", "", 0, [], [], self.turns)
         except Exception as exc:
             self.event_log.append(
                 sid, "harness", EventType.ERROR, {"kind": type(exc).__name__, "detail": str(exc)}
@@ -153,34 +142,30 @@ class SingleAgentLoop:
             self._finish(sid, "halted_error", None)
             raise
 
-    # -- gates ---------------------------------------------------------------
+    # -- research phase ------------------------------------------------------
 
-    def _gate(self, sid: str, start_mono: float, turns: int) -> bool:
-        """Stop-condition gate (§3 priority order). Returns True if the loop
-        must move to a forced final answer; raises to halt outright."""
-        if self.halt_requested:
-            raise HaltRequested()
-        elapsed = self.clock.monotonic() - start_mono
-        try:
-            self.ledger.check_caps(sid, self.config.budgets, elapsed)
-        except BudgetExceeded as exc:
-            # Soft breach: allow one forced-answer call within a 1.25x usd grace.
-            if exc.category == "usd" and exc.spent < self.config.budgets.max_usd * 1.25:
-                return True
-            if exc.category in ("tokens", "wall_seconds"):
-                return True
-            raise
-        # gate slots for M3: coverage-ledger completeness, saturation (no new
-        # premise clusters in last K waves)
-        if turns >= self.config.budgets.max_turns - 1:
-            return True
-        return False
-
-    # -- model + tools -------------------------------------------------------
-
-    async def _call_model(self, tool_schemas: list[dict], messages: list[dict]) -> ModelResponse:
-        request = prompts.build_request(self.config, tool_schemas, list(messages))
-        return await self.gateway.complete(request)
+    async def _research_phase(self) -> bool:
+        """Tool loop until the model stops researching. Returns partial flag."""
+        cfg = self.config
+        tool_schemas = self.registry.export_schemas()
+        messages: list[dict] = [{"role": "user", "content": cfg.query}]
+        while True:
+            if self._gate():
+                return True  # budget/turns exhausted — hand what we have to the writer
+            request = prompts.build_research_request(cfg, tool_schemas, list(messages))
+            resp = await self.gateway.complete(request)
+            self.turns += 1
+            if resp.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": await self._run_tools(resp)})
+                continue
+            if resp.stop_reason == "max_tokens":
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
+                continue
+            if resp.stop_reason in ("end_turn", "stop_sequence"):
+                return False  # research complete
+            raise RuntimeError(f"unhandled stop_reason in research: {resp.stop_reason}")
 
     async def _run_tools(self, resp: ModelResponse) -> list[dict]:
         blocks = []
@@ -199,36 +184,106 @@ class SingleAgentLoop:
             )
         return blocks
 
+    # -- writer phase --------------------------------------------------------
+
+    async def _writer_phase(self) -> tuple[str, list[dict]]:
+        """One fresh-context call: query + premises in, cited answer out (§6.5)."""
+        sid = self.config.session_id
+        premises = self.dag.nodes_for_session(sid, tier=1)
+        sources = self._premise_sources(sid)
+        messages: list[dict] = [
+            {"role": "user", "content": prompts.writer_user_prompt(self.config.query, premises, sources)}
+        ]
+        self._writer_gate()
+        resp = await self.gateway.complete(prompts.build_writer_request(self.config, list(messages)))
+        self.turns += 1
+        if resp.stop_reason == "max_tokens":
+            messages.append({"role": "assistant", "content": resp.content})
+            messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
+            self._writer_gate()
+            resp = await self.gateway.complete(
+                prompts.build_writer_request(self.config, list(messages))
+            )
+            self.turns += 1
+        return resp.text, messages
+
+    def _premise_sources(self, sid: str) -> dict[str, str]:
+        """premise node_id -> URL of its first cited span's document."""
+        sources: dict[str, str] = {}
+        for row in self.dag.nodes_for_session(sid, tier=1):
+            payload = json.loads(row["payload_json"])
+            span = self.spans.get(payload["span_refs"][0])
+            if span is None:
+                continue
+            doc = self.documents.get_document(span["doc_hash"])
+            if doc is not None:
+                sources[row["node_id"]] = doc["url"]
+        return sources
+
     # -- citation check ------------------------------------------------------
 
-    async def _cite_check_with_repair(self, answer, messages, tool_schemas):
-        check = check_citations(answer, self.spans, self.documents, self.blobs)
+    async def _cite_check_with_repair(self, answer: str, writer_messages: list[dict]):
+        sid = self.config.session_id
+        check = check_citations(answer, sid, self.dag)
         rounds = 0
         while not check.ok and rounds < MAX_REPAIR_ROUNDS:
             rounds += 1
             problems = "\n".join(f"- {p}" for p in check.problems)
-            messages.append({"role": "assistant", "content": [{"type": "text", "text": answer}]})
-            messages.append(
+            writer_messages.append({"role": "assistant", "content": [{"type": "text", "text": answer}]})
+            writer_messages.append(
                 {"role": "user", "content": prompts.REPAIR_TEMPLATE.format(problems=problems)}
             )
-            resp = await self._call_model(tool_schemas, messages)
+            self._writer_gate()
+            resp = await self.gateway.complete(
+                prompts.build_writer_request(self.config, list(writer_messages))
+            )
+            self.turns += 1
             answer = resp.text
-            check = check_citations(answer, self.spans, self.documents, self.blobs)
+            check = check_citations(answer, sid, self.dag)
         return answer, check
+
+    # -- gates ---------------------------------------------------------------
+
+    def _gate(self) -> bool:
+        """Research stop gate (§3 priority order). True = end research now.
+
+        Gate slots for M3: coverage-ledger completeness, saturation (no new
+        premise clusters in the last K waves).
+        """
+        if self.halt_requested:
+            raise HaltRequested()
+        sid = self.config.session_id
+        elapsed = self.clock.monotonic() - self._start_mono
+        try:
+            self.ledger.check_caps(sid, self.config.budgets, elapsed)
+        except BudgetExceeded as exc:
+            if exc.category == "usd" and exc.spent >= self.config.budgets.max_usd * 1.25:
+                raise  # hard breach: not even a writer call is affordable
+            return True
+        if self.turns >= self.config.budgets.max_turns - 1:
+            return True
+        return False
+
+    def _writer_gate(self) -> None:
+        """The writer/repair calls run inside the 1.25x usd grace; only a hard
+        breach halts them (the forced answer must be writable, §3 rule 1)."""
+        if self.halt_requested:
+            raise HaltRequested()
+        usd = self.ledger.spent_usd(self.config.session_id)
+        if usd >= self.config.budgets.max_usd * 1.25:
+            raise BudgetExceeded("usd", usd, self.config.budgets.max_usd)
 
     # -- finishing -----------------------------------------------------------
 
     def _best_effort_answer(self, exc: BudgetExceeded) -> str:
-        docs = self.ctx.conn.execute(
-            "SELECT DISTINCT d.url, d.meta_json FROM documents d"
-            " JOIN spans s ON s.doc_hash = d.doc_hash"
-        ).fetchall()
+        premises = self.dag.nodes_for_session(self.config.session_id, tier=1)
         lines = [
             f"PARTIAL — budget exhausted ({exc.category}) before an answer could be written.",
             f"Query: {self.config.query}",
-            "Sources fetched before halt:" if docs else "No sources were fetched before halt.",
+            "Premises recorded before halt:" if premises else "No premises were recorded before halt.",
         ]
-        lines += [f"- {d['url']}" for d in docs]
+        for row in premises:
+            lines.append(f"- {json.loads(row['payload_json'])['text']}")
         return "\n".join(lines)
 
     def _finish(self, sid: str, status: str, answer_blob: str | None) -> None:

@@ -64,13 +64,15 @@ class SynthesisNode(_Node):
 class ReportClaimNode(_Node):
     TIER: ClassVar[int] = 4
     text: str
-    span_refs: list[str] = Field(default_factory=list)
+    # As of M2, report claims cite Premise node IDs; the claim→premise→span
+    # path is what stage-1 verification walks.
+    premise_refs: list[str] = Field(default_factory=list)
     narrative: bool = False
 
     @model_validator(mode="after")
     def _non_narrative_needs_refs(self) -> "ReportClaimNode":
-        if not self.narrative and not self.span_refs:
-            raise ValueError("non-narrative ReportClaim requires at least one span ref")
+        if not self.narrative and not self.premise_refs:
+            raise ValueError("non-narrative ReportClaim requires at least one premise ref")
         return self
 
 
