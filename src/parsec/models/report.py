@@ -50,3 +50,22 @@ class SubagentReport(BaseModel):
     conflicts: list[Conflict] = Field(default_factory=list)
     dead_ends: list[str] = Field(default_factory=list)
     tokens_spent: int = 0
+
+
+class SubagentSubmission(BaseModel):
+    """What the subagent's submit_report tool accepts (§4, adapted).
+
+    Deviation from the spec's inline-premises shape, deliberately stronger:
+    premises enter the DAG at record time via the validated record_premises
+    tool (self-pruning happens there), so the submission references recorded
+    premise node IDs instead of restating premise text. tokens_spent is
+    computed by the harness from the ledger, never self-reported.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["answered", "partial", "blocked"]
+    findings: list[FindingDraft] = Field(default_factory=list)
+    conflicts: list[Conflict] = Field(default_factory=list)
+    dead_ends: list[str] = Field(default_factory=list)
+    summary: str = Field(default="", max_length=500)

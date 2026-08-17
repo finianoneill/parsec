@@ -10,7 +10,7 @@ import pytest
 
 import parsec.cli as cli
 from parsec.db.connection import open_db
-from tests.integration.test_m1_exit import (  # shared scripted session
+from tests.integration.test_orchestrator_exit import (  # shared scripted session
     PAGE_A,
     fixtures_path,
     page_span_ids,

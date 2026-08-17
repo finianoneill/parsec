@@ -1,18 +1,16 @@
-"""M1 state machine.
+"""Orchestrator state machine — the full §3 names as of M3.
 
-Collapsed from the §3 orchestrator states (multi-agent scale) to a
-single-agent shape with a documented mapping, so M3 can adopt the full
-names without churn:
+    PLANNING    — decompose the query into subquestions (coverage ledger rows)
+    DISPATCHING — pick the next open subquestion, prepare a subagent
+    COLLECTING  — subagent tool loop runs; its report is folded into the DAG
+    WRITING     — writer composes from premises/findings (coverage gate first)
+    VERIFYING   — citation check + stage-1 structural verification
+    DONE/HALTED — terminal
 
-    INIT        -> PLANNING
-    RESEARCHING -> DISPATCHING + COLLECTING
-    ANSWERING   -> WRITING
-    CITE_CHECK  -> VERIFYING (stage-1 structural only)
-    DONE/HALTED -> DONE/HALTED
-
-Stop-condition gates run before every model call and tool execution, in
-§3 priority order. Conditions 3 (coverage ledger) and 4 (saturation) are
-M3 concerns — their slots are noted at the gate site in agent.py.
+DISPATCHING↔COLLECTING cycles once per subquestion. GAP_FILLING and
+STEERING arrive at M6. Stop-condition gates run before every model call, in
+§3 priority order; slots for coverage-completeness and saturation stops are
+marked at the gate site in agent.py.
 """
 
 from __future__ import annotations
@@ -24,19 +22,21 @@ from parsec.store.event_log import EventLog
 
 
 class AgentState(StrEnum):
-    INIT = "INIT"
-    RESEARCHING = "RESEARCHING"
-    ANSWERING = "ANSWERING"
-    CITE_CHECK = "CITE_CHECK"
+    PLANNING = "PLANNING"
+    DISPATCHING = "DISPATCHING"
+    COLLECTING = "COLLECTING"
+    WRITING = "WRITING"
+    VERIFYING = "VERIFYING"
     DONE = "DONE"
     HALTED = "HALTED"
 
 
 _ALLOWED: dict[AgentState, set[AgentState]] = {
-    AgentState.INIT: {AgentState.RESEARCHING, AgentState.HALTED},
-    AgentState.RESEARCHING: {AgentState.RESEARCHING, AgentState.ANSWERING, AgentState.HALTED},
-    AgentState.ANSWERING: {AgentState.CITE_CHECK, AgentState.HALTED},
-    AgentState.CITE_CHECK: {AgentState.DONE, AgentState.HALTED},
+    AgentState.PLANNING: {AgentState.DISPATCHING, AgentState.WRITING, AgentState.HALTED},
+    AgentState.DISPATCHING: {AgentState.COLLECTING, AgentState.WRITING, AgentState.HALTED},
+    AgentState.COLLECTING: {AgentState.DISPATCHING, AgentState.WRITING, AgentState.HALTED},
+    AgentState.WRITING: {AgentState.VERIFYING, AgentState.HALTED},
+    AgentState.VERIFYING: {AgentState.DONE, AgentState.HALTED},
     AgentState.DONE: set(),
     AgentState.HALTED: set(),
 }
@@ -44,7 +44,7 @@ _ALLOWED: dict[AgentState, set[AgentState]] = {
 
 class StateMachine:
     def __init__(self, event_log: EventLog, session_id: str):
-        self.state = AgentState.INIT
+        self.state = AgentState.PLANNING
         self._event_log = event_log
         self._session_id = session_id
 

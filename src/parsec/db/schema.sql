@@ -83,6 +83,30 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS ix_edges_src ON edges(session_id, src_node_id);
 
+-- Coverage ledger (§2.3): the tree of subquestions, outside any model
+-- context. The writer refuses to run while 'open' items exist.
+CREATE TABLE IF NOT EXISTS coverage (
+  session_id   TEXT NOT NULL REFERENCES sessions(session_id),
+  sq_id        TEXT NOT NULL,                -- "sq-1"
+  question     TEXT NOT NULL,
+  status       TEXT NOT NULL,                -- open|partial|answered|blocked|dropped
+  reason       TEXT,                         -- required for blocked/dropped
+  created_seq  INTEGER,
+  updated_seq  INTEGER,
+  PRIMARY KEY (session_id, sq_id)
+);
+
+-- Notebook (§2.2): append-only markdown, the compaction handoff object and
+-- the human-legible debugging surface. Never evicted.
+CREATE TABLE IF NOT EXISTS notebook (
+  session_id   TEXT NOT NULL REFERENCES sessions(session_id),
+  entry_idx    INTEGER NOT NULL,
+  ts           TEXT NOT NULL,
+  author       TEXT NOT NULL,                -- orchestrator | subagent:sq-1
+  md_text      TEXT NOT NULL,
+  PRIMARY KEY (session_id, entry_idx)
+);
+
 CREATE TABLE IF NOT EXISTS ledger (
   entry_id     INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL REFERENCES sessions(session_id),

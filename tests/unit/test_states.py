@@ -12,42 +12,50 @@ def sm(event_log, sessions, config):
 
 def test_happy_path(sm):
     for state in (
-        AgentState.RESEARCHING,
-        AgentState.ANSWERING,
-        AgentState.CITE_CHECK,
+        AgentState.DISPATCHING,
+        AgentState.COLLECTING,
+        AgentState.DISPATCHING,  # next subquestion
+        AgentState.COLLECTING,
+        AgentState.WRITING,
+        AgentState.VERIFYING,
         AgentState.DONE,
     ):
         sm.transition(state)
     assert sm.state == AgentState.DONE
 
 
-def test_researching_self_loop(sm):
-    sm.transition(AgentState.RESEARCHING)
-    sm.transition(AgentState.RESEARCHING)
+def test_planning_straight_to_writing(sm):
+    # no dispatchable subquestions (budget tripped in planning)
+    sm.transition(AgentState.WRITING)
+    assert sm.state == AgentState.WRITING
 
 
 def test_halted_from_any_state(sm):
-    sm.transition(AgentState.RESEARCHING)
+    sm.transition(AgentState.DISPATCHING)
     sm.transition(AgentState.HALTED)
     assert sm.state == AgentState.HALTED
 
 
 def test_illegal_transition_raises(sm):
     with pytest.raises(RuntimeError):
-        sm.transition(AgentState.DONE)  # INIT -> DONE not allowed
-    sm.transition(AgentState.RESEARCHING)
+        sm.transition(AgentState.DONE)  # PLANNING -> DONE not allowed
+    sm.transition(AgentState.DISPATCHING)
     with pytest.raises(RuntimeError):
-        sm.transition(AgentState.CITE_CHECK)  # must pass through ANSWERING
+        sm.transition(AgentState.VERIFYING)  # must pass through WRITING
 
 
 def test_terminal_states_locked(sm):
     sm.transition(AgentState.HALTED)
     with pytest.raises(RuntimeError):
-        sm.transition(AgentState.RESEARCHING)
+        sm.transition(AgentState.PLANNING)
 
 
 def test_transitions_are_logged(sm, event_log, config):
-    sm.transition(AgentState.RESEARCHING, "start")
+    sm.transition(AgentState.DISPATCHING, "sq-1")
     events = event_log.read(config.session_id)
     assert events[-1].event_type == EventType.STATE_TRANSITION
-    assert events[-1].payload == {"from_state": "INIT", "to_state": "RESEARCHING", "reason": "start"}
+    assert events[-1].payload == {
+        "from_state": "PLANNING",
+        "to_state": "DISPATCHING",
+        "reason": "sq-1",
+    }
