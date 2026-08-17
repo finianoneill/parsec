@@ -25,8 +25,10 @@ from parsec.config import (
 from parsec.db.connection import open_db
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop.agent import OrchestratorLoop
-from parsec.retrieval.fetcher import Fetcher
-from parsec.retrieval.search_provider import FixtureSearchProvider
+from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
+from parsec.retrieval.fetcher import USER_AGENT, Fetcher
+from parsec.retrieval.providers import build_search_provider
+from parsec.retrieval.robots import RobotsPolicy
 from parsec.store.blobs import BlobStore
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
@@ -40,6 +42,7 @@ from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
+from parsec.tools.search_within import SearchWithinTool
 
 console = Console()
 
@@ -66,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--max-gap-rounds", type=int, default=Budgets().max_gap_rounds)
     ask.add_argument("--data-dir", type=Path, default=Path("data"))
     ask.add_argument("--search-fixtures", type=Path, default=None)
+    ask.add_argument(
+        "--search-provider", choices=["fixture", "searxng", "brave", "serper"], default="fixture",
+        help="Live providers need keys/urls: BRAVE_API_KEY / SERPER_API_KEY env, --searxng-url",
+    )
+    ask.add_argument("--searxng-url", default=None)
+    ask.add_argument("--contact", default=None, help="Contact info appended to the fetch User-Agent")
+    ask.add_argument("--no-robots", action="store_true", help="Skip robots.txt checks (not recommended)")
     ask.add_argument("--json", action="store_true", dest="as_json")
     ask.add_argument(
         "--live", action="store_true",
@@ -179,10 +189,25 @@ def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> Orch
 
     adapter = make_adapter(config)
     gateway = ModelGateway(adapter, event_log, blobs, ledger, config)
-    fetcher = Fetcher(documents, blobs, clock, config.cache_mode, transport=fetch_transport)
-    tools: list = [FetchTool(fetcher, spans), RecordPremisesTool(dag, spans, documents)]
-    if config.search_fixtures is not None:
-        tools.append(SearchBroadTool(FixtureSearchProvider(config.search_fixtures)))
+    user_agent = USER_AGENT + (f" contact:{config.contact}" if config.contact else "")
+    robots = (
+        RobotsPolicy(conn, clock, user_agent, config.robots_ttl_s, transport=fetch_transport)
+        if config.respect_robots
+        else None
+    )
+    fetcher = Fetcher(
+        documents, blobs, clock, config.cache_mode,
+        transport=fetch_transport, robots=robots, user_agent=user_agent,
+    )
+    embeddings = EmbeddingCache(conn, HashedNgramEmbedder())
+    tools: list = [
+        FetchTool(fetcher, spans),
+        RecordPremisesTool(dag, spans, documents),
+        SearchWithinTool(spans, embeddings),
+    ]
+    provider = build_search_provider(config, conn, clock, transport=fetch_transport)
+    if provider is not None:
+        tools.append(SearchBroadTool(provider))
     registry = ToolRegistry(tools)
     ctx = ToolContext(conn, blobs, event_log, ledger, config, clock)
     return OrchestratorLoop(
@@ -209,6 +234,10 @@ def cmd_ask(args) -> int:
         ),
         data_dir=args.data_dir,
         search_fixtures=args.search_fixtures,
+        search_provider=args.search_provider,
+        searxng_url=args.searxng_url,
+        respect_robots=not args.no_robots,
+        contact=args.contact,
     )
     loop = _build_loop(config, conn, blobs, clock)
 

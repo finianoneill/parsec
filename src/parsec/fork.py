@@ -19,8 +19,10 @@ from parsec.gateway.gateway import ModelGateway
 from parsec.gateway.replay_adapter import ReplayAdapter
 from parsec.loop.agent import OrchestratorLoop, RunResult
 from parsec.models.events import EventType
-from parsec.retrieval.fetcher import Fetcher
-from parsec.retrieval.search_provider import FixtureSearchProvider
+from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
+from parsec.retrieval.fetcher import USER_AGENT, Fetcher
+from parsec.retrieval.providers import build_search_provider
+from parsec.retrieval.robots import RobotsPolicy
 from parsec.store.blobs import BlobStore
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
@@ -34,6 +36,7 @@ from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
+from parsec.tools.search_within import SearchWithinTool
 
 
 def _next_fork_id(conn: sqlite3.Connection, original: str, at_call: int) -> str:
@@ -74,10 +77,24 @@ async def run_fork(
     adapter = ForkAdapter(replay, live_adapter, at_call)
     gateway = ModelGateway(adapter, event_log, blobs, ledger, fork_config)
 
-    fetcher = Fetcher(documents, blobs, clock, CacheMode.LIVE_PREFER_CACHE, transport=fetch_transport)
-    tools: list = [FetchTool(fetcher, spans), RecordPremisesTool(dag, spans, documents)]
-    if fork_config.search_fixtures is not None:
-        tools.append(SearchBroadTool(FixtureSearchProvider(fork_config.search_fixtures)))
+    user_agent = USER_AGENT + (f" contact:{fork_config.contact}" if fork_config.contact else "")
+    robots = (
+        RobotsPolicy(conn, clock, user_agent, fork_config.robots_ttl_s, transport=fetch_transport)
+        if fork_config.respect_robots
+        else None
+    )
+    fetcher = Fetcher(
+        documents, blobs, clock, CacheMode.LIVE_PREFER_CACHE,
+        transport=fetch_transport, robots=robots, user_agent=user_agent,
+    )
+    tools: list = [
+        FetchTool(fetcher, spans),
+        RecordPremisesTool(dag, spans, documents),
+        SearchWithinTool(spans, EmbeddingCache(conn, HashedNgramEmbedder())),
+    ]
+    provider = build_search_provider(fork_config, conn, clock, transport=fetch_transport)
+    if provider is not None:
+        tools.append(SearchBroadTool(provider))
     registry = ToolRegistry(tools)
     ctx = ToolContext(conn, blobs, event_log, ledger, fork_config, clock)
 

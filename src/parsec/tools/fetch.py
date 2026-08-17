@@ -45,10 +45,32 @@ class FetchTool:
                 "doc_hash": doc.doc_hash,
                 "url": doc.canonical_url,
                 "status_code": doc.status_code,
+                "outcome": doc.outcome,
                 "from_cache": doc.from_cache,
                 "mode": ctx.config.cache_mode.value,
             },
         )
+
+        if doc.outcome != "ok":
+            outcome = FetchOutcome(
+                doc_hash=doc.doc_hash,
+                url=doc.canonical_url,
+                status_code=doc.status_code,
+                outcome=doc.outcome,
+                license_url=doc.license_url,
+            )
+            if doc.outcome == "blocked_by_robots":
+                msg = (
+                    f"fetch of {doc.canonical_url} DISALLOWED by the site's robots.txt — "
+                    "this source cannot be used. Try a different source."
+                )
+            else:
+                msg = (
+                    f"fetch of {doc.canonical_url} requires a content license (HTTP 402"
+                    + (f"; license terms: {doc.license_url}" if doc.license_url else "")
+                    + ") — parsec does not bypass licensing. Try a different source."
+                )
+            return outcome.model_dump(exclude={"from_cache"}), msg
 
         offsets = index_spans(doc.text)
         span_rows = [

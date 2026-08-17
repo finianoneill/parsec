@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="157 tests" src="https://img.shields.io/badge/tests-157%20passing-16a34a?style=flat-square">
+  <img alt="180 tests" src="https://img.shields.io/badge/tests-180%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -70,9 +70,13 @@ Live runs need `ANTHROPIC_API_KEY`. The optional synthesis judge needs `OPENAI_A
 ```sh
 export ANTHROPIC_API_KEY=...
 
-# Ask a question. search_broad is fixture-stubbed in v1 (see below);
-# fetch is live and write-through cached:
-uv run parsec ask "your question" --search-fixtures fixtures/queries.json --live
+# Ask a question with a live search provider (SearXNG shown; brave/serper
+# need BRAVE_API_KEY / SERPER_API_KEY). fetch is robots-respecting and
+# write-through cached; provider responses are cached TTL-bounded:
+uv run parsec ask "your question" --search-provider searxng --searxng-url http://localhost:8080 --live
+
+# Or run fully offline with a fixture provider:
+uv run parsec ask "your question" --search-fixtures fixtures/queries.json
 
 # Re-run it against the frozen corpus and verify byte-identical replay:
 uv run parsec replay <session-id>
@@ -178,18 +182,22 @@ All seven milestones of the [architecture brief](RESEARCH_HARNESS_ARCHITECTURE.m
 ## Development
 
 ```sh
-uv run pytest                                        # 157 tests, no network/keys
+uv run pytest                                        # 180 tests, no network/keys
 uv run pytest -m live tests/integration/test_live_smoke.py   # one real query + replay (needs ANTHROPIC_API_KEY)
 ```
 
 Changes should keep the whole suite green and — for anything touching the loop, tools, or stores — preserve byte-identical replay; the integration tests will catch you if they don't.
 
-## Roadmap
+## Roadmap (v2)
 
-- **Real search provider** behind the existing `SearchProvider` protocol (Brave/Tavily), with its own record/replay layer.
-- **Credence calibration**: log predicted credence vs. eval-corpus ground truth and recalibrate the priors — the eval harness exists precisely to make this a measurement problem.
-- **Parallel subagent dispatch** behind per-subagent event streams, lifting the v1 sequential-for-determinism constraint.
-- **NLI-lite prose containment** (small local models) to extend the exact-match number/quote checks.
+The research-backed v2 plan lives in [RESEARCH_HARNESS_V2_PLAN.md](RESEARCH_HARNESS_V2_PLAN.md) (milestones M7–M12; M7–M10 is the v2 definition of done):
+
+- [x] **M7 — Live retrieval**: SearXNG/Brave/Serper adapters behind the extended provider protocol with TTL-bounded provider caches (T11: provider responses are borrowed data, the self-fetch archive is permanent); trafilatura main-content extraction with markdown output and stdlib fallback; `search_within` hybrid search over the fetched corpus (SQLite FTS5 BM25 + cached deterministic embeddings + reciprocal-rank fusion); politeness 2.0 — robots.txt respected per agent group, HTTP 402 and RSL `License:` terms surfaced as typed cached fetch outcomes (never circumvented), identity-honest UA with contact info. *Exit test green: a live-provider query end-to-end, replayed byte-identically with zero live calls; blocked and licensed URLs surface as typed outcomes that also replay.*
+- [ ] **M8 — Evals 2.0**: nugget rubrics, hard negatives, claim-support axis vs. the frozen cache, paired-difference regression statistics.
+- [ ] **M9 — Verification depth**: grounded-NLI claim support, ambiguity-refusal lints, mechanical temporal validator.
+- [ ] **M10 — Credence 2.0 + calibration**: syndication-aware corroboration, conflict-aware aggregation, learned source reliability, `parsec calibrate`.
+- [ ] **M11 — Deterministic parallelism**: per-subagent event streams with recorded join order.
+- [ ] **M12 — Orchestration polish**: research-brief gate, DAG-slice context reconstruction, effort-scaled dispatch.
 
 ## License
 

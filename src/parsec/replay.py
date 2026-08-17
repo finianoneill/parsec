@@ -14,8 +14,9 @@ from parsec.config import CacheMode, Clock, RunConfig
 from parsec.gateway.gateway import ModelGateway
 from parsec.gateway.replay_adapter import ReplayAdapter
 from parsec.loop.agent import OrchestratorLoop, RunResult
+from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
 from parsec.retrieval.fetcher import Fetcher
-from parsec.retrieval.search_provider import FixtureSearchProvider
+from parsec.retrieval.providers import build_search_provider
 from parsec.store.blobs import BlobStore
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
@@ -29,6 +30,7 @@ from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
+from parsec.tools.search_within import SearchWithinTool
 
 
 @dataclass
@@ -78,9 +80,16 @@ async def run_replay(
     gateway = ModelGateway(adapter, event_log, blobs, ledger, replay_config)
 
     fetcher = Fetcher(documents, blobs, clock, CacheMode.REPLAY)
-    tools: list = [FetchTool(fetcher, spans), RecordPremisesTool(dag, spans, documents)]
-    if replay_config.search_fixtures is not None:
-        tools.append(SearchBroadTool(FixtureSearchProvider(replay_config.search_fixtures)))
+    # Registry composition must match the recording (tool schemas feed prompt
+    # hashes) — same tools, config-driven, cache-only provider.
+    tools: list = [
+        FetchTool(fetcher, spans),
+        RecordPremisesTool(dag, spans, documents),
+        SearchWithinTool(spans, EmbeddingCache(conn, HashedNgramEmbedder())),
+    ]
+    provider = build_search_provider(replay_config, conn, clock)
+    if provider is not None:
+        tools.append(SearchBroadTool(provider))
     registry = ToolRegistry(tools)
     ctx = ToolContext(conn, blobs, event_log, ledger, replay_config, clock)
 

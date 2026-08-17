@@ -107,6 +107,35 @@ CREATE TABLE IF NOT EXISTS notebook (
   PRIMARY KEY (session_id, entry_idx)
 );
 
+-- Provider-response cache (T11): search API results are BORROWED data —
+-- TTL-bounded per provider policy, unlike the permanent self-fetch archive.
+CREATE TABLE IF NOT EXISTS search_cache (
+  provider     TEXT NOT NULL,
+  query_norm   TEXT NOT NULL,
+  fetched_ts   TEXT NOT NULL,
+  response_json TEXT NOT NULL,               -- canonical JSON list of hits
+  PRIMARY KEY (provider, query_norm)
+);
+
+-- robots.txt cache: one row per domain, TTL-governed for live runs.
+CREATE TABLE IF NOT EXISTS robots_cache (
+  domain       TEXT PRIMARY KEY,
+  fetched_ts   TEXT NOT NULL,
+  robots_txt   TEXT NOT NULL DEFAULT ''
+);
+
+-- Content-addressed embedding cache: embedding is a pure cacheable
+-- function of (model, text) so vector search stays replay-deterministic.
+CREATE TABLE IF NOT EXISTS embeddings (
+  model_id     TEXT NOT NULL,
+  text_hash    TEXT NOT NULL,
+  vector_json  TEXT NOT NULL,
+  PRIMARY KEY (model_id, text_hash)
+);
+
+-- Lexical index over spans for search_within (BM25 via FTS5).
+CREATE VIRTUAL TABLE IF NOT EXISTS spans_fts USING fts5(span_id UNINDEXED, text);
+
 CREATE TABLE IF NOT EXISTS ledger (
   entry_id     INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL REFERENCES sessions(session_id),
