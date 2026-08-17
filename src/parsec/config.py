@@ -50,6 +50,14 @@ class RunConfig(BaseModel):
     search_k_default: int = 5
     # Pricing table pinned at session start so replay reproduces recorded costs.
     pricing_override: dict[str, dict[str, float]] | None = None
+    # Credence model (§2.1, T3). source_tiers merges over the built-in domain
+    # table; stakes_threshold is the stage-3 flagging floor for report claims;
+    # volatile_penalty is the flat recency proxy for volatile claims (real
+    # time-decay is deferred until calibration data exists — a clock read here
+    # would break byte-identical replay).
+    source_tiers: dict[str, float] | None = None
+    stakes_threshold: float = 0.7
+    volatile_penalty: float = 0.85
 
     def to_json_dict(self) -> dict:
         return self.model_dump(mode="json")

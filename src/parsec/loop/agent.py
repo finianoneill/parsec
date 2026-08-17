@@ -38,6 +38,8 @@ from parsec.store.notebook import Notebook
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
+from parsec.verify.credence import CredenceReport, compute_credences, render_tier
+from parsec.verify.omission import OmissionReport, detect_omissions
 from parsec.verify.structural import verify_session
 
 MAX_REPAIR_ROUNDS = 1
@@ -58,6 +60,8 @@ class RunResult:
     unresolved: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     coverage: dict[str, str] = field(default_factory=dict)
+    low_confidence: list[str] = field(default_factory=list)  # claims below stakes threshold
+    unused_sources: list[str] = field(default_factory=list)  # consulted-but-unused URLs
     turns: int = 0
 
 
@@ -141,6 +145,27 @@ class OrchestratorLoop:
             )
             violations = [f"{v.check}: {v.detail}" for v in vreport.violations]
 
+            # §6 stage 3: recompute credence over the whole graph (claims now
+            # exist); stage 4: bottom-up omission traversal. Both mechanical.
+            credence = self._compute_credences()
+            self.event_log.append(
+                sid,
+                "harness",
+                EventType.CREDENCE_COMPUTED,
+                {
+                    "flagged": credence.flagged_claims,
+                    "credences": {
+                        nid: round(nc.credence, 6) for nid, nc in sorted(credence.nodes.items())
+                    },
+                },
+            )
+            omissions = detect_omissions(self.ctx.conn, self.event_log, sid)
+            self.event_log.append(
+                sid, "harness", EventType.OMISSION_DETECTED, omissions.to_payload()
+            )
+            answer = answer + self._build_appendix(credence, omissions)
+            low_confidence = self._low_confidence_lines(credence)
+
             answer_blob = self.blobs.put(answer)
             coverage = self.coverage.summary(sid)
             self.event_log.append(
@@ -153,6 +178,8 @@ class OrchestratorLoop:
                     "unresolved": check.problems,
                     "verification_ok": vreport.ok,
                     "coverage": coverage,
+                    "flagged_claims": credence.flagged_claims,
+                    "unused_documents": [d["url"] for d in omissions.unused_documents],
                     "partial": partial,
                 },
             )
@@ -160,7 +187,8 @@ class OrchestratorLoop:
             sm.transition(AgentState.DONE, status)
             self._finish(sid, status, answer_blob)
             return RunResult(
-                sid, status, answer, claims, check.problems, violations, coverage, self.turns
+                sid, status, answer, claims, check.problems, violations, coverage,
+                low_confidence, [d["url"] for d in omissions.unused_documents], self.turns,
             )
 
         except BudgetExceeded as exc:
@@ -422,11 +450,21 @@ class OrchestratorLoop:
             for r in self.coverage.all(sid)
             if r["status"] in ("blocked", "dropped", "partial")
         ]
+        # Pre-writer credence pass (§6.5): the writer receives computed
+        # confidence tiers and applies the hedging register — it never
+        # invents the tier.
+        credence = self._compute_credences()
+        confidence = {
+            row["node_id"]: self._annotation(credence, row["node_id"])
+            for rows in (premises, findings)
+            for row in rows
+            if row["node_id"] in credence.nodes
+        }
         messages: list[dict] = [
             {
                 "role": "user",
                 "content": prompts.writer_user_prompt(
-                    self.config.query, premises, findings, sources, unresolved
+                    self.config.query, premises, findings, sources, unresolved, confidence
                 ),
             }
         ]
@@ -442,6 +480,57 @@ class OrchestratorLoop:
             )
             self.turns += 1
         return resp.text, messages
+
+    # -- credence & omission -------------------------------------------------
+
+    def _compute_credences(self) -> CredenceReport:
+        cfg = self.config
+        return compute_credences(
+            self.ctx.conn,
+            cfg.session_id,
+            source_tiers=cfg.source_tiers,
+            stakes_threshold=cfg.stakes_threshold,
+            volatile_penalty=cfg.volatile_penalty,
+        )
+
+    @staticmethod
+    def _annotation(credence: CredenceReport, node_id: str) -> str:
+        nc = credence.nodes[node_id]
+        label = render_tier(nc.credence)
+        return f"{label}, single source" if nc.single_source else label
+
+    def _build_appendix(self, credence: CredenceReport, omissions: OmissionReport) -> str:
+        """Mechanical appendix (harness-built, deterministic): per-claim
+        confidence tiers (§10.3 — tiers, never raw numbers) and the
+        consulted-but-unused list (§6 stage 4)."""
+        sid = self.config.session_id
+        lines = ["", "---", "Confidence (computed by the harness):"]
+        claims = [
+            row
+            for row in self.dag.nodes_for_session(sid, tier=4)
+            if not json.loads(row["payload_json"]).get("narrative")
+        ]
+        if not claims:
+            lines.append("- no supported claims were made")
+        for row in claims:
+            text = json.loads(row["payload_json"])["text"]
+            lines.append(f"- \"{text}\" — {self._annotation(credence, row['node_id'])} confidence")
+        if omissions.unused_documents:
+            lines += ["", "Consulted but unused (fetched, but no recorded evidence reached the answer):"]
+            lines += [f"- {d['url']}" for d in omissions.unused_documents]
+        if omissions.uncited_premises:
+            lines += ["", "Recorded but uncited premises:"]
+            lines += [f"- {p['text']}" for p in omissions.uncited_premises]
+        return "\n".join(lines)
+
+    def _low_confidence_lines(self, credence: CredenceReport) -> list[str]:
+        sid = self.config.session_id
+        by_id = {row["node_id"]: row for row in self.dag.nodes_for_session(sid, tier=4)}
+        out = []
+        for nid in credence.flagged_claims:
+            text = json.loads(by_id[nid]["payload_json"])["text"] if nid in by_id else nid
+            out.append(f"{self._annotation(credence, nid)}: {text}")
+        return out
 
     def _premise_sources(self, sid: str) -> dict[str, str]:
         """premise node_id -> URL of its first cited span's document."""

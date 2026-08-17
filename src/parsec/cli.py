@@ -184,6 +184,8 @@ def cmd_ask(args) -> int:
                     "unresolved": result.unresolved,
                     "violations": result.violations,
                     "coverage": result.coverage,
+                    "low_confidence": result.low_confidence,
+                    "unused_sources": result.unused_sources,
                     "turns": result.turns,
                     "totals": totals,
                 }
@@ -203,6 +205,7 @@ def cmd_ask(args) -> int:
             f"${totals.get('usd', 0.0):.4f} · claims {result.claims_total}"
             + (f" · [red]{len(result.unresolved)} unresolved[/red]" if result.unresolved else "")
             + (f" · [red]{len(result.violations)} verification violations[/red]" if result.violations else "")
+            + (f" · [yellow]{len(result.low_confidence)} low-confidence claims[/yellow]" if result.low_confidence else "")
             + "[/dim]"
         )
     if result.status == "done":
@@ -233,16 +236,34 @@ def cmd_replay(args) -> int:
 
 
 def cmd_verify(args) -> int:
+    from parsec.verify.credence import compute_credences, render_tier
+    from parsec.verify.omission import detect_omissions
     from parsec.verify.structural import verify_session
 
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
-    if SessionStore(conn, clock).get(args.session_id) is None:
+    store = SessionStore(conn, clock)
+    if store.get(args.session_id) is None:
         console.print(f"[red]unknown session {args.session_id}[/red]")
         return EXIT_USAGE
     report = verify_session(conn, blobs, args.session_id)
+    session_config = store.get_config(args.session_id)
+    credence = compute_credences(
+        conn,
+        args.session_id,
+        source_tiers=session_config.source_tiers,
+        stakes_threshold=session_config.stakes_threshold,
+        volatile_penalty=session_config.volatile_penalty,
+    )
+    omissions = detect_omissions(conn, EventLog(conn, clock), args.session_id)
     if args.as_json:
-        print(json.dumps(report.to_payload()))
+        payload = report.to_payload()
+        payload["credence"] = {
+            "flagged_claims": credence.flagged_claims,
+            "tiers": {nid: render_tier(nc.credence) for nid, nc in sorted(credence.nodes.items())},
+        }
+        payload["omissions"] = omissions.to_payload()
+        print(json.dumps(payload))
     else:
         console.print(
             f"checked {report.checked_claims} claims, {report.checked_premises} premises, "
@@ -255,6 +276,15 @@ def cmd_verify(args) -> int:
             for v in report.violations:
                 table.add_row(v.check, v.subject, v.detail)
             console.print(table)
+        if credence.flagged_claims:
+            console.print(
+                f"[yellow]{len(credence.flagged_claims)} claims below the stakes threshold[/yellow]"
+            )
+        if not omissions.empty:
+            for d in omissions.unused_documents:
+                console.print(f"[yellow]consulted but unused:[/yellow] {d['url']}")
+            for p in omissions.uncited_premises:
+                console.print(f"[yellow]recorded but uncited:[/yellow] {p['text']}")
     return EXIT_OK if report.ok else EXIT_PARTIAL
 
 

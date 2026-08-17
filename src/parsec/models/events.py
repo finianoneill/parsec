@@ -24,6 +24,8 @@ class EventType(StrEnum):
     SUBAGENT_COMPLETED = "subagent_completed"
     COVERAGE_UPDATED = "coverage_updated"
     NOTEBOOK_APPENDED = "notebook_appended"
+    CREDENCE_COMPUTED = "credence_computed"
+    OMISSION_DETECTED = "omission_detected"
     VERIFICATION_COMPLETED = "verification_completed"
     ANSWER_EMITTED = "answer_emitted"
     USER_ABORT = "user_abort"
