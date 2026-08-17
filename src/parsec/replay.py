@@ -90,6 +90,15 @@ async def run_replay(
         replay_config, gateway, registry, ctx, sessions, dag, spans, documents,
         coverage, notebook, parent_session_id=original_session_id,
     )
+    # Re-inject the recorded steering at the recorded turn indices so a
+    # steered session replays to identical prompts.
+    from parsec.models.events import EventType
+
+    scripted: dict[int, list[str]] = {}
+    for ev in event_log.read(original_session_id):
+        if ev.event_type == EventType.STEERING_INJECTED:
+            scripted.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
+    loop.scripted_steering = scripted
     result = await loop.run()
 
     proj_orig = event_log.projection(original_session_id)

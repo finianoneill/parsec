@@ -190,6 +190,7 @@ def run_ask(data_dir, fixtures_path, session_id):
             "--cache-mode", "record",
             "--data-dir", str(data_dir),
             "--search-fixtures", str(fixtures_path),
+            "--max-gap-rounds", "0",  # scripted runs budget no gap round; gap-fill has its own test
             "--json",
         ]
     )

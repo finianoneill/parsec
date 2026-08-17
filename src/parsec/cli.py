@@ -63,9 +63,28 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--max-tokens", type=int, default=Budgets().max_total_tokens)
     ask.add_argument("--max-seconds", type=int, default=Budgets().max_wall_seconds)
     ask.add_argument("--max-turns", type=int, default=Budgets().max_turns)
+    ask.add_argument("--max-gap-rounds", type=int, default=Budgets().max_gap_rounds)
     ask.add_argument("--data-dir", type=Path, default=Path("data"))
     ask.add_argument("--search-fixtures", type=Path, default=None)
     ask.add_argument("--json", action="store_true", dest="as_json")
+    ask.add_argument(
+        "--live", action="store_true",
+        help="Show a live progress view (state, coverage, DAG counts, spend)",
+    )
+
+    fork = sub.add_parser("fork", help="Rewind a recorded session to call N and continue live")
+    fork.add_argument("session_id")
+    fork.add_argument("--at-call", type=int, required=True, help="Model-call index to branch at (0-based)")
+    fork.add_argument("--steer", default=None, help="Steering message injected at the fork point")
+    fork.add_argument("--data-dir", type=Path, default=Path("data"))
+    fork.add_argument("--json", action="store_true", dest="as_json")
+
+    judge = sub.add_parser(
+        "judge", help="Advisory judge pass over deduces/induces derivations (different model family)"
+    )
+    judge.add_argument("session_id")
+    judge.add_argument("--judge-model", default=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"))
+    judge.add_argument("--data-dir", type=Path, default=Path("data"))
 
     replay = sub.add_parser("replay", help="Re-run a recorded session against the frozen corpus")
     replay.add_argument("session_id")
@@ -186,16 +205,55 @@ def cmd_ask(args) -> int:
             max_total_tokens=args.max_tokens,
             max_wall_seconds=args.max_seconds,
             max_turns=args.max_turns,
+            max_gap_rounds=args.max_gap_rounds,
         ),
         data_dir=args.data_dir,
         search_fixtures=args.search_fixtures,
     )
     loop = _build_loop(config, conn, blobs, clock)
+
+    live_view = None
+    if args.live and not args.as_json:
+        from rich.live import Live
+
+        def render(snapshot: dict):
+            table = Table("state", "coverage", "premises", "findings", "claims", "turns", "tokens", "usd")
+            table.add_row(
+                snapshot["state"],
+                " ".join(f"{k}:{v}" for k, v in sorted(snapshot["coverage"].items())) or "—",
+                str(snapshot["premises"]), str(snapshot["findings"]), str(snapshot["claims"]),
+                str(snapshot["turns"]), str(snapshot["tokens"]), f"${snapshot['usd']:.4f}",
+            )
+            return table
+
+        live_view = Live(console=console, refresh_per_second=4)
+        live_view.start()
+        loop.reporter = lambda snapshot: live_view.update(render(snapshot))
+
+    # Steering (§3): lines typed on stdin mid-run are injected into the next
+    # model call without tearing down the turn.
+    if sys.stdin.isatty() and not args.as_json:
+        import threading
+
+        def read_stdin():
+            try:
+                for line in sys.stdin:
+                    text = line.strip()
+                    if text:
+                        loop.steer(text)
+            except (ValueError, OSError):
+                pass
+
+        threading.Thread(target=read_stdin, daemon=True).start()
+
     try:
         result = asyncio.run(loop.run())
     except KeyboardInterrupt:
         console.print("[red]aborted[/red]")
         return EXIT_ERROR
+    finally:
+        if live_view is not None:
+            live_view.stop()
 
     ledger = Ledger(conn, clock)
     totals = ledger.totals(session_id)
@@ -355,6 +413,57 @@ def cmd_sessions(args) -> int:
     return EXIT_OK
 
 
+def cmd_fork(args) -> int:
+    from parsec.fork import run_fork
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    if SessionStore(conn, clock).get(args.session_id) is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    config = SessionStore(conn, clock).get_config(args.session_id)
+    live_adapter = make_adapter(config)
+    result = asyncio.run(
+        run_fork(
+            conn, blobs, clock, args.session_id, args.at_call, live_adapter,
+            fetch_transport=fetch_transport, steer=args.steer,
+        )
+    )
+    if args.as_json:
+        print(json.dumps({"session_id": result.session_id, "status": result.status, "answer": result.answer}))
+    else:
+        console.print(result.answer)
+        console.print(f"[dim]forked as {result.session_id} · {result.status}[/dim]")
+    return EXIT_OK if result.status == "done" else EXIT_PARTIAL
+
+
+def cmd_judge(args) -> int:
+    from parsec.gateway.openai_adapter import OpenAIAdapter
+    from parsec.verify.judge_pass import judge_pass
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    if SessionStore(conn, clock).get(args.session_id) is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    adapter = OpenAIAdapter()
+    judgments = asyncio.run(
+        judge_pass(conn, EventLog(conn, clock), args.session_id, adapter, args.judge_model)
+    )
+    if not judgments:
+        console.print("no deduces/induces derivations to judge")
+        return EXIT_OK
+    table = Table("finding", "edge", "score", "rationale")
+    for j in judgments:
+        table.add_row(
+            j.finding_id, j.edge_type,
+            "—" if j.score is None else f"{j.score:.2f}", j.rationale[:80],
+        )
+    console.print(table)
+    console.print("[dim]advisory only — judge scores gate nothing (§6)[/dim]")
+    return EXIT_OK
+
+
 def cmd_eval(args) -> int:
     if args.eval_command == "run":
         return _eval_run(args)
@@ -484,6 +593,8 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "replay": cmd_replay,
         "verify": cmd_verify,
+        "fork": cmd_fork,
+        "judge": cmd_judge,
         "eval": cmd_eval,
         "sessions": cmd_sessions,
         "notebook": cmd_notebook,

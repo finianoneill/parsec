@@ -17,14 +17,16 @@ per-subagent event streams without changing this loop's shape.
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, field
+from typing import Callable
 
 from pydantic import ValidationError
 
 from parsec.config import RunConfig
 from parsec.errors import BudgetExceeded, HaltRequested
 from parsec.gateway.gateway import ModelGateway
-from parsec.loop import prompts
+from parsec.loop import compaction, prompts
 from parsec.loop.citations import check_citations, write_claims
 from parsec.loop.states import AgentState, StateMachine
 from parsec.models.events import EventType
@@ -97,6 +99,17 @@ class OrchestratorLoop:
         self.clock = tool_ctx.clock
         self.halt_requested = False
         self.turns = 0
+        # Steering (§3): user messages injected without tearing down the turn.
+        # Live input lands in the queue; replay re-injects the recorded
+        # steering at the recorded turn indices via scripted_steering.
+        self._steer_queue: deque[str] = deque()
+        self.scripted_steering: dict[int, list[str]] = {}
+        # Optional progress hook for the live CLI view; called with snapshots.
+        self.reporter: Callable[[dict], None] | None = None
+
+    def steer(self, text: str) -> None:
+        """Thread-safe enough for a stdin reader thread: deque.append is atomic."""
+        self._steer_queue.append(text)
 
     async def run(self) -> RunResult:
         cfg = self.config
@@ -117,11 +130,14 @@ class OrchestratorLoop:
 
             for sq in subquestions:
                 sm.transition(AgentState.DISPATCHING, sq.sq_id)
+                self._notify(sm)
                 if self._gate():
                     partial = True
                     break
                 sm.transition(AgentState.COLLECTING, sq.sq_id)
+                self._notify(sm)
                 await self._run_subagent(sq)
+                self._notify(sm)
 
             # Coverage gate (§2.3): the writer must not run over open items.
             # A budget break above leaves later items open — mark them blocked
@@ -132,33 +148,55 @@ class OrchestratorLoop:
                 )
                 partial = True
 
-            sm.transition(AgentState.WRITING, "writer over premises/findings")
-            answer, writer_messages = await self._writer_phase()
+            # Writer/verify rounds with bounded gap-filling (§3): a low-credence
+            # verdict is a search gradient, not a pass/fail gate — localize the
+            # weakest premise, dispatch ONE targeted subagent, rewrite.
+            gap_rounds = 0
+            while True:
+                sm.transition(AgentState.WRITING, "writer over premises/findings")
+                self._notify(sm)
+                answer, writer_messages = await self._writer_phase()
 
-            sm.transition(AgentState.VERIFYING, "citation check + structural verification")
-            answer, check = await self._cite_check_with_repair(answer, writer_messages)
-            claims = write_claims(sid, check, self.dag)
+                sm.transition(AgentState.VERIFYING, "citation check + structural verification")
+                self._notify(sm)
+                answer, check = await self._cite_check_with_repair(answer, writer_messages)
+                claims = write_claims(sid, check, self.dag)
 
-            vreport = verify_session(self.ctx.conn, self.blobs, sid)
-            self.event_log.append(
-                sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
-            )
-            violations = [f"{v.check}: {v.detail}" for v in vreport.violations]
-
-            # §6 stage 3: recompute credence over the whole graph (claims now
-            # exist); stage 4: bottom-up omission traversal. Both mechanical.
-            credence = self._compute_credences()
-            self.event_log.append(
-                sid,
-                "harness",
-                EventType.CREDENCE_COMPUTED,
-                {
-                    "flagged": credence.flagged_claims,
-                    "credences": {
-                        nid: round(nc.credence, 6) for nid, nc in sorted(credence.nodes.items())
+                vreport = verify_session(self.ctx.conn, self.blobs, sid)
+                self.event_log.append(
+                    sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
+                )
+                # §6 stage 3: recompute credence over the whole graph.
+                credence = self._compute_credences()
+                self.event_log.append(
+                    sid,
+                    "harness",
+                    EventType.CREDENCE_COMPUTED,
+                    {
+                        "flagged": credence.flagged_claims,
+                        "credences": {
+                            nid: round(nc.credence, 6) for nid, nc in sorted(credence.nodes.items())
+                        },
                     },
-                },
-            )
+                )
+                if (
+                    credence.flagged_claims
+                    and gap_rounds < self.config.budgets.max_gap_rounds
+                    and not partial
+                    and not self._gate()
+                ):
+                    sm.transition(AgentState.GAP_FILLING, f"round {gap_rounds + 1}")
+                    self._notify(sm)
+                    await self._gap_fill(credence, gap_rounds)
+                    gap_rounds += 1
+                    # This round's claims are superseded by the rewrite; their
+                    # node_added events remain in the log as the audit trail.
+                    self.dag.delete_claims(sid)
+                    continue
+                break
+
+            violations = [f"{v.check}: {v.detail}" for v in vreport.violations]
+            # §6 stage 4: bottom-up omission traversal over the final graph.
             omissions = detect_omissions(self.ctx.conn, self.event_log, sid)
             self.event_log.append(
                 sid, "harness", EventType.OMISSION_DETECTED, omissions.to_payload()
@@ -287,6 +325,8 @@ class OrchestratorLoop:
             if self._gate() or subagent_turns >= cfg.budgets.max_turns_per_subagent:
                 end_reason = "budget/turn cap reached before submit_report"
                 break
+            messages = self._drain_steering(messages)
+            messages = self._compact_if_needed(messages, sq, recorded_premises)
             resp = await self.gateway.complete(
                 prompts.build_subagent_request(cfg, tool_schemas, list(messages))
             )
@@ -312,6 +352,43 @@ class OrchestratorLoop:
             raise RuntimeError(f"unhandled stop_reason in subagent: {resp.stop_reason}")
 
         self._fold_in_report(sq, submission, recorded_premises, end_reason)
+
+    def _compact_if_needed(
+        self, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
+    ) -> list[dict]:
+        """Compaction ladder (§7): evict, then reset. Pure function of the
+        transcript's char counts — replays deterministically."""
+        cfg = self.config
+        before = compaction.context_chars(messages)
+        if before <= cfg.max_context_chars:
+            return messages
+        messages, evicted = compaction.evict_tool_results(messages, cfg.evict_keep_last)
+        action = "evict"
+        if compaction.context_chars(messages) > cfg.max_context_chars:
+            action = "reset"
+            texts = self._premise_texts(recorded_premises)
+            messages = compaction.reset_context(
+                prompts.subagent_user_prompt(sq.sq_id, sq.question), texts
+            )
+        self.event_log.append(
+            cfg.session_id,
+            f"subagent:{sq.sq_id}",
+            EventType.CONTEXT_COMPACTED,
+            {
+                "action": action,
+                "evicted_results": evicted,
+                "chars_before": before,
+                "chars_after": compaction.context_chars(messages),
+            },
+        )
+        return messages
+
+    def _premise_texts(self, premise_ids: list[str]) -> list[str]:
+        payloads = {
+            row["node_id"]: json.loads(row["payload_json"])
+            for row in self.dag.nodes_for_session(self.config.session_id, tier=1)
+        }
+        return [payloads[pid]["text"] for pid in premise_ids if pid in payloads]
 
     def _extract_submission(
         self, resp: ModelResponse, recorded_premises: list[str]
@@ -468,6 +545,7 @@ class OrchestratorLoop:
                 ),
             }
         ]
+        messages = self._drain_steering(messages)
         self._writer_gate()
         resp = await self.gateway.complete(prompts.build_writer_request(self.config, list(messages)))
         self.turns += 1
@@ -480,6 +558,90 @@ class OrchestratorLoop:
             )
             self.turns += 1
         return resp.text, messages
+
+    # -- gap-filling (§3) ----------------------------------------------------
+
+    async def _gap_fill(self, credence, gap_rounds: int) -> None:
+        """Localize the weakest premise behind the flagged claims and dispatch
+        exactly one subagent to corroborate or refute it."""
+        sid = self.config.session_id
+        target_id, target_text = self._weakest_premise(credence)
+        sq_id = f"sq-gap-{gap_rounds + 1}"
+        question = f'Find independent sources that confirm or refute: "{target_text}"'
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.GAP_FILL_STARTED,
+            {
+                "sq_id": sq_id,
+                "target_premise": target_id,
+                "flagged_claims": credence.flagged_claims,
+            },
+        )
+        self.coverage.create(sid, sq_id, question)
+        await self._run_subagent(Subquestion(sq_id, question))
+
+    def _weakest_premise(self, credence) -> tuple[str, str]:
+        """Deterministic: lowest credence premise supporting any flagged claim
+        (walking claim refs through findings), ties broken by node_id."""
+        sid = self.config.session_id
+        payloads = {
+            row["node_id"]: json.loads(row["payload_json"])
+            for row in self.dag.nodes_for_session(sid)
+        }
+        premise_ids: set[str] = set()
+        for claim_id in credence.flagged_claims:
+            for ref in payloads.get(claim_id, {}).get("refs", []):
+                if ref.startswith("premise:"):
+                    premise_ids.add(ref)
+                elif ref.startswith("finding:"):
+                    premise_ids.update(payloads.get(ref, {}).get("premise_ids", []))
+        if not premise_ids:  # flagged claims with no resolvable premises
+            premise_ids = {nid for nid in payloads if nid.startswith("premise:")}
+        target = min(premise_ids, key=lambda nid: (credence.nodes[nid].credence, nid))
+        return target, payloads[target]["text"]
+
+    # -- steering & progress -------------------------------------------------
+
+    def _drain_steering(self, messages: list[dict]) -> list[dict]:
+        """Inject pending steering as user messages before the next model call
+        (§3 STEERING: injected without tearing down the turn). Recorded with
+        the turn index so replay re-injects identically."""
+        pending = list(self.scripted_steering.get(self.turns, []))
+        while self._steer_queue:
+            pending.append(self._steer_queue.popleft())
+        for text in pending:
+            self.event_log.append(
+                self.config.session_id,
+                "user",
+                EventType.STEERING_INJECTED,
+                {"turn_index": self.turns, "text": text},
+            )
+            messages.append({"role": "user", "content": f"[user steering] {text}"})
+        return messages
+
+    def _notify(self, sm: StateMachine) -> None:
+        if self.reporter is None:
+            return
+        sid = self.config.session_id
+        tiers = {
+            row["tier"]: row["n"]
+            for row in self.ctx.conn.execute(
+                "SELECT tier, COUNT(*) AS n FROM nodes WHERE session_id=? GROUP BY tier", (sid,)
+            )
+        }
+        self.reporter(
+            {
+                "state": sm.state.value,
+                "coverage": self.coverage.summary(sid),
+                "premises": tiers.get(1, 0),
+                "findings": tiers.get(2, 0),
+                "claims": tiers.get(4, 0),
+                "turns": self.turns,
+                "tokens": self.ledger.spent_tokens(sid),
+                "usd": round(self.ledger.spent_usd(sid), 4),
+            }
+        )
 
     # -- credence & omission -------------------------------------------------
 

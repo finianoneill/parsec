@@ -27,6 +27,7 @@ class AgentState(StrEnum):
     COLLECTING = "COLLECTING"
     WRITING = "WRITING"
     VERIFYING = "VERIFYING"
+    GAP_FILLING = "GAP_FILLING"
     DONE = "DONE"
     HALTED = "HALTED"
 
@@ -36,7 +37,8 @@ _ALLOWED: dict[AgentState, set[AgentState]] = {
     AgentState.DISPATCHING: {AgentState.COLLECTING, AgentState.WRITING, AgentState.HALTED},
     AgentState.COLLECTING: {AgentState.DISPATCHING, AgentState.WRITING, AgentState.HALTED},
     AgentState.WRITING: {AgentState.VERIFYING, AgentState.HALTED},
-    AgentState.VERIFYING: {AgentState.DONE, AgentState.HALTED},
+    AgentState.VERIFYING: {AgentState.DONE, AgentState.GAP_FILLING, AgentState.HALTED},
+    AgentState.GAP_FILLING: {AgentState.WRITING, AgentState.HALTED},
     AgentState.DONE: set(),
     AgentState.HALTED: set(),
 }

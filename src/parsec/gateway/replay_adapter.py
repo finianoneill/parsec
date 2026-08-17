@@ -39,6 +39,10 @@ class ReplayAdapter:
         self._request_blobs = {i: requests[i][1] for i in requests}
         self._i = 0
 
+    @property
+    def recorded_calls(self) -> int:
+        return len(self._calls)
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
         if self._i >= len(self._calls):
             raise ReplayDivergence(self._i, "<none>", request.prompt_hash, "replay exhausted: live run issued more calls than recorded")

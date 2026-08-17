@@ -38,6 +38,9 @@ class EvalCase(BaseModel):
     query: str = Field(min_length=1)
     must_find: list[str] = Field(default_factory=list)
     max_turns: int = 20
+    # Gap-fill rounds during eval runs; default 0 so a case's expected call
+    # sequence stays fixed. Raise per case to eval the gap-fill loop itself.
+    max_gap_rounds: int = 0
     notes: str = ""
 
 

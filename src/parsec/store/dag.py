@@ -49,6 +49,18 @@ class DagStore:
         )
         return edge_id
 
+    def delete_claims(self, session_id: str) -> None:
+        """Supersede a rewrite round's ReportClaims (gap-fill loop). The
+        node_added/edge_added events stay in the log as the audit trail."""
+        self.conn.execute(
+            "DELETE FROM edges WHERE session_id=? AND src_node_id IN"
+            " (SELECT node_id FROM nodes WHERE session_id=? AND tier=4)",
+            (session_id, session_id),
+        )
+        self.conn.execute(
+            "DELETE FROM nodes WHERE session_id=? AND tier=4", (session_id,)
+        )
+
     def nodes_for_session(self, session_id: str, tier: int | None = None) -> list[sqlite3.Row]:
         if tier is None:
             return self.conn.execute(
