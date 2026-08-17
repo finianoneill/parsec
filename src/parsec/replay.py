@@ -13,14 +13,16 @@ from dataclasses import dataclass
 from parsec.config import CacheMode, Clock, RunConfig
 from parsec.gateway.gateway import ModelGateway
 from parsec.gateway.replay_adapter import ReplayAdapter
-from parsec.loop.agent import RunResult, SingleAgentLoop
+from parsec.loop.agent import OrchestratorLoop, RunResult
 from parsec.retrieval.fetcher import Fetcher
 from parsec.retrieval.search_provider import FixtureSearchProvider
 from parsec.store.blobs import BlobStore
+from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
 from parsec.store.event_log import EventLog
 from parsec.store.ledger import Ledger
+from parsec.store.notebook import Notebook
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
@@ -82,9 +84,11 @@ async def run_replay(
     registry = ToolRegistry(tools)
     ctx = ToolContext(conn, blobs, event_log, ledger, replay_config, clock)
 
-    loop = SingleAgentLoop(
+    coverage = CoverageLedger(conn, event_log)
+    notebook = Notebook(conn, event_log, clock)
+    loop = OrchestratorLoop(
         replay_config, gateway, registry, ctx, sessions, dag, spans, documents,
-        parent_session_id=original_session_id,
+        coverage, notebook, parent_session_id=original_session_id,
     )
     result = await loop.run()
 

@@ -1,10 +1,10 @@
-"""Citation checking over premise references (M2).
+"""Citation checking over premise/finding references.
 
-The writer cites [premise:<id>] per sentence. This module deterministically
-segments the answer, resolves every premise ref against the session's DAG
-(shallow check — the deep claim→premise→span walk is the verification
-engine's job, verify/structural.py), and writes tier-4 ReportClaim nodes
-with `aggregates` edges to their premises.
+The writer cites [premise:<id>] or [finding:<id>] per sentence. This module
+deterministically segments the answer, resolves every ref against the
+session's DAG (shallow check — the deep claim→…→span walk is the
+verification engine's job, verify/structural.py), and writes tier-4
+ReportClaim nodes with `aggregates` edges to their evidence.
 
 Sentence segmentation is a regex splitter — imperfect but deterministic and
 replay-stable.
@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from parsec.ids import PREMISE_REF_RE
+from parsec.ids import NODE_REF_RE
 from parsec.store.dag import DagStore
 
 NARRATIVE_TAG = "[narrative]"
@@ -28,7 +28,7 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\]])\s+(?!\[)")
 @dataclass
 class Segment:
     text: str
-    refs: list[str]  # premise node IDs
+    refs: list[str]  # premise/finding node IDs
     narrative: bool
 
 
@@ -56,9 +56,9 @@ def segment_answer(answer: str) -> list[Segment]:
             raw = raw.strip()
             if not raw:
                 continue
-            refs = [m.group(0) for m in PREMISE_REF_RE.finditer(raw)]
+            refs = [m.group(0) for m in NODE_REF_RE.finditer(raw)]
             narrative = NARRATIVE_TAG in raw
-            clean = PREMISE_REF_RE.sub("", raw).replace(NARRATIVE_TAG, "")
+            clean = NODE_REF_RE.sub("", raw).replace(NARRATIVE_TAG, "")
             clean = re.sub(r"\[\s*\]", "", clean)
             clean = " ".join(clean.split())
             if not clean:
@@ -71,7 +71,8 @@ def check_citations(answer: str, session_id: str, dag: DagStore) -> CitationChec
     result = CitationCheck(segments=segment_answer(answer))
     known = {
         row["node_id"]
-        for row in dag.nodes_for_session(session_id, tier=1)
+        for tier in (1, 2)
+        for row in dag.nodes_for_session(session_id, tier=tier)
     }
     for seg in result.segments:
         if seg.narrative:
@@ -82,23 +83,22 @@ def check_citations(answer: str, session_id: str, dag: DagStore) -> CitationChec
         for ref in seg.refs:
             if ref not in known:
                 result.problems.append(
-                    f"unknown premise id (not recorded this session): {ref}"
+                    f"unknown premise/finding id (not recorded this session): {ref}"
                 )
     return result
 
 
 def write_claims(session_id: str, check: CitationCheck, dag: DagStore) -> int:
-    """Write ReportClaim nodes + aggregates edges to premises. Returns claim count.
-
-    (M3 will insert Synthesis between claims and premises for multi-agent
-    merges; single-agent claims aggregate their premises directly.)
+    """Write ReportClaim nodes + aggregates edges to their premises/findings.
+    Returns claim count. (Synthesis-tier merges across subagents arrive with
+    the gap-fill work; claims aggregate their evidence nodes directly.)
     """
     written = 0
     for seg in check.claim_segments:
         claim_id = dag.add_node(
             session_id,
             "ReportClaim",
-            {"text": seg.text, "premise_refs": seg.refs, "narrative": False},
+            {"text": seg.text, "refs": seg.refs, "narrative": False},
         )
         for ref in seg.refs:
             dag.add_edge(session_id, claim_id, ref, "aggregates")

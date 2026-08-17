@@ -14,9 +14,9 @@ def test_finding_without_premises_rejected():
 
 def test_report_claim_needs_refs_unless_narrative():
     with pytest.raises(ValidationError):
-        ReportClaimNode(text="a fact", premise_refs=[])
-    ReportClaimNode(text="In summary,", premise_refs=[], narrative=True)
-    ReportClaimNode(text="a fact", premise_refs=["premise:abcd1234abcd1234"])
+        ReportClaimNode(text="a fact", refs=[])
+    ReportClaimNode(text="In summary,", refs=[], narrative=True)
+    ReportClaimNode(text="a fact", refs=["premise:abcd1234abcd1234", "finding:abcd1234abcd1234"])
 
 
 def test_premise_draft_atomicity_cap():

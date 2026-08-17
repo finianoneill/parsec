@@ -22,14 +22,16 @@ from parsec.config import (
 )
 from parsec.db.connection import open_db
 from parsec.gateway.gateway import ModelGateway
-from parsec.loop.agent import SingleAgentLoop
+from parsec.loop.agent import OrchestratorLoop
 from parsec.retrieval.fetcher import Fetcher
 from parsec.retrieval.search_provider import FixtureSearchProvider
 from parsec.store.blobs import BlobStore
+from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
 from parsec.store.event_log import EventLog
 from parsec.store.ledger import Ledger
+from parsec.store.notebook import Notebook
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
@@ -83,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     s_show.add_argument("session_id")
     s_show.add_argument("--data-dir", type=Path, default=Path("data"))
 
+    notebook = sub.add_parser("notebook", help="Print a session's notebook (append-only markdown)")
+    notebook.add_argument("session_id")
+    notebook.add_argument("--data-dir", type=Path, default=Path("data"))
+
     spans = sub.add_parser("spans", help="Inspect spans")
     spans_sub = spans.add_subparsers(dest="spans_command", required=True)
     sp_show = spans_sub.add_parser("show")
@@ -116,13 +122,15 @@ def make_adapter(config: RunConfig):
     )
 
 
-def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> SingleAgentLoop:
+def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> OrchestratorLoop:
     event_log = EventLog(conn, clock)
     ledger = Ledger(conn, clock)
     sessions = SessionStore(conn, clock)
     documents = DocumentStore(conn, clock)
     spans = SpanStore(conn)
     dag = DagStore(conn, event_log)
+    coverage = CoverageLedger(conn, event_log)
+    notebook = Notebook(conn, event_log, clock)
 
     adapter = make_adapter(config)
     gateway = ModelGateway(adapter, event_log, blobs, ledger, config)
@@ -132,7 +140,9 @@ def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> Sing
         tools.append(SearchBroadTool(FixtureSearchProvider(config.search_fixtures)))
     registry = ToolRegistry(tools)
     ctx = ToolContext(conn, blobs, event_log, ledger, config, clock)
-    return SingleAgentLoop(config, gateway, registry, ctx, sessions, dag, spans, documents)
+    return OrchestratorLoop(
+        config, gateway, registry, ctx, sessions, dag, spans, documents, coverage, notebook
+    )
 
 
 def cmd_ask(args) -> int:
@@ -173,6 +183,7 @@ def cmd_ask(args) -> int:
                     "claims_total": result.claims_total,
                     "unresolved": result.unresolved,
                     "violations": result.violations,
+                    "coverage": result.coverage,
                     "turns": result.turns,
                     "totals": totals,
                 }
@@ -180,6 +191,12 @@ def cmd_ask(args) -> int:
         )
     else:
         console.print(result.answer)
+        if result.coverage:
+            console.print(
+                "[dim]coverage: "
+                + " · ".join(f"{sq} {status}" for sq, status in sorted(result.coverage.items()))
+                + "[/dim]"
+            )
         console.print(
             f"\n[dim]session {result.session_id} · {result.status} · {result.turns} turns · "
             f"{int(totals.get('input_tokens', 0))} in / {int(totals.get('output_tokens', 0))} out tokens · "
@@ -271,8 +288,25 @@ def cmd_sessions(args) -> int:
         "SELECT COUNT(*) FROM events WHERE session_id=?", (args.session_id,)
     ).fetchone()[0]
     console.print(f"{n_events} events")
+    coverage_rows = CoverageLedger(conn, EventLog(conn, clock)).all(args.session_id)
+    if coverage_rows:
+        table = Table("sq", "status", "question", "reason")
+        for c in coverage_rows:
+            table.add_row(c["sq_id"], c["status"], c["question"][:60], c["reason"] or "")
+        console.print(table)
     if row["answer_blob"]:
         console.print(blobs.get_text(row["answer_blob"]))
+    return EXIT_OK
+
+
+def cmd_notebook(args) -> int:
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    if SessionStore(conn, clock).get(args.session_id) is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    notebook = Notebook(conn, EventLog(conn, clock), clock)
+    print(notebook.render(args.session_id))
     return EXIT_OK
 
 
@@ -296,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         "replay": cmd_replay,
         "verify": cmd_verify,
         "sessions": cmd_sessions,
+        "notebook": cmd_notebook,
         "spans": cmd_spans,
     }
     return handlers[args.command](args)

@@ -30,7 +30,9 @@ class Budgets(BaseModel):
     max_usd: float = 0.50
     max_total_tokens: int = 200_000
     max_wall_seconds: int = 300
-    max_turns: int = 12
+    max_turns: int = 12          # global model-call cap (orchestrator + subagents + writer)
+    max_turns_per_subagent: int = 6
+    max_subquestions: int = 4
 
 
 class RunConfig(BaseModel):
