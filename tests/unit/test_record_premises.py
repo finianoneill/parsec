@@ -121,6 +121,41 @@ async def test_transform_note_stored_on_edge(setup, config):
     assert json.loads(edges[0]["payload_json"])["transform_note"] == "converted 70C to F"
 
 
+async def test_vague_premise_refused_at_record_time(setup, config):
+    """M9 ambiguity-refusal gate: 'the study showed benefits'-class premises
+    are rejected with the reason, not recorded vaguely."""
+    registry, ctx, dag, s1, s2 = setup
+    intent = ToolIntent(
+        tool_use_id="t-lint",
+        tool_name="record_premises",
+        input={"premises": [{"text": "The study showed benefits.", "span_refs": [s1]}]},
+    )
+    result = await registry.dispatch(intent, ctx)
+    assert result.ok  # tool ran; the premise itself was refused
+    assert "REJECTED" in result.truncated_text
+    assert "ambiguous referent" in result.truncated_text
+    assert dag.nodes_for_session(config.session_id, tier=1) == []
+
+
+async def test_unsupported_premise_recorded_with_advisory_note(setup, config):
+    """M9 grounded-NLI tier is advisory (T9): a premise the span does not
+    appear to support is still recorded, but the subagent gets a NOTE."""
+    registry, ctx, dag, s1, s2 = setup
+    intent = ToolIntent(
+        tool_use_id="t-nli",
+        tool_name="record_premises",
+        input={
+            "premises": [
+                {"text": "Everest summit teams reported frozen ropes.", "span_refs": [s1]}
+            ]
+        },
+    )
+    result = await registry.dispatch(intent, ctx)
+    assert result.ok
+    assert "NOTE" in result.truncated_text and "unsupported" in result.truncated_text
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1  # advisory, not a gate
+
+
 async def test_idempotent_re_record(setup, config):
     registry, ctx, dag, s1, s2 = setup
     intent = ToolIntent(

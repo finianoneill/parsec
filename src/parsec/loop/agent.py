@@ -40,7 +40,9 @@ from parsec.store.notebook import Notebook
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
+from parsec.verify.conflict import dual_perspective_question
 from parsec.verify.credence import CredenceReport, compute_credences, render_tier
+from parsec.verify.nli import make_grounded_checker
 from parsec.verify.omission import OmissionReport, detect_omissions
 from parsec.verify.structural import verify_session
 
@@ -99,6 +101,9 @@ class OrchestratorLoop:
         self.clock = tool_ctx.clock
         self.halt_requested = False
         self.turns = 0
+        # Grounded-NLI tier for verification stage 2 (M9), from the frozen
+        # config so replayed sessions verify identically.
+        self.nli_checker = make_grounded_checker(config.nli_checker)
         # Steering (§3): user messages injected without tearing down the turn.
         # Live input lands in the queue; replay re-injects the recorded
         # steering at the recorded turn indices via scripted_steering.
@@ -162,7 +167,9 @@ class OrchestratorLoop:
                 answer, check = await self._cite_check_with_repair(answer, writer_messages)
                 claims = write_claims(sid, check, self.dag)
 
-                vreport = verify_session(self.ctx.conn, self.blobs, sid)
+                vreport = verify_session(
+                    self.ctx.conn, self.blobs, sid, nli_checker=self.nli_checker
+                )
                 self.event_log.append(
                     sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
                 )
@@ -563,11 +570,13 @@ class OrchestratorLoop:
 
     async def _gap_fill(self, credence, gap_rounds: int) -> None:
         """Localize the weakest premise behind the flagged claims and dispatch
-        exactly one subagent to corroborate or refute it."""
+        exactly one subagent to corroborate or refute it. The question is
+        dual-perspective (M9): it targets the claim AND its negation, so
+        conflicts are actively discovered instead of hoped for."""
         sid = self.config.session_id
         target_id, target_text = self._weakest_premise(credence)
         sq_id = f"sq-gap-{gap_rounds + 1}"
-        question = f'Find independent sources that confirm or refute: "{target_text}"'
+        question = dual_perspective_question(target_text)
         self.event_log.append(
             sid,
             "harness",

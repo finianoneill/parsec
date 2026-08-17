@@ -3,10 +3,11 @@
 String-level validation of a premise against its supporting spans:
 numbers must appear exactly (modulo thousands separators) in at least one
 span, quoted phrases must appear verbatim. No model, no judgment — these
-run constantly and must be ~free (§8). Prose entailment (NLI-lite) is a
-later milestone; per the spec, a premise carrying an explicit
-transformation note is exempt from the number check, and the note is
-stored on the extracts edge for auditability.
+run constantly and must be ~free (§8). Prose entailment lives one tier up
+in parsec.verify.nli (M9, advisory per T9) — this exact-match check stays
+the floor. Per the spec, a premise carrying an explicit transformation
+note is exempt from the number check, and the note is stored on the
+extracts edge for auditability.
 """
 
 from __future__ import annotations

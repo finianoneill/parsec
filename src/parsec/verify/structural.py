@@ -1,4 +1,4 @@
-"""Stage-1 structural verification (§6): no model, no judgment.
+"""Stage-1/2 mechanical verification (§6): no judgment.
 
 Walks the persisted Evidence DAG of a session and mechanically checks:
   acyclic          — the DAG is actually a DAG
@@ -9,6 +9,18 @@ Walks the persisted Evidence DAG of a session and mechanically checks:
                      document row, and the verbatim slice of the stored text
   containment      — numbers/quotes in every Premise re-checked against its
                      spans (transform_note on the edge exempts numbers)
+  temporal-order   — stage 2 (M9): ordering findings on `temporal` edges
+                     checked against evidence date intervals; definite
+                     contradictions are violations
+
+Advisory checks (M9, T9 — recorded and surfaced, but they never flip `ok`):
+  premise-support  — grounded-NLI tier: does the evidence actually support
+                     each premise beyond exact-match containment?
+  premise-lint     — Claimify-style ambiguity/decontextualization lints,
+                     re-run over recorded premises (hard-gated for NEW
+                     premises in record_premises; advisory here so sessions
+                     recorded before M9 stay verifiable)
+  temporal         — temporal findings that could not be mechanically decided
 
 Runs at the end of every session and on demand via `parsec verify` — the
 latter is what catches corpus corruption after the fact.
@@ -22,6 +34,9 @@ from dataclasses import dataclass, field
 
 from parsec.store.blobs import BlobStore
 from parsec.verify.containment import check_containment
+from parsec.verify.lints import lint_premise
+from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
+from parsec.verify.temporal import check_temporal_findings
 
 # edge type -> (allowed src node_type(s), allowed dst node_type(s))
 _EDGE_RULES: dict[str, tuple[set[str], set[str]]] = {
@@ -47,6 +62,9 @@ class Violation:
 @dataclass
 class VerificationReport:
     violations: list[Violation] = field(default_factory=list)
+    # Advisory tier (T9): recorded verdicts that inform but never gate — a
+    # session with only advisories is still `ok`.
+    advisories: list[Violation] = field(default_factory=list)
     checked_claims: int = 0
     checked_premises: int = 0
     checked_spans: int = 0
@@ -67,10 +85,24 @@ class VerificationReport:
                 {"check": v.check, "subject": v.subject, "detail": v.detail}
                 for v in self.violations
             ],
+            "advisories": [
+                {"check": v.check, "subject": v.subject, "detail": v.detail}
+                for v in self.advisories
+            ],
         }
 
 
-def verify_session(conn: sqlite3.Connection, blobs: BlobStore, session_id: str) -> VerificationReport:
+# Sentinel default: callers that pass nothing get the always-on lexical
+# tier; passing None disables grounded support checking entirely.
+_DEFAULT_NLI: GroundedChecker = LexicalGroundedChecker()
+
+
+def verify_session(
+    conn: sqlite3.Connection,
+    blobs: BlobStore,
+    session_id: str,
+    nli_checker: GroundedChecker | None = _DEFAULT_NLI,
+) -> VerificationReport:
     report = VerificationReport()
     nodes: dict[str, dict] = {}
     for row in conn.execute(
@@ -95,6 +127,9 @@ def verify_session(conn: sqlite3.Connection, blobs: BlobStore, session_id: str) 
     _check_tier_integrity(nodes, edges, report)
     _check_corpus_integrity(conn, blobs, nodes, report)
     _check_containment(nodes, edges, report)
+    _check_temporal(nodes, edges, report)
+    _check_premise_support(nodes, edges, report, nli_checker)
+    _lint_premises(nodes, report)
     _flag_dependent_claims(nodes, edges, report)
     return report
 
@@ -263,7 +298,8 @@ def _flag_dependent_claims(nodes, edges, report: VerificationReport) -> None:
     violated = {
         v.subject
         for v in report.violations
-        if v.subject in nodes and v.check in ("corpus-integrity", "containment", "tier-integrity")
+        if v.subject in nodes
+        and v.check in ("corpus-integrity", "containment", "tier-integrity", "temporal-order")
     }
     if not violated:
         return
@@ -310,3 +346,49 @@ def _check_containment(nodes, edges, report: VerificationReport) -> None:
             continue  # already flagged by tier-integrity
         for problem in check_containment(node["payload"]["text"], span_texts, transform_note):
             report.violations.append(Violation("containment", nid, problem))
+
+
+def _check_temporal(nodes, edges, report: VerificationReport) -> None:
+    """Stage 2 (§6): temporal edges checked against evidence timestamps
+    mechanically, before any judge sees them. Definite ordering
+    contradictions are violations; undecidable findings are advisories."""
+    out = _out_edges(edges)
+    violations, advisories = check_temporal_findings(nodes, out)
+    for subject, detail in violations:
+        report.violations.append(Violation("temporal-order", subject, detail))
+    for subject, detail in advisories:
+        report.advisories.append(Violation("temporal", subject, detail))
+
+
+def _check_premise_support(
+    nodes, edges, report: VerificationReport, checker: GroundedChecker | None
+) -> None:
+    """Grounded-NLI tier (M9, T9): flags premises whose spans pass exact-match
+    containment but do not appear to carry the premise's content. Advisory —
+    NLI error rates are real, so this never sole-gates a premise."""
+    if checker is None:
+        return
+    out = _out_edges(edges)
+    for nid in sorted(nodes):
+        node = nodes[nid]
+        if node["type"] != "Premise":
+            continue
+        span_texts = sorted(
+            nodes[e["dst_node_id"]]["payload"]["text"]
+            for e in out.get(nid, [])
+            if e["edge_type"] == "extracts" and e["dst_node_id"] in nodes
+        )
+        if not span_texts:
+            continue  # already flagged by tier-integrity
+        verdict = checker.check(node["payload"]["text"], span_texts)
+        if verdict.flagged:
+            report.advisories.append(Violation("premise-support", nid, verdict.describe()))
+
+
+def _lint_premises(nodes, report: VerificationReport) -> None:
+    for nid in sorted(nodes):
+        node = nodes[nid]
+        if node["type"] != "Premise":
+            continue
+        for reason in lint_premise(node["payload"]["text"]):
+            report.advisories.append(Violation("premise-lint", nid, reason))

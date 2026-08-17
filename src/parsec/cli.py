@@ -76,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--searxng-url", default=None)
     ask.add_argument("--contact", default=None, help="Contact info appended to the fetch User-Agent")
     ask.add_argument("--no-robots", action="store_true", help="Skip robots.txt checks (not recommended)")
+    ask.add_argument(
+        "--nli-checker", choices=["lexical", "hhem", "none"], default="lexical",
+        help="Grounded premise-support tier (advisory): hhem needs the `nli` extra",
+    )
     ask.add_argument("--json", action="store_true", dest="as_json")
     ask.add_argument(
         "--live", action="store_true",
@@ -102,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--no-verify", action="store_true")
 
     verify = sub.add_parser(
-        "verify", help="Run stage-1 structural verification over a session's evidence DAG"
+        "verify",
+        help="Run mechanical verification (structural + temporal + NLI advisories) over a session's evidence DAG",
     )
     verify.add_argument("session_id")
     verify.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -131,6 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     ev_run.add_argument(
         "--runs", type=int, default=1,
         help="Runs per case (scores are means; frozen corpora leave only agent sampling variance)",
+    )
+    ev_run.add_argument(
+        "--support-checker", choices=["mechanical", "grounded"], default="mechanical",
+        help="Claim-support axis grader: grounded adds the M9 lexical-NLI tier over the exact-match floor",
     )
     ev_cmp = ev_sub.add_parser("compare", help="Compare two results files for regressions")
     ev_cmp.add_argument("results_a", type=Path)
@@ -242,6 +251,7 @@ def cmd_ask(args) -> int:
         searxng_url=args.searxng_url,
         respect_robots=not args.no_robots,
         contact=args.contact,
+        nli_checker=args.nli_checker,
     )
     loop = _build_loop(config, conn, blobs, clock)
 
@@ -354,6 +364,7 @@ def cmd_replay(args) -> int:
 
 def cmd_verify(args) -> int:
     from parsec.verify.credence import compute_credences, render_tier
+    from parsec.verify.nli import make_grounded_checker
     from parsec.verify.omission import detect_omissions
     from parsec.verify.structural import verify_session
 
@@ -363,8 +374,11 @@ def cmd_verify(args) -> int:
     if store.get(args.session_id) is None:
         console.print(f"[red]unknown session {args.session_id}[/red]")
         return EXIT_USAGE
-    report = verify_session(conn, blobs, args.session_id)
     session_config = store.get_config(args.session_id)
+    report = verify_session(
+        conn, blobs, args.session_id,
+        nli_checker=make_grounded_checker(session_config.nli_checker),
+    )
     credence = compute_credences(
         conn,
         args.session_id,
@@ -393,6 +407,8 @@ def cmd_verify(args) -> int:
             for v in report.violations:
                 table.add_row(v.check, v.subject, v.detail)
             console.print(table)
+        for v in report.advisories:
+            console.print(f"[yellow]advisory ({v.check}):[/yellow] {v.subject} — {v.detail}")
         if credence.flagged_claims:
             console.print(
                 f"[yellow]{len(credence.flagged_claims)} claims below the stakes threshold[/yellow]"
@@ -508,6 +524,7 @@ def cmd_eval(args) -> int:
 def _eval_run(args) -> int:
     from parsec.evals.case import discover_cases
     from parsec.evals.runner import run_cases
+    from parsec.evals.support import make_support_checker
 
     case_dirs = discover_cases(args.cases_root)
     if not case_dirs:
@@ -529,7 +546,7 @@ def _eval_run(args) -> int:
             run_cases(
                 case_dirs, Path(workdir), factory, clock, args.model,
                 label=args.label, judge_adapter=judge_adapter, judge_model=args.judge_model,
-                runs=args.runs,
+                runs=args.runs, support_checker=make_support_checker(args.support_checker),
             )
         )
     payload = run.to_payload()

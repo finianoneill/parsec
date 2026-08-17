@@ -13,6 +13,14 @@ dependencies = [
     "trafilatura>=2.2.0",
 ]
 
+[project.optional-dependencies]
+# Grounded-NLI escalation tier (M9): HHEM-2.1-Open via transformers.
+# The default lexical tier needs none of this.
+nli = [
+    "transformers>=4.44",
+    "torch>=2.3",
+]
+
 [project.scripts]
 parsec = "parsec.cli:main"
 
