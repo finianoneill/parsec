@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from rich.console import Console
@@ -84,6 +86,30 @@ def build_parser() -> argparse.ArgumentParser:
     s_show = sessions_sub.add_parser("show")
     s_show.add_argument("session_id")
     s_show.add_argument("--data-dir", type=Path, default=Path("data"))
+
+    ev = sub.add_parser("eval", help="Eval harness: frozen-corpus runs, scoring, regression compare")
+    ev_sub = ev.add_subparsers(dest="eval_command", required=True)
+    ev_run = ev_sub.add_parser("run", help="Run all cases under a directory and score them")
+    ev_run.add_argument("cases_root", type=Path)
+    ev_run.add_argument("--out", type=Path, required=True, help="Write results JSON here")
+    ev_run.add_argument("--label", default="")
+    ev_run.add_argument("--model", default=DEFAULT_MODEL)
+    ev_run.add_argument(
+        "--judge", choices=["openai", "none"], default="none",
+        help="Synthesis judge (axis 3, advisory). openai needs OPENAI_API_KEY.",
+    )
+    ev_run.add_argument("--judge-model", default=os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o"))
+    ev_cmp = ev_sub.add_parser("compare", help="Compare two results files for regressions")
+    ev_cmp.add_argument("results_a", type=Path)
+    ev_cmp.add_argument("results_b", type=Path)
+    ev_cmp.add_argument("--epsilon", type=float, default=0.05)
+    ev_cmp.add_argument("--json", action="store_true", dest="as_json")
+    ev_make = ev_sub.add_parser("make-case", help="Snapshot a recorded session's corpus into a frozen case")
+    ev_make.add_argument("session_id")
+    ev_make.add_argument("--data-dir", type=Path, default=Path("data"))
+    ev_make.add_argument("--fixtures", type=Path, required=True, help="Search fixtures used for the recording")
+    ev_make.add_argument("--out", type=Path, required=True, help="New case directory")
+    ev_make.add_argument("--case-id", default=None)
 
     notebook = sub.add_parser("notebook", help="Print a session's notebook (append-only markdown)")
     notebook.add_argument("session_id")
@@ -329,6 +355,105 @@ def cmd_sessions(args) -> int:
     return EXIT_OK
 
 
+def cmd_eval(args) -> int:
+    if args.eval_command == "run":
+        return _eval_run(args)
+    if args.eval_command == "compare":
+        return _eval_compare(args)
+    return _eval_make_case(args)
+
+
+def _eval_run(args) -> int:
+    from parsec.evals.case import discover_cases
+    from parsec.evals.runner import run_cases
+
+    case_dirs = discover_cases(args.cases_root)
+    if not case_dirs:
+        console.print(f"[red]no cases found under {args.cases_root}[/red]")
+        return EXIT_USAGE
+
+    def factory(config: RunConfig):
+        return make_adapter(config)
+
+    judge_adapter = None
+    if args.judge == "openai":
+        from parsec.gateway.openai_adapter import OpenAIAdapter
+
+        judge_adapter = OpenAIAdapter()
+
+    clock = RealClock()
+    with tempfile.TemporaryDirectory(prefix="parsec-eval-") as workdir:
+        run = asyncio.run(
+            run_cases(
+                case_dirs, Path(workdir), factory, clock, args.model,
+                label=args.label, judge_adapter=judge_adapter, judge_model=args.judge_model,
+            )
+        )
+    payload = run.to_payload()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    table = Table("case", "status", "citation", "coverage", "synthesis", "turns")
+    for r in run.results:
+        s = r.scores
+        fmt = lambda v: "—" if v is None else f"{v:.2f}"  # noqa: E731
+        table.add_row(r.case_id, r.status, fmt(s.citation_faithfulness), fmt(s.coverage), fmt(s.synthesis), str(r.turns))
+    console.print(table)
+    console.print(f"aggregate: {payload['aggregate']}  →  {args.out}")
+    return EXIT_OK if all(r.error is None for r in run.results) else EXIT_ERROR
+
+
+def _eval_compare(args) -> int:
+    from parsec.evals.regression import compare_runs
+
+    a = json.loads(args.results_a.read_text(encoding="utf-8"))
+    b = json.loads(args.results_b.read_text(encoding="utf-8"))
+    comparison = compare_runs(a, b, epsilon=args.epsilon)
+    if args.as_json:
+        print(json.dumps(comparison.to_payload()))
+    else:
+        table = Table("case", "axis", "before", "after", "delta", "regressed")
+        for d in comparison.deltas:
+            fmt = lambda v: "—" if v is None else f"{v:.2f}"  # noqa: E731
+            table.add_row(
+                d.case_id, d.axis, fmt(d.before), fmt(d.after),
+                "—" if d.delta is None else f"{d.delta:+.2f}",
+                "[red]YES[/red]" if d.regressed else "no",
+            )
+        console.print(table)
+        if comparison.only_in_a or comparison.only_in_b:
+            console.print(f"only in A: {comparison.only_in_a}  only in B: {comparison.only_in_b}")
+        if comparison.ok:
+            console.print("[green]no regressions[/green]")
+        else:
+            console.print(f"[red]{len(comparison.regressions)} regressions (epsilon={args.epsilon})[/red]")
+    return EXIT_OK if comparison.ok else EXIT_PARTIAL
+
+
+def _eval_make_case(args) -> int:
+    from parsec.evals.case import make_case_from_session
+
+    clock = RealClock()
+    conn, _ = _open(args.data_dir)
+    row = SessionStore(conn, clock).get(args.session_id)
+    if row is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    conn.close()
+    case = make_case_from_session(
+        args.data_dir,
+        args.fixtures,
+        args.out,
+        case_id=args.case_id or args.session_id,
+        query=row["query"],
+    )
+    console.print(
+        f"case [bold]{case.case_id}[/bold] created at {args.out} — "
+        f"edit case.json to add the gold must_find list"
+    )
+    return EXIT_OK
+
+
 def cmd_notebook(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -359,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "replay": cmd_replay,
         "verify": cmd_verify,
+        "eval": cmd_eval,
         "sessions": cmd_sessions,
         "notebook": cmd_notebook,
         "spans": cmd_spans,
