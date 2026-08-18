@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="312 tests" src="https://img.shields.io/badge/tests-312%20passing-16a34a?style=flat-square">
+  <img alt="316 tests" src="https://img.shields.io/badge/tests-316%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -28,7 +28,7 @@ Parsec applies the same principle to LLM research agents. Most agents produce fl
 - **No confidence without computation.** Sources carry priors, independent corroboration raises credence via noisy-OR, shaky chains visibly decay, and the report's hedging ("X is true" vs. "one source suggests") is a function of the computed number — never vibes.
 - **No run that can't be replayed.** Every fetch is content-addressed, every model call and state transition is event-logged. Any session re-executes byte-identically against its frozen corpus, which makes every harness change measurable.
 
-The model never executes anything: it emits structured intents; the harness validates, executes, and records (the design's full rationale lives in [RESEARCH_HARNESS_ARCHITECTURE.md](RESEARCH_HARNESS_ARCHITECTURE.md)).
+The model never executes anything: it emits structured intents; the harness validates, executes, and records (see the design tenets below).
 
 ## How it works
 
@@ -51,6 +51,25 @@ flowchart LR
 3. **Write behind a firewall.** The writer sees the query, the recorded premises/findings with computed confidence tiers, and the coverage gaps — never a raw document, never the research transcript. Every factual sentence must cite premise/finding IDs.
 4. **Verify mechanically.** Structural checks (every claim reaches an intact span), exact number/quote containment, temporal-ordering checks against evidence dates, grounded-NLI support advisories (does the span actually *say* that?), credence propagation, and bottom-up omission detection — what did the report *fail* to say? — all run without a remote model. A claim below the stakes threshold becomes a search gradient: the harness localizes the weakest premise and dispatches one targeted gap-fill subagent.
 5. **Report honestly.** The answer ships with a harness-built appendix: per-claim confidence tiers, sources consulted but unused, premises recorded but uncited.
+
+## Design tenets
+
+The load-bearing decisions; when an implementation choice conflicts with a tenet, the tenet wins. Code comments cite these by number (T1–T12).
+
+- **T1 — The harness owns all side effects.** The model never executes anything: it emits structured tool-call intents; the harness validates, executes, truncates, and injects results. The model is a stateless planner/synthesizer.
+- **T2 — Research has no oracle, so verification must be structural.** There is no "tests pass" for a report; the machine-checkable substitute is the evidence DAG — every claim traces through typed derivation edges to source spans. Verification is graph traversal first, LLM judgment last.
+- **T3 — Premises carry credence, never presumption.** No source is assumed true: every root node gets a computed prior (source tier × independent corroboration × recency-vs-volatility), and confidence propagates rather than being asserted.
+- **T4 — Everything is replayable.** Content-addressed fetches, event-logged model/tool calls and state transitions; any run re-executes byte-identically against its frozen corpus. Without this, no change to the system is measurable.
+- **T5 — Context is a budgeted resource with an explicit ledger.** Per-turn token accounting, cache-aware prompt assembly (stable prefix, append-only suffix), and a compaction ladder that degrades gracefully.
+- **T6 — Subagents are context firewalls.** The orchestrator never sees a raw document; subagents burn their windows on sources and return typed findings. Recursion is banned structurally, not by prompt.
+- **T7 — Rippable over clever.** Model capabilities improve fast; prefer thin, deletable mechanisms. The durable assets are the data model, the corpus, and the eval suite — not the loop logic.
+- **T8 — Concurrency is recorded, not forbidden.** Parallel subagents are fine because every nondeterministic boundary — and its arrival order — is journaled; replay feeds recorded results through a deterministic scheduler.
+- **T9 — Verification is tiered by trust, and the mechanical tier is never enough.** Structure < grounded-NLI support < advisory judge; every new verifier is benchmarked before it gates anything, and NLI never sole-gates — exact-match stays the floor.
+- **T10 — Credence must survive correlated, conflicting, and stale evidence.** Corroboration counts independent content clusters (not domains); conflict lowers confidence rather than averaging away; facts carry mutability classes and can be superseded; the numbers get recalibrated or stay internal.
+- **T11 — The archive is ours; provider responses are borrowed.** The content-addressed archive of self-fetched documents is permanent (the replay substrate); provider API responses are TTL-bounded per provider policy. Fetching is identity-honest: descriptive UA, robots respected, 402/RSL surfaced as typed outcomes, never circumvented.
+- **T12 — Every improvement lands with its measurement.** No workstream merges without the eval that detects its regression; paired-difference stats with confidence intervals replace raw threshold gates.
+
+> Historical note: code comments also cite section and workstream labels (`§n`, `WS-x`) from the original architecture brief and v2 plan, which have been retired from the tree — both are preserved in git history (`git log --all --oneline -- RESEARCH_HARNESS_ARCHITECTURE.md RESEARCH_HARNESS_V2_PLAN.md`).
 
 ## Install
 
@@ -123,6 +142,28 @@ Every flag you'd otherwise repeat can live in JSON config, layered as `~/.parsec
 ```
 
 Unknown keys are rejected loudly (typo protection). The interactive banner shows which config files were loaded.
+
+### Claude via Amazon Bedrock
+
+If your org reaches Claude through Bedrock instead of an Anthropic API key, install the signing dependencies and point the adapter at your AWS profile:
+
+```sh
+uv sync --extra bedrock              # or: uv tool install --editable ".[bedrock]"
+okta-awscli --profile okta           # or aws sso login, etc. — anything that writes
+                                     # credentials into the standard AWS chain
+```
+
+Then set it once in config (or pass `--adapter bedrock --aws-region … --aws-profile …` per run):
+
+```json
+{
+  "adapter": "bedrock",
+  "aws_region": "us-east-1",
+  "aws_profile": "okta"
+}
+```
+
+Auth is the standard AWS credential chain — env vars, then `~/.aws/credentials` — which is exactly where okta-awscli drops its temporary STS credentials, so re-running `okta-awscli` when they expire is the whole refresh story. Model IDs are prefixed automatically (`claude-opus-5` → `anthropic.claude-opus-5`); no `ANTHROPIC_API_KEY` is needed. Recording, replay, and budgets behave identically to the first-party adapter.
 
 ### Editing the research brief in $EDITOR
 
@@ -232,7 +273,7 @@ The loop is replaceable by design; the durable assets are the data model, the co
 
 ## Milestones
 
-All seven milestones of the [architecture brief](RESEARCH_HARNESS_ARCHITECTURE.md) §11 are complete — **M0–M5 was the v1 definition of done; M6 is polish.**
+All seven milestones of the original architecture brief are complete — **M0–M5 was the v1 definition of done; M6 is polish.**
 
 <details>
 <summary>Full milestone log (M0–M6)</summary>
@@ -258,7 +299,7 @@ Changes should keep the whole suite green and — for anything touching the loop
 
 ## Roadmap (v2)
 
-The research-backed v2 plan lives in [RESEARCH_HARNESS_V2_PLAN.md](RESEARCH_HARNESS_V2_PLAN.md). **All six v2 milestones are complete** — M7–M10 was the v2 definition of done; M11–M12 were the high-value stretch:
+**All six v2 milestones are complete** — M7–M10 was the v2 definition of done; M11–M12 were the high-value stretch (the research-backed v2 plan behind them is preserved in git history):
 
 - [x] **M7 — Live retrieval**: SearXNG/Brave/Serper adapters behind the extended provider protocol with TTL-bounded provider caches (T11: provider responses are borrowed data, the self-fetch archive is permanent); trafilatura main-content extraction with markdown output and stdlib fallback; `search_within` hybrid search over the fetched corpus (SQLite FTS5 BM25 + cached deterministic embeddings + reciprocal-rank fusion); politeness 2.0 — robots.txt respected per agent group, HTTP 402 and RSL `License:` terms surfaced as typed cached fetch outcomes (never circumvented), identity-honest UA with contact info. *Exit test green: a live-provider query end-to-end, replayed byte-identically with zero live calls; blocked and licensed URLs surface as typed outcomes that also replay.*
 - [x] **M8 — Evals 2.0**: gold is now weighted binary nugget rubrics (vital/okay) with **contradiction patterns** — a report asserting the opposite of the gold scores worse than silence; cases carry verified `gold_docs` and planted `distractor_docs` (hard negatives); a new **claim-support axis** grades every claim against the verbatim spans behind it from the frozen cache (deterministic mechanical checker behind a `SupportChecker` seam — the grounded-NLI implementation slots in at M9); **trajectory metrics** (gold-fetch fraction, distractor fraction, redundant searches, repeated calls, tokens/$) ride along in results; and the regression runner does **paired-difference statistics** — per-axis three-state verdicts (improved/regressed/inconclusive) from mean paired deltas with 95% CIs, epsilon fallback for single cases, `--runs N` per-case means. *Exit test green: a lucky retriever that fetched only the planted distractor keeps perfect claim support (its bad source does say 90°) but is caught by the nugget contradiction check and zero gold-fetch fraction; compare flags exactly `nugget_recall` as regressed with n=2 and a correct CI; comparing a run against itself reads all-inconclusive.*
@@ -269,4 +310,4 @@ The research-backed v2 plan lives in [RESEARCH_HARNESS_V2_PLAN.md](RESEARCH_HARN
 
 ## License
 
-[Apache-2.0](LICENSE). The architecture brief, including its industry cross-check and self-scrutiny sections, is in [RESEARCH_HARNESS_ARCHITECTURE.md](RESEARCH_HARNESS_ARCHITECTURE.md).
+[Apache-2.0](LICENSE).

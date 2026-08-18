@@ -19,6 +19,9 @@ PROJECT_CONFIG = Path(".parsec.json")
 
 _PATH_KEYS = {"data_dir", "search_fixtures", "calibration"}
 _ALLOWED = _PATH_KEYS | {
+    "adapter",
+    "aws_region",
+    "aws_profile",
     "model",
     "cache_mode",
     "search_provider",
