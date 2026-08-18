@@ -22,12 +22,12 @@ from parsec.models.events import EventType
 _TAIL = 8
 _DIM = "dim"
 
-# The parsec compass: a sighting needle sweeping the rose, kin to the
-# parallax mark in the banner. Registered once at import; rich looks
-# spinners up by name.
-SPINNERS["parsec-compass"] = {
-    "interval": 120,
-    "frames": ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"],
+# The parsec star: the banner's ✦ mark pulsing — swelling from a point to a
+# full burst and back. Registered once at import; rich looks spinners up by
+# name.
+SPINNERS["parsec-star"] = {
+    "interval": 140,
+    "frames": ["·", "✦", "✶", "✹", "✺", "✹", "✶", "✦"],
 }
 
 
@@ -45,7 +45,7 @@ class ActivityView:
 
     def __init__(self, console: Console):
         self._spinner = Spinner(
-            "parsec-compass", text=Text("starting…", style="#22d3ee"), style="#22d3ee"
+            "parsec-star", text=Text("starting…", style="#22d3ee"), style="#22d3ee"
         )
         self._tail: deque[Text] = deque(maxlen=_TAIL)
         self._stats = Text("")
