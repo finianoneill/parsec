@@ -153,7 +153,7 @@ def writer_user_prompt(
     findings: list[sqlite3.Row],
     sources: dict[str, str],
     unresolved: list[tuple[str, str, str]],  # (sq_id, question, "status: reason")
-    confidence: dict[str, str] | None = None,  # node_id -> annotation, e.g. "high" / "low, single source"
+    confidence: dict[str, str] | None = None,  # node_id -> annotation, e.g. "high" / "low (single source)"
 ) -> str:
     """The writer's entire view of the world: query + distilled evidence + gaps.
     Confidence annotations are computed by the credence model (§6.5) — the

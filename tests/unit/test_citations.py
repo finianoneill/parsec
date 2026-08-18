@@ -35,6 +35,23 @@ def test_segment_answer_splits_and_classifies(dag_with_premises):
     assert segs[1].text == "Water boils at 100C."
 
 
+def test_mid_sentence_citation_does_not_split(dag_with_premises):
+    """A citation inside a sentence must not break it into two claims —
+    only sentence punctuation (or a citation followed by a new sentence)
+    is a boundary."""
+    dag, p1, p2 = dag_with_premises
+    segs = segment_answer(f"Water boils at 100C [{p1}] and drops at altitude [{p2}].")
+    assert len(segs) == 1
+    assert segs[0].refs == [p1, p2]
+    assert segs[0].text == "Water boils at 100C and drops at altitude."
+
+
+def test_stripped_tags_leave_no_gap_before_punctuation(dag_with_premises):
+    dag, p1, p2 = dag_with_premises
+    segs = segment_answer(f"Water boils at 100C [{p1}], as sources agree [{p2}].")
+    assert segs[0].text == "Water boils at 100C, as sources agree."
+
+
 def test_check_passes_with_valid_refs(dag_with_premises, config):
     dag, p1, p2 = dag_with_premises
     answer = f"Summary follows. [narrative]\nWater boils at 100C at sea level. [{p1}]"

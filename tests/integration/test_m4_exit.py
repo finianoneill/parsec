@@ -166,9 +166,9 @@ def test_m4_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
     # --- exit test 1: low-quality source -> downstream claim renders hedged ---
     assert len(out["low_confidence"]) == 1
     assert "99 degrees Celsius" in out["low_confidence"][0]
-    assert out["low_confidence"][0].startswith("low, single source")
+    assert out["low_confidence"][0].startswith("low (single source)")
     # the harness-built appendix marks it, tiers only, no raw numbers
-    assert "low, single source confidence" in out["answer"]
+    assert "low (single source) confidence" in out["answer"]
     assert "0.4" not in out["answer"]
 
     conn = open_db(data_dir / "parsec.db")
@@ -188,7 +188,7 @@ def test_m4_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
         if ev.event_type == EventType.LLM_REQUEST
     ]
     writer_body = requests[-1]  # the writer call is the session's last (call_index is per-stream since M11)
-    assert "confidence: low, single source" in writer_body
+    assert "confidence: low (single source)" in writer_body
 
     # --- exit test 2: consulted-but-ignored source appears in the appendix ---
     assert out["unused_sources"] == [GOOD_URL]
@@ -240,4 +240,9 @@ def test_source_tier_override_raises_confidence(tmp_path, transport, fixtures_pa
     assert exit_code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["low_confidence"] == []
-    assert "high, single source confidence" in out["answer"]
+    # The lifted tier clears the stakes flag, but a single source still never
+    # renders "high" — the appendix tally shows it as moderate, and a
+    # no-longer-weak claim gets no per-claim warning line.
+    assert "moderate (single source)" in out["answer"]
+    assert "high" not in out["answer"]
+    assert "99 degrees Celsius. [premise:" in out["answer"]  # body keeps the claim

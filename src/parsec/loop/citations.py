@@ -20,9 +20,14 @@ from parsec.store.dag import DagStore
 
 NARRATIVE_TAG = "[narrative]"
 
-# Split after sentence punctuation (or a closing citation bracket) + whitespace,
-# unless another citation/tag follows — citations trail their sentence.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\]])\s+(?!\[)")
+# Split after sentence punctuation + whitespace unless a citation/tag follows
+# (citations trail their sentence), and after a closing citation bracket only
+# where a new sentence appears to start — a mid-sentence citation must not
+# split its sentence into two claims.
+_SENTENCE_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+(?!\[)"
+    r"|(?<=\])\s+(?=[\"'“(]?[A-Z0-9#*])"
+)
 
 
 @dataclass
@@ -60,6 +65,9 @@ def segment_answer(answer: str) -> list[Segment]:
             narrative = NARRATIVE_TAG in raw
             clean = NODE_REF_RE.sub("", raw).replace(NARRATIVE_TAG, "")
             clean = re.sub(r"\[\s*\]", "", clean)
+            # Removing a tag leaves a gap before its trailing punctuation
+            # ("realm ." / "meaning ,") — close it.
+            clean = re.sub(r"\s+([.,;:!?])", r"\1", clean)
             clean = " ".join(clean.split())
             if not clean:
                 continue

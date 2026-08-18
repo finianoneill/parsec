@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -55,7 +55,7 @@ from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.verify.calibration import PlattScaling, tier_ranges
 from parsec.verify.conflict import dual_perspective_question
-from parsec.verify.credence import CredenceReport, annotate, compute_credences
+from parsec.verify.credence import CredenceReport, annotate, compute_credences, render_tier
 from parsec.verify.nli import make_grounded_checker
 from parsec.verify.omission import OmissionReport, detect_omissions
 from parsec.verify.structural import verify_session
@@ -1043,15 +1043,17 @@ class OrchestratorLoop:
         )
 
     def _annotation(self, credence: CredenceReport, node_id: str) -> str:
-        """Tier + uncertainty provenance (M10): "low, single source",
-        "moderate, conflicting sources", "high (72–96%)", "superseded"...
-        computed by the credence model, never invented here."""
+        """Tier + uncertainty provenance (M10): "low (single source)",
+        "moderate (conflicting sources)", "high (72–96%)"... computed by
+        the credence model, never invented here."""
         return annotate(credence.nodes[node_id], self._tier_ranges)
 
     def _build_appendix(self, credence: CredenceReport, omissions: OmissionReport) -> str:
-        """Mechanical appendix (harness-built, deterministic): per-claim
-        confidence tiers (§10.3 — tiers, never raw numbers) and the
-        consulted-but-unused list (§6 stage 4)."""
+        """Mechanical appendix (harness-built, deterministic): a one-line
+        confidence tally over all claims (§10.3 — tiers, never raw numbers),
+        itemizing only the claims that carry a real warning — restating every
+        high-confidence claim verbatim drowned the signal the block exists
+        to surface — and the consulted-but-unused list (§6 stage 4)."""
         sid = self.config.session_id
         lines = ["", "---", "Confidence (computed by the harness):"]
         claims = [
@@ -1061,9 +1063,28 @@ class OrchestratorLoop:
         ]
         if not claims:
             lines.append("- no supported claims were made")
+        else:
+            tally = Counter(
+                self._annotation(credence, row["node_id"]) for row in claims
+            )
+            summary = " · ".join(f"{n} {label}" for label, n in tally.most_common())
+            plural = "s" if len(claims) != 1 else ""
+            lines.append(f"- {len(claims)} claim{plural}: {summary}")
+        flagged = set(credence.flagged_claims)
         for row in claims:
+            nid = row["node_id"]
+            nc = credence.nodes[nid]
+            worth_itemizing = (
+                nid in flagged
+                or render_tier(nc.credence) != "high"  # true tier, not the single-source cap
+                or nc.conflicted
+                or bool(nc.superseded_by)
+                or nc.stale
+            )
+            if not worth_itemizing:
+                continue
             text = json.loads(row["payload_json"])["text"]
-            lines.append(f"- \"{text}\" — {self._annotation(credence, row['node_id'])} confidence")
+            lines.append(f"- \"{text}\" — {self._annotation(credence, nid)} confidence")
         if omissions.unused_documents:
             lines += ["", "Consulted but unused (fetched, but no recorded evidence reached the answer):"]
             lines += [f"- {d['url']}" for d in omissions.unused_documents]

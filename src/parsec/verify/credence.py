@@ -146,12 +146,18 @@ class NodeCredence:
 
 def annotate(nc: NodeCredence, ranges: dict[str, tuple[int, int]] | None = None) -> str:
     """The full user-facing register: tier (with calibrated range once one
-    exists) + uncertainty provenance straight from the graph."""
+    exists) + uncertainty provenance in one parenthesis. A single independent
+    source caps the RENDERED tier at "moderate" — one story, however
+    reliable, is not corroboration, and the writer's register already treats
+    single-source claims as attribute-don't-assert. The underlying credence
+    (and so flagging) is untouched."""
     label = render_tier(nc.credence)
+    if label == "high" and nc.single_source:
+        label = "moderate"
+    parts = []
     if ranges and label in ranges:
         lo, hi = ranges[label]
-        label = f"{label} ({lo}–{hi}%)"
-    parts = [label]
+        parts.append(f"{lo}–{hi}%")
     if nc.superseded_by:
         parts.append("superseded")
     if nc.conflicted:
@@ -160,7 +166,7 @@ def annotate(nc: NodeCredence, ranges: dict[str, tuple[int, int]] | None = None)
         parts.append("single source")
     if nc.stale:
         parts.append("possibly stale")
-    return ", ".join(parts)
+    return f"{label} ({'; '.join(parts)})" if parts else label
 
 
 @dataclass
