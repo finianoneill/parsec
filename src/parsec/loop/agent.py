@@ -40,8 +40,9 @@ from parsec.store.notebook import Notebook
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
+from parsec.verify.calibration import PlattScaling, tier_ranges
 from parsec.verify.conflict import dual_perspective_question
-from parsec.verify.credence import CredenceReport, compute_credences, render_tier
+from parsec.verify.credence import CredenceReport, annotate, compute_credences
 from parsec.verify.nli import make_grounded_checker
 from parsec.verify.omission import OmissionReport, detect_omissions
 from parsec.verify.structural import verify_session
@@ -104,6 +105,13 @@ class OrchestratorLoop:
         # Grounded-NLI tier for verification stage 2 (M9), from the frozen
         # config so replayed sessions verify identically.
         self.nli_checker = make_grounded_checker(config.nli_checker)
+        # Range-backed tier rendering (M10): calibration is frozen into the
+        # config at session start, so the appendix replays byte-identically.
+        self._tier_ranges = (
+            tier_ranges(PlattScaling.from_payload(config.calibration))
+            if config.calibration
+            else None
+        )
         # Steering (§3): user messages injected without tearing down the turn.
         # Live input lands in the queue; replay re-injects the recorded
         # steering at the recorded turn indices via scripted_steering.
@@ -662,13 +670,16 @@ class OrchestratorLoop:
             source_tiers=cfg.source_tiers,
             stakes_threshold=cfg.stakes_threshold,
             volatile_penalty=cfg.volatile_penalty,
+            volatile_half_life_days=cfg.volatile_half_life_days,
+            slow_half_life_days=cfg.slow_half_life_days,
+            learned_reliability=cfg.learned_reliability,
         )
 
-    @staticmethod
-    def _annotation(credence: CredenceReport, node_id: str) -> str:
-        nc = credence.nodes[node_id]
-        label = render_tier(nc.credence)
-        return f"{label}, single source" if nc.single_source else label
+    def _annotation(self, credence: CredenceReport, node_id: str) -> str:
+        """Tier + uncertainty provenance (M10): "low, single source",
+        "moderate, conflicting sources", "high (72–96%)", "superseded"...
+        computed by the credence model, never invented here."""
+        return annotate(credence.nodes[node_id], self._tier_ranges)
 
     def _build_appendix(self, credence: CredenceReport, omissions: OmissionReport) -> str:
         """Mechanical appendix (harness-built, deterministic): per-claim

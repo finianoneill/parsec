@@ -80,6 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--nli-checker", choices=["lexical", "hhem", "none"], default="lexical",
         help="Grounded premise-support tier (advisory): hhem needs the `nli` extra",
     )
+    ask.add_argument(
+        "--calibration", type=Path, default=None,
+        help="calibration.json from `parsec calibrate`; enables range-backed tiers (\"high (72–96%%)\")",
+    )
+    ask.add_argument(
+        "--learned-reliability", action="store_true",
+        help="Adjust source-tier priors ±cap by truth-discovery over the session's own graph",
+    )
     ask.add_argument("--json", action="store_true", dest="as_json")
     ask.add_argument(
         "--live", action="store_true",
@@ -152,6 +160,17 @@ def build_parser() -> argparse.ArgumentParser:
     ev_make.add_argument("--fixtures", type=Path, required=True, help="Search fixtures used for the recording")
     ev_make.add_argument("--out", type=Path, required=True, help="New case directory")
     ev_make.add_argument("--case-id", default=None)
+
+    cal = sub.add_parser(
+        "calibrate",
+        help="Fit Platt scaling over labeled credences; report Brier, smooth ECE, risk-coverage",
+    )
+    cal.add_argument(
+        "labels", nargs="+", type=Path,
+        help="Labels JSON: a list of {credence, label} pairs, or eval results files carrying per-case labels",
+    )
+    cal.add_argument("--out", type=Path, default=None, help="Output path (default <data-dir>/calibration.json)")
+    cal.add_argument("--data-dir", type=Path, default=Path("data"))
 
     notebook = sub.add_parser("notebook", help="Print a session's notebook (append-only markdown)")
     notebook.add_argument("session_id")
@@ -252,6 +271,12 @@ def cmd_ask(args) -> int:
         respect_robots=not args.no_robots,
         contact=args.contact,
         nli_checker=args.nli_checker,
+        learned_reliability=args.learned_reliability,
+        calibration=(
+            json.loads(args.calibration.read_text(encoding="utf-8"))
+            if args.calibration
+            else None
+        ),
     )
     loop = _build_loop(config, conn, blobs, clock)
 
@@ -363,7 +388,7 @@ def cmd_replay(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    from parsec.verify.credence import compute_credences, render_tier
+    from parsec.verify.credence import annotate, compute_credences, render_tier
     from parsec.verify.nli import make_grounded_checker
     from parsec.verify.omission import detect_omissions
     from parsec.verify.structural import verify_session
@@ -385,6 +410,9 @@ def cmd_verify(args) -> int:
         source_tiers=session_config.source_tiers,
         stakes_threshold=session_config.stakes_threshold,
         volatile_penalty=session_config.volatile_penalty,
+        volatile_half_life_days=session_config.volatile_half_life_days,
+        slow_half_life_days=session_config.slow_half_life_days,
+        learned_reliability=session_config.learned_reliability,
     )
     omissions = detect_omissions(conn, EventLog(conn, clock), args.session_id)
     if args.as_json:
@@ -392,7 +420,12 @@ def cmd_verify(args) -> int:
         payload["credence"] = {
             "flagged_claims": credence.flagged_claims,
             "tiers": {nid: render_tier(nc.credence) for nid, nc in sorted(credence.nodes.items())},
+            # M10 uncertainty provenance: "conflicting sources", "possibly
+            # stale", "superseded", "single source" — straight from the graph
+            "provenance": {nid: annotate(nc) for nid, nc in sorted(credence.nodes.items())},
         }
+        if credence.source_reliability:
+            payload["credence"]["source_reliability"] = credence.source_reliability
         payload["omissions"] = omissions.to_payload()
         print(json.dumps(payload))
     else:
@@ -413,6 +446,11 @@ def cmd_verify(args) -> int:
             console.print(
                 f"[yellow]{len(credence.flagged_claims)} claims below the stakes threshold[/yellow]"
             )
+        for nid, nc in sorted(credence.nodes.items()):
+            if nc.conflicted or nc.superseded_by or nc.stale:
+                console.print(f"[yellow]{annotate(nc)}:[/yellow] {nid}")
+        for dom, provenance in sorted(credence.source_reliability.items()):
+            console.print(f"[dim]reliability {dom}: {provenance}[/dim]")
         if not omissions.empty:
             for d in omissions.unused_documents:
                 console.print(f"[yellow]consulted but unused:[/yellow] {d['url']}")
@@ -630,6 +668,59 @@ def _eval_make_case(args) -> int:
     return EXIT_OK
 
 
+def _extract_label_pairs(data) -> list[tuple[float, int]]:
+    """Accept a bare list of {credence, label} pairs, an object with a
+    top-level "labels" list, or an eval results file whose per-case results
+    carry harvested labels."""
+    if isinstance(data, dict):
+        if "results" in data:
+            items = [pair for result in data["results"] for pair in (result.get("labels") or [])]
+        else:
+            items = data.get("labels", [])
+    else:
+        items = data
+    return [(float(item["credence"]), int(item["label"])) for item in items]
+
+
+def cmd_calibrate(args) -> int:
+    from parsec.verify.calibration import MIN_LABELS, RECOMMENDED_LABELS, calibration_report
+
+    pairs: list[tuple[float, int]] = []
+    for path in args.labels:
+        pairs += _extract_label_pairs(json.loads(path.read_text(encoding="utf-8")))
+    if len(pairs) < MIN_LABELS:
+        console.print(
+            f"[red]calibration needs at least {MIN_LABELS} labeled claims; got {len(pairs)}[/red]"
+        )
+        return EXIT_USAGE
+
+    payload = calibration_report(pairs)
+    out = args.out or (args.data_dir / "calibration.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    console.print(f"fitted Platt scaling on {payload['n']} labeled claims")
+    metrics = Table("metric", "raw heuristic", "calibrated")
+    metrics.add_row("Brier", f"{payload['brier_raw']:.4f}", f"{payload['brier_calibrated']:.4f}")
+    metrics.add_row(
+        "smooth ECE", f"{payload['smooth_ece_raw']:.4f}", f"{payload['smooth_ece_calibrated']:.4f}"
+    )
+    console.print(metrics)
+    ranges = ", ".join(f"{t} = {lo}–{hi}%" for t, (lo, hi) in payload["tier_ranges"].items())
+    console.print(f"tier ranges (calibrated): {ranges}")
+    rc = Table("coverage", "risk")
+    for point in payload["risk_coverage"]:
+        rc.add_row(f"{point['coverage']:.0%}", f"{point['risk']:.1%}")
+    console.print(rc)
+    if payload["underpowered"]:
+        console.print(
+            f"[yellow]only {payload['n']} labels (< {RECOMMENDED_LABELS}): the fit is weak — "
+            "treat ranges as provisional and keep labeling[/yellow]"
+        )
+    console.print(f"→ {out}  (pass to `parsec ask --calibration {out}` for range-backed tiers)")
+    return EXIT_OK
+
+
 def cmd_notebook(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -663,6 +754,7 @@ def main(argv: list[str] | None = None) -> int:
         "fork": cmd_fork,
         "judge": cmd_judge,
         "eval": cmd_eval,
+        "calibrate": cmd_calibrate,
         "sessions": cmd_sessions,
         "notebook": cmd_notebook,
         "spans": cmd_spans,

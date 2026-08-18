@@ -61,14 +61,24 @@ class RunConfig(BaseModel):
     contact: str | None = None
     # Pricing table pinned at session start so replay reproduces recorded costs.
     pricing_override: dict[str, dict[str, float]] | None = None
-    # Credence model (§2.1, T3). source_tiers merges over the built-in domain
-    # table; stakes_threshold is the stage-3 flagging floor for report claims;
-    # volatile_penalty is the flat recency proxy for volatile claims (real
-    # time-decay is deferred until calibration data exists — a clock read here
-    # would break byte-identical replay).
+    # Credence model (§2.1, T3; 2.0 at M10). source_tiers merges over the
+    # built-in domain table; stakes_threshold is the stage-3 flagging floor
+    # for report claims; volatile_penalty is the flat mutability floor for
+    # volatile claims. Age decay is clock-free: evidence age is measured
+    # against the newest evidence timestamp in the corpus, both recorded, so
+    # replay stays byte-identical.
     source_tiers: dict[str, float] | None = None
     stakes_threshold: float = 0.7
     volatile_penalty: float = 0.85
+    volatile_half_life_days: float = 30.0
+    slow_half_life_days: float = 365.0
+    # Truth-discovery source reliability (M10): adjusts tier priors ±cap from
+    # agreement patterns in the session's own graph. Opt-in (plan risk §4.3:
+    # small-corpus truth discovery can self-reinforce) — provenance-stamped.
+    learned_reliability: bool = False
+    # Fitted calibration (`parsec calibrate` output), frozen into the session
+    # so range-backed tier rendering ("high (72–96%)") replays identically.
+    calibration: dict | None = None
     # Grounded-NLI premise support tier (M9, T9): "lexical" is the always-on
     # deterministic checker, "hhem" escalates to HHEM-2.1-Open (needs the
     # `nli` extra), "none" disables. Advisory only — it never gates.
