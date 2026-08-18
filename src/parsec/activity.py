@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import deque
 from urllib.parse import urlparse
 
+from rich._spinners import SPINNERS
 from rich.console import Console, Group
 from rich.live import Live
 from rich.spinner import Spinner
@@ -20,6 +21,14 @@ from parsec.models.events import EventType
 
 _TAIL = 8
 _DIM = "dim"
+
+# The parsec compass: a sighting needle sweeping the rose, kin to the
+# parallax mark in the banner. Registered once at import; rich looks
+# spinners up by name.
+SPINNERS["parsec-compass"] = {
+    "interval": 120,
+    "frames": ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"],
+}
 
 
 def _short(text: str, limit: int = 70) -> str:
@@ -35,7 +44,9 @@ class ActivityView:
     """One live region per run: what parsec is doing, right now."""
 
     def __init__(self, console: Console):
-        self._spinner = Spinner("dots", text=Text("starting…", style="#22d3ee"))
+        self._spinner = Spinner(
+            "parsec-compass", text=Text("starting…", style="#22d3ee"), style="#22d3ee"
+        )
         self._tail: deque[Text] = deque(maxlen=_TAIL)
         self._stats = Text("")
         self._live = Live(
