@@ -183,11 +183,11 @@ def test_m4_exit(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
     # the writer was TOLD the tier (it never invents hedging)
     event_log = EventLog(conn, RealClock())
     requests = [
-        (ev.payload["call_index"], blobs.get_text(ev.payload["request_blob"]))
+        blobs.get_text(ev.payload["request_blob"])
         for ev in event_log.read(session_id)
         if ev.event_type == EventType.LLM_REQUEST
     ]
-    writer_body = max(requests)[1]
+    writer_body = requests[-1]  # the writer call is the session's last (call_index is per-stream since M11)
     assert "confidence: low, single source" in writer_body
 
     # --- exit test 2: consulted-but-ignored source appears in the appendix ---

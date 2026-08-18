@@ -1,4 +1,4 @@
-"""OrchestratorLoop: plan → dispatch subagents → write → verify (M3 shape).
+"""OrchestratorLoop: plan → dispatch subagents → write → verify.
 
 The harness owns every cycle (T1). The orchestrator makes exactly two kinds
 of model calls itself — decomposition and writing — and neither ever
@@ -6,16 +6,28 @@ contains a raw document (T6): subagents are the only consumers of fetched
 content, each in its own context with retrieval tools only. The recursion
 ban is structural: a subagent's registry simply has no dispatch tool (§3).
 
-Subagents run SEQUENTIALLY in v1. Deliberate deviation from §3's parallel
-pool: all events share one per-session ordered stream and the replay
-adapter keys model calls by order, so concurrent subagents would make event
-order — and therefore replay (T4) — nondeterministic. The per-subquestion
-contexts are already independent; parallel dispatch can land later behind
-per-subagent event streams without changing this loop's shape.
+M11 (T8 — concurrency is recorded, not forbidden): subagents may run
+CONCURRENTLY in waves of `budgets.parallel_subagents` (≤5). Determinism
+comes from the Temporal pattern, not sequentialism:
+  - each subagent is its own event stream (contextvar-scoped), internally
+    sequential exactly as before; replay serves its calls per-stream;
+  - the one nondeterministic cross-stream fact — completion order — is
+    journaled as SUBAGENT_JOINED events, and results are FOLDED into
+    shared state (DAG findings, coverage, notebook, writer input order)
+    only at join time, in that order; replay folds in the recorded order;
+  - in-flight budget gates read only stream-local spend against a wave
+    allowance snapshotted at the (deterministic) dispatch boundary, never
+    live global totals that vary with interleaving;
+  - parallel fan-out happens ONLY at the dispatch boundary, research only —
+    the writer is always single (WS-E.3), and gap-fill stays one targeted
+    subagent.
+Sequential mode (parallel_subagents=1) remains the default and the
+permanent config fallback; it is also what `fork --at-call` requires.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import deque
 from dataclasses import dataclass, field
@@ -24,7 +36,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from parsec.config import RunConfig
-from parsec.errors import BudgetExceeded, HaltRequested
+from parsec.errors import BudgetExceeded, HaltRequested, ModelCallFailed, ReplayDivergence
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop import compaction, prompts
 from parsec.loop.citations import check_citations, write_claims
@@ -36,6 +48,7 @@ from parsec.models.tools import ToolIntent
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
+from parsec.store.event_log import stream_scope
 from parsec.store.notebook import Notebook
 from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
@@ -54,6 +67,29 @@ MAX_REPAIR_ROUNDS = 1
 class Subquestion:
     sq_id: str
     question: str
+
+
+@dataclass
+class SubagentOutcome:
+    """What a subagent task returns to the orchestrator; folding into shared
+    state happens at JOIN time, never inside the task (M11)."""
+
+    sq: Subquestion
+    submission: SubagentSubmission | None
+    recorded_premises: list[str]
+    end_reason: str
+    turns: int
+    counted_global_turns: bool  # sequential mode already advanced self.turns
+
+
+@dataclass(frozen=True)
+class WaveAllowance:
+    """Per-subagent budget slice, snapshotted at the dispatch boundary — a
+    deterministic point — so in-flight gates never read interleaving-
+    dependent global totals (M11)."""
+
+    usd: float
+    tokens: float
 
 
 @dataclass
@@ -117,6 +153,14 @@ class OrchestratorLoop:
         # steering at the recorded turn indices via scripted_steering.
         self._steer_queue: deque[str] = deque()
         self.scripted_steering: dict[int, list[str]] = {}
+        # M11 replay scheduler: recorded join order per wave. Empty on live
+        # runs (observed completion order is used and journaled); set by the
+        # replay runner from the recorded SUBAGENT_JOINED events.
+        self.scripted_join_order: list[list[str]] = []
+        # Writer input order = fold order (deterministic under concurrency);
+        # global created_seq would vary with cross-stream interleaving.
+        self._writer_premises: list[str] = []
+        self._writer_findings: list[str] = []
         # Optional progress hook for the live CLI view; called with snapshots.
         self.reporter: Callable[[dict], None] | None = None
 
@@ -141,16 +185,19 @@ class OrchestratorLoop:
             subquestions = await self._plan()
             partial = False
 
-            for sq in subquestions:
-                sm.transition(AgentState.DISPATCHING, sq.sq_id)
-                self._notify(sm)
-                if self._gate():
-                    partial = True
-                    break
-                sm.transition(AgentState.COLLECTING, sq.sq_id)
-                self._notify(sm)
-                await self._run_subagent(sq)
-                self._notify(sm)
+            if self.config.budgets.parallel_subagents > 1 and len(subquestions) > 1:
+                partial = await self._run_parallel(sm, subquestions)
+            else:
+                for sq in subquestions:
+                    sm.transition(AgentState.DISPATCHING, sq.sq_id)
+                    self._notify(sm)
+                    if self._gate():
+                        partial = True
+                        break
+                    sm.transition(AgentState.COLLECTING, sq.sq_id)
+                    self._notify(sm)
+                    await self._run_subagent(sq)
+                    self._notify(sm)
 
             # Coverage gate (§2.3): the writer must not run over open items.
             # A budget break above leaves later items open — mark them blocked
@@ -321,10 +368,88 @@ class OrchestratorLoop:
     # -- subagents -----------------------------------------------------------
 
     async def _run_subagent(self, sq: Subquestion) -> None:
-        """One subagent: own context, retrieval tools only (T6). Ends when it
-        calls submit_report, ends its turn, or hits a budget/turn gate."""
+        """Sequential-mode dispatch (and gap-fill): run one subagent inline,
+        fold its report immediately — the v1 shape, byte-for-byte."""
+        outcome = await self._subagent_task(sq, allowance=None)
+        self._fold_in(outcome)
+
+    async def _run_parallel(self, sm: StateMachine, subquestions: list[Subquestion]) -> bool:
+        """Concurrent waves of ≤ parallel_subagents (M11). Fan-out happens
+        only here, at the dispatch boundary; folds are serialized in join
+        order — observed live, scripted from the recording on replay."""
+        sid = self.config.session_id
+        queue = list(subquestions)
+        wave_index = 0
+        partial = False
+        while queue:
+            if self._gate():
+                partial = True  # leftover sqs stay open; run() closes them as blocked
+                break
+            n = min(self.config.budgets.parallel_subagents, len(queue))
+            wave, queue = queue[:n], queue[n:]
+            sm.transition(
+                AgentState.DISPATCHING,
+                f"wave {wave_index + 1}: " + ", ".join(sq.sq_id for sq in wave),
+            )
+            self._notify(sm)
+            allowance = self._wave_allowance(len(wave))
+            sm.transition(AgentState.COLLECTING, f"{len(wave)} subagents concurrent")
+            self._notify(sm)
+
+            done_order: list[str] = []
+
+            async def run_one(sq: Subquestion) -> SubagentOutcome:
+                try:
+                    return await self._subagent_task(sq, allowance)
+                finally:
+                    done_order.append(sq.sq_id)
+
+            outcomes = {
+                o.sq.sq_id: o
+                for o in await asyncio.gather(*(run_one(sq) for sq in wave))
+            }
+            scripted = (
+                self.scripted_join_order[wave_index]
+                if wave_index < len(self.scripted_join_order)
+                else None
+            )
+            join_order = scripted if scripted and sorted(scripted) == sorted(done_order) else done_order
+            for join_index, sq_id in enumerate(join_order):
+                self.event_log.append(
+                    sid,
+                    "harness",
+                    EventType.SUBAGENT_JOINED,
+                    {"wave": wave_index, "join_index": join_index, "sq_id": sq_id},
+                )
+                self._fold_in(outcomes[sq_id])
+            self._notify(sm)
+            wave_index += 1
+        return partial
+
+    def _wave_allowance(self, n: int) -> WaveAllowance:
+        """Split the remaining budget across the wave. Snapshotted at the
+        dispatch boundary, where ledger totals are still deterministic."""
+        sid = self.config.session_id
+        b = self.config.budgets
+        remaining_usd = max(0.0, b.max_usd - self.ledger.spent_usd(sid))
+        remaining_tokens = max(0.0, b.max_total_tokens - self.ledger.spent_tokens(sid))
+        return WaveAllowance(usd=remaining_usd / n, tokens=remaining_tokens / n)
+
+    async def _subagent_task(
+        self, sq: Subquestion, allowance: WaveAllowance | None
+    ) -> SubagentOutcome:
+        """One subagent: own context, own event stream, retrieval tools only
+        (T6). allowance=None means sequential mode (global gates, global turn
+        counter, live steering — the v1 semantics, unchanged)."""
+        with stream_scope(sq.sq_id):
+            return await self._subagent_body(sq, allowance)
+
+    async def _subagent_body(
+        self, sq: Subquestion, allowance: WaveAllowance | None
+    ) -> SubagentOutcome:
         cfg = self.config
         sid = cfg.session_id
+        sequential = allowance is None
         actor = f"subagent:{sq.sq_id}"
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
         tool_schemas = self.registry.export_schemas()
@@ -336,37 +461,83 @@ class OrchestratorLoop:
         submission: SubagentSubmission | None = None
         end_reason = ""
 
-        while submission is None:
-            if self._gate() or subagent_turns >= cfg.budgets.max_turns_per_subagent:
-                end_reason = "budget/turn cap reached before submit_report"
-                break
-            messages = self._drain_steering(messages)
-            messages = self._compact_if_needed(messages, sq, recorded_premises)
-            resp = await self.gateway.complete(
-                prompts.build_subagent_request(cfg, tool_schemas, list(messages))
-            )
-            self.turns += 1
-            subagent_turns += 1
-
-            if resp.stop_reason == "tool_use":
-                submission = self._extract_submission(resp, recorded_premises)
-                if submission is not None:
-                    break  # report accepted; remaining tool_use blocks are moot
-                messages.append({"role": "assistant", "content": resp.content})
-                messages.append(
-                    {"role": "user", "content": await self._run_tools(resp, recorded_premises)}
+        try:
+            while submission is None:
+                if self._subagent_gate(sq.sq_id, allowance, subagent_turns):
+                    end_reason = "budget/turn cap reached before submit_report"
+                    break
+                if sequential:
+                    # Live steering into a CONCURRENT subagent would be
+                    # interleaving-dependent; parallel mode drains steering
+                    # only at orchestrator-stream boundaries.
+                    messages = self._drain_steering(messages)
+                messages = self._compact_if_needed(messages, sq, recorded_premises)
+                resp = await self.gateway.complete(
+                    prompts.build_subagent_request(cfg, tool_schemas, list(messages))
                 )
-                continue
-            if resp.stop_reason == "max_tokens":
-                messages.append({"role": "assistant", "content": resp.content})
-                messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
-                continue
-            if resp.stop_reason in ("end_turn", "stop_sequence"):
-                end_reason = "subagent ended without calling submit_report"
-                break
-            raise RuntimeError(f"unhandled stop_reason in subagent: {resp.stop_reason}")
+                if sequential:
+                    self.turns += 1
+                subagent_turns += 1
 
-        self._fold_in_report(sq, submission, recorded_premises, end_reason)
+                if resp.stop_reason == "tool_use":
+                    submission = self._extract_submission(resp, recorded_premises)
+                    if submission is not None:
+                        break  # report accepted; remaining tool_use blocks are moot
+                    messages.append({"role": "assistant", "content": resp.content})
+                    messages.append(
+                        {"role": "user", "content": await self._run_tools(resp, recorded_premises)}
+                    )
+                    continue
+                if resp.stop_reason == "max_tokens":
+                    messages.append({"role": "assistant", "content": resp.content})
+                    messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
+                    continue
+                if resp.stop_reason in ("end_turn", "stop_sequence"):
+                    end_reason = "subagent ended without calling submit_report"
+                    break
+                raise RuntimeError(f"unhandled stop_reason in subagent: {resp.stop_reason}")
+        except (HaltRequested, ReplayDivergence):
+            raise  # session-level: user abort / replay integrity
+        except ModelCallFailed as exc:
+            # M11 failure semantics: the failure was journaled by the gateway
+            # (replay reproduces it at the same per-stream call); this
+            # subagent dies, the wave survives, the coverage row resolves.
+            self.event_log.append(
+                sid, actor, EventType.ERROR,
+                {"kind": "model_call_failed", "detail": str(exc), "sq_id": sq.sq_id},
+            )
+            return SubagentOutcome(
+                sq, None, recorded_premises,
+                f"model call failed: {exc}", subagent_turns, sequential,
+            )
+        except BudgetExceeded:
+            raise  # hard session-level breach propagates
+        except Exception as exc:
+            # Harness-side failure: still resolvable, still journaled.
+            self.event_log.append(
+                sid, actor, EventType.ERROR,
+                {"kind": type(exc).__name__, "detail": str(exc), "sq_id": sq.sq_id},
+            )
+            return SubagentOutcome(
+                sq, None, recorded_premises,
+                f"subagent failed: {type(exc).__name__}: {exc}", subagent_turns, sequential,
+            )
+        return SubagentOutcome(sq, submission, recorded_premises, end_reason, subagent_turns, sequential)
+
+    def _subagent_gate(
+        self, stream: str, allowance: WaveAllowance | None, subagent_turns: int
+    ) -> bool:
+        """Sequential: the v1 global gate. Parallel: stream-local spend vs the
+        wave allowance only — a concurrent gate must not read totals that
+        depend on sibling interleaving (T8), or replay diverges."""
+        if allowance is None:
+            return self._gate() or subagent_turns >= self.config.budgets.max_turns_per_subagent
+        if self.halt_requested:
+            raise HaltRequested()
+        if subagent_turns >= self.config.budgets.max_turns_per_subagent:
+            return True
+        spend = self.gateway.stream_spend.get(stream, {})
+        return spend.get("usd", 0.0) >= allowance.usd or spend.get("tokens", 0.0) >= allowance.tokens
 
     def _compact_if_needed(
         self, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
@@ -397,6 +568,13 @@ class OrchestratorLoop:
             },
         )
         return messages
+
+    def _ordered_rows(self, tier: int, ordered_ids: list[str]) -> list:
+        rows = {
+            row["node_id"]: row
+            for row in self.dag.nodes_for_session(self.config.session_id, tier=tier)
+        }
+        return [rows[nid] for nid in ordered_ids if nid in rows]
 
     def _premise_texts(self, premise_ids: list[str]) -> list[str]:
         payloads = {
@@ -467,15 +645,21 @@ class OrchestratorLoop:
             )
         return blocks
 
-    def _fold_in_report(
-        self,
-        sq: Subquestion,
-        submission: SubagentSubmission | None,
-        recorded_premises: list[str],
-        end_reason: str,
-    ) -> None:
-        """Write Finding nodes/edges from a validated submission, set the
-        coverage status, and distill everything into the notebook."""
+    def _fold_in(self, outcome: SubagentOutcome) -> None:
+        """The join: write Finding nodes/edges from a validated submission,
+        set the coverage status, distill into the notebook, and fix the
+        writer's input order. Runs in the orchestrator stream — under
+        concurrency this is the ONLY place subagent results touch shared
+        state, and it runs in the recorded join order (M11)."""
+        sq = outcome.sq
+        submission = outcome.submission
+        recorded_premises = outcome.recorded_premises
+        end_reason = outcome.end_reason
+        if not outcome.counted_global_turns:
+            self.turns += outcome.turns
+        for pid in recorded_premises:
+            if pid not in self._writer_premises:
+                self._writer_premises.append(pid)
         sid = self.config.session_id
         actor = f"subagent:{sq.sq_id}"
         finding_ids: list[str] = []
@@ -494,6 +678,8 @@ class OrchestratorLoop:
                 for pid in f.premise_ids:
                     self.dag.add_edge(sid, fid, pid, f.edge_type)
                 finding_ids.append(fid)
+                if fid not in self._writer_findings:
+                    self._writer_findings.append(fid)
             for c in submission.conflicts:
                 self.dag.add_edge(sid, c.a, c.b, "contradicts", {"note": c.note})
             status = submission.status
@@ -534,8 +720,10 @@ class OrchestratorLoop:
         sid = self.config.session_id
         if self.coverage.open_items(sid):
             raise RuntimeError("writer invoked with open coverage items")  # harness bug guard
-        premises = self.dag.nodes_for_session(sid, tier=1)
-        findings = self.dag.nodes_for_session(sid, tier=2)
+        # Fold order, not created_seq: under concurrency the global creation
+        # order varies with interleaving; the fold order is journaled (M11).
+        premises = self._ordered_rows(1, self._writer_premises)
+        findings = self._ordered_rows(2, self._writer_findings)
         sources = self._premise_sources(sid)
         unresolved = [
             (r["sq_id"], r["question"], f"{r['status']}: {r['reason'] or 'no reason recorded'}")

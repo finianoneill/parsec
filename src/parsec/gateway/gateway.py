@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from parsec.canonical import canonical_json
 from parsec.config import RunConfig
+from parsec.errors import HaltRequested, ModelCallFailed, ReplayDivergence
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.pricing import compute_cost
 from parsec.models.events import EventType
 from parsec.models.gateway import ModelRequest, ModelResponse
 from parsec.store.blobs import BlobStore
-from parsec.store.event_log import EventLog
+from parsec.store.event_log import CURRENT_STREAM, EventLog
 from parsec.store.ledger import Ledger
 
 
@@ -32,12 +33,20 @@ class ModelGateway:
         self.blobs = blobs
         self.ledger = ledger
         self.config = config
-        self.call_index = 0
+        # M11 (T8): call indices are PER STREAM — cross-stream arrival order
+        # is nondeterministic under concurrency, so replay keys on
+        # (stream, call_index) instead of a global counter.
+        self.call_indices: dict[str, int] = {}
+        # In-memory per-stream spend, for wave-allowance gates: a concurrent
+        # subagent's budget decisions must depend only on ITS OWN stream, or
+        # gating would vary with interleaving and break replay.
+        self.stream_spend: dict[str, dict[str, float]] = {}
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         sid = self.config.session_id
-        call_index = self.call_index
-        self.call_index += 1
+        stream = CURRENT_STREAM.get()
+        call_index = self.call_indices.get(stream, 0)
+        self.call_indices[stream] = call_index + 1
 
         request_body = {
             "model": request.model,
@@ -59,7 +68,19 @@ class ModelGateway:
             },
         )
 
-        response = await self.adapter.complete(request)
+        try:
+            response = await self.adapter.complete(request)
+        except (ReplayDivergence, HaltRequested):
+            raise  # harness-level: never journaled as a model failure
+        except ModelCallFailed as exc:
+            # A replayed recorded failure: journal it identically and re-raise.
+            self._record_failure(sid, call_index, exc.kind, exc.detail, req_seq)
+            raise
+        except Exception as exc:
+            # Journal the failure so replay reproduces it at the same
+            # per-stream call, then raise the typed wrapper (M11).
+            self._record_failure(sid, call_index, type(exc).__name__, str(exc), req_seq)
+            raise ModelCallFailed(type(exc).__name__, str(exc)) from exc
 
         response_json = canonical_json(response.model_dump(mode="json"))
         response_blob = self.blobs.put(response_json)
@@ -98,4 +119,20 @@ class ModelGateway:
                     {"category": category, "amount": amount, "actor": actor},
                     parent_seq=resp_seq,
                 )
+        spend = self.stream_spend.setdefault(stream, {"tokens": 0.0, "usd": 0.0})
+        spend["tokens"] += (
+            u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+        )
+        spend["usd"] += cost.usd
         return response
+
+    def _record_failure(
+        self, sid: str, call_index: int, kind: str, detail: str, req_seq: int
+    ) -> None:
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.LLM_FAILED,
+            {"call_index": call_index, "kind": kind, "detail": detail},
+            parent_seq=req_seq,
+        )

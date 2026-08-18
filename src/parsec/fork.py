@@ -59,6 +59,12 @@ async def run_fork(
     event_log = EventLog(conn, clock)
     sessions = SessionStore(conn, clock)
     recorded_config = sessions.get_config(original_session_id)
+    if recorded_config.budgets.parallel_subagents > 1:
+        raise ValueError(
+            "fork --at-call requires a sequentially-recorded session: with "
+            "parallel subagents, call order is per-stream and a single global "
+            "fork point is ill-defined (record with parallel_subagents=1 to fork)"
+        )
 
     fork_config = RunConfig(
         **{

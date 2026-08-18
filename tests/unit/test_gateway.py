@@ -41,11 +41,17 @@ async def test_gateway_records_events_blobs_and_debits(gateway, event_log, blobs
     assert "usd" not in totals  # fake-model is free; zero debits are skipped
 
 
-async def test_call_index_increments(gateway, config):
+async def test_call_index_increments_per_stream(gateway, config):
+    """M11: call indices are per-stream — replay keys on (stream, index)."""
+    from parsec.store.event_log import stream_scope
+
     gateway.adapter = FakeAdapter(
-        [scripted_response([{"type": "text", "text": "a"}]), scripted_response([{"type": "text", "text": "b"}])]
+        [scripted_response([{"type": "text", "text": t}]) for t in ("a", "b", "c")]
     )
     req = ModelRequest(model="fake-model", max_tokens=10, messages=[{"role": "user", "content": "x"}])
     await gateway.complete(req)
     await gateway.complete(req)
-    assert gateway.call_index == 2
+    with stream_scope("sq-1"):
+        await gateway.complete(req)
+    assert gateway.call_indices["orchestrator"] == 2
+    assert gateway.call_indices["sq-1"] == 1

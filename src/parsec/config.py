@@ -33,6 +33,12 @@ class Budgets(BaseModel):
     max_turns: int = 12          # global model-call cap (orchestrator + subagents + writer)
     max_turns_per_subagent: int = 6
     max_subquestions: int = 4
+    # M11 (T8): concurrent subagents per wave, capped at 5 per §3 of the v1
+    # brief. 1 = sequential — the permanent config fallback, and what
+    # `parsec fork --at-call` requires (global call order is only meaningful
+    # in sequential recordings). Parallelism applies to RESEARCH only; the
+    # writer is always single (WS-E.3).
+    parallel_subagents: int = Field(default=1, ge=1, le=5)
     max_gap_rounds: int = 1      # §3 gap-filling: bounded rewrite rounds targeting weak evidence
 
 

@@ -104,9 +104,13 @@ def verify_session(
     nli_checker: GroundedChecker | None = _DEFAULT_NLI,
 ) -> VerificationReport:
     report = VerificationReport()
+    # ORDER BY id, not insertion: concurrent subagents (M11) interleave row
+    # creation nondeterministically, and violation/advisory ordering must
+    # replay byte-identically.
     nodes: dict[str, dict] = {}
     for row in conn.execute(
-        "SELECT node_id, node_type, payload_json FROM nodes WHERE session_id=?", (session_id,)
+        "SELECT node_id, node_type, payload_json FROM nodes WHERE session_id=? ORDER BY node_id",
+        (session_id,),
     ):
         nodes[row["node_id"]] = {
             "type": row["node_type"],
@@ -116,7 +120,7 @@ def verify_session(
         dict(row)
         for row in conn.execute(
             "SELECT edge_id, src_node_id, dst_node_id, edge_type, payload_json"
-            " FROM edges WHERE session_id=?",
+            " FROM edges WHERE session_id=? ORDER BY edge_id",
             (session_id,),
         )
     ]
