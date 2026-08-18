@@ -105,3 +105,14 @@ def test_repl_edit_composes_a_query(tmp_path, monkeypatch, capsys):
     # composed, then stopped at the key guard (no key in this test env)
     assert "long question" in out
     assert "no ANTHROPIC_API_KEY" in out
+
+
+def test_subagent_turn_cap_flows_from_config(tmp_path):
+    from parsec.user_config import apply_config
+
+    parser = cli.build_parser()
+    apply_config(parser, {"max_turns_per_subagent": 10})
+    args = parser.parse_args(["ask", "q"])
+    assert args.max_turns_per_subagent == 10
+    args = parser.parse_args(["ask", "q", "--max-turns-per-subagent", "4"])
+    assert args.max_turns_per_subagent == 4

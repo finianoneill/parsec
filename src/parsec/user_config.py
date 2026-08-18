@@ -35,6 +35,7 @@ _ALLOWED = _PATH_KEYS | {
     "max_seconds",
     "max_turns",
     "max_gap_rounds",
+    "max_turns_per_subagent",
     "parallel",
     "brief_gate",
     "epsilon",
