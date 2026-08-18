@@ -18,7 +18,10 @@ class PremiseDraft(BaseModel):
     # a hard length cap; specificity itself is an eval metric, not a schema rule.
     text: str = Field(min_length=1, max_length=300)
     span_refs: list[str] = Field(min_length=1)
-    claim_class: Literal["stable", "volatile"] = "stable"
+    # FreshQA-style mutability classes (M10): stable never decays, slow
+    # decays gently with evidence age, volatile decays fast and can be
+    # superseded by newer contradicting evidence.
+    claim_class: Literal["stable", "slow", "volatile"] = "stable"
     # Exempts the premise from the exact-number containment check; stored on
     # the extracts edge so the derivation stays auditable (§6 stage 1).
     transform_note: str | None = None

@@ -17,7 +17,7 @@ from parsec.config import Budgets, CacheMode, Clock, RunConfig
 from parsec.evals.case import FIXTURES_FILE, EvalCase, copy_corpus, load_case
 from parsec.evals.judge import judge_synthesis
 from parsec.evals.scoring import AxisScores, score_session
-from parsec.evals.support import SupportChecker
+from parsec.evals.support import MechanicalSupportChecker, SupportChecker, score_claim_support
 from parsec.evals.trajectory import TrajectoryMetrics, compute_trajectory
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.gateway import ModelGateway
@@ -54,6 +54,10 @@ class CaseResult:
     per_run_scores: list[dict] = None  # type: ignore[assignment]
     turns: int = 0
     error: str | None = None
+    # Calibration labels (M10): mechanically-labeled (credence, outcome)
+    # pairs harvested from the run — the eval corpus is the label source
+    # `parsec calibrate` consumes.
+    labels: list[dict] = None  # type: ignore[assignment]
 
     def to_payload(self) -> dict:
         return {
@@ -66,6 +70,7 @@ class CaseResult:
             "per_run_scores": self.per_run_scores or [],
             "turns": self.turns,
             "error": self.error,
+            "labels": self.labels or [],
         }
 
 
@@ -126,6 +131,7 @@ def _aggregate(case: EvalCase, results: list[CaseResult], runs: int) -> CaseResu
         first.runs = runs if first.error is None else len(results)
         first.per_run_scores = [first.scores.to_payload()]
         return first
+    all_labels = [pair for r in results for pair in (r.labels or [])]
     mean_scores = first.scores
     for axis in ("citation_faithfulness", "coverage", "nugget_recall", "claim_support", "synthesis"):
         values = [getattr(r.scores, axis) for r in results if getattr(r.scores, axis) is not None]
@@ -140,6 +146,7 @@ def _aggregate(case: EvalCase, results: list[CaseResult], runs: int) -> CaseResu
         per_run_scores=[r.scores.to_payload() for r in results],
         turns=first.turns,
         error=next((r.error for r in results if r.error), None),
+        labels=all_labels,
     )
 
 
@@ -214,10 +221,32 @@ async def _run_once(
     trajectory = compute_trajectory(
         conn, event_log, ledger, session_id, case.gold_docs, case.distractor_docs
     )
+    labels = _harvest_labels(conn, session_id, support_checker)
     return CaseResult(
         case.case_id, session_id, result.status, scores,
-        trajectory=trajectory, turns=result.turns,
+        trajectory=trajectory, turns=result.turns, labels=labels,
     )
+
+
+def _harvest_labels(conn, session_id: str, support_checker: SupportChecker | None) -> list[dict]:
+    """Calibration labels (M10): every claim's persisted heuristic credence
+    paired with a mechanical outcome from the claim-support grade
+    (full -> correct, none -> incorrect; ambiguous partials are skipped)."""
+    checker = support_checker or MechanicalSupportChecker()
+    _, details = score_claim_support(conn, session_id, checker)
+    credences = {
+        row["node_id"]: row["credence"]
+        for row in conn.execute(
+            "SELECT node_id, credence FROM nodes WHERE session_id=? AND tier=4", (session_id,)
+        )
+    }
+    labels = []
+    for d in details:
+        credence = credences.get(d.claim_id)
+        if d.grade == "partial" or credence is None:
+            continue
+        labels.append({"credence": round(credence, 6), "label": 1 if d.grade == "full" else 0})
+    return labels
 
 
 async def run_cases(

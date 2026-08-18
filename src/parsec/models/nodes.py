@@ -44,7 +44,7 @@ class PremiseNode(_Node):
     TIER: ClassVar[int] = 1
     text: str
     span_refs: list[str] = Field(min_length=1)
-    claim_class: Literal["stable", "volatile"]
+    claim_class: Literal["stable", "slow", "volatile"]
 
 
 class FindingNode(_Node):
