@@ -13,6 +13,17 @@ from parsec.store.ledger import Ledger
 from parsec.store.sessions import SessionStore
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_config(monkeypatch, tmp_path):
+    """Keep the developer's real ~/.parsec.json (and any cwd .parsec.json)
+    out of tests that drive cli.main(); tests exercising config pass
+    explicit paths to load_user_config directly."""
+    from parsec import user_config
+
+    monkeypatch.setattr(user_config, "USER_CONFIG", tmp_path / "no-user-config.json")
+    monkeypatch.setattr(user_config, "PROJECT_CONFIG", tmp_path / "no-project-config.json")
+
+
 class FrozenClock:
     """Deterministic clock for tests: fixed timestamp, manually advanced monotonic."""
 

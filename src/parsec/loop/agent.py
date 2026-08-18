@@ -170,6 +170,9 @@ class OrchestratorLoop:
         # M12 brief gate: recorded approvals/edits, keyed by turn index like
         # steering (they ARE steering events, payload-tagged gate="brief").
         self.scripted_brief_gate: dict[int, list[str]] = {}
+        # The proposal currently waiting at the gate — read by the CLI's
+        # stdin thread to seed $EDITOR; never consulted by loop logic.
+        self.current_brief: Brief | None = None
         # Brief state: scope rides in subagent prompts; effort limits are the
         # harness-enforced dispatch caps. Defaults = full configured caps.
         self.brief_scope = ""
@@ -437,7 +440,11 @@ class OrchestratorLoop:
                     "status": "proposed",
                 },
             )
-            text = await self._await_gate_message()
+            self.current_brief = brief
+            try:
+                text = await self._await_gate_message()
+            finally:
+                self.current_brief = None
             if text.strip().lower() in _APPROVALS:
                 return brief, note
             if self._gate():
