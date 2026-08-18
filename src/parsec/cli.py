@@ -94,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--max-turns", type=int, default=Budgets().max_turns)
     ask.add_argument("--max-gap-rounds", type=int, default=Budgets().max_gap_rounds)
     ask.add_argument(
+        "--max-turns-per-subagent", type=int, default=Budgets().max_turns_per_subagent,
+        help="Model calls each subagent may spend (search/fetch/record/report all count)",
+    )
+    ask.add_argument(
         "--parallel", type=int, default=Budgets().parallel_subagents,
         help="Concurrent subagents per wave (1-5); 1 = sequential (required for fork --at-call)",
     )
@@ -306,6 +310,7 @@ def cmd_ask(args) -> int:
             max_wall_seconds=args.max_seconds,
             max_turns=args.max_turns,
             max_gap_rounds=args.max_gap_rounds,
+            max_turns_per_subagent=args.max_turns_per_subagent,
             parallel_subagents=args.parallel,
         ),
         data_dir=args.data_dir,
