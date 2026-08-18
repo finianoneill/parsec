@@ -100,14 +100,25 @@ async def run_replay(
         coverage, notebook, parent_session_id=original_session_id,
     )
     # Re-inject the recorded steering at the recorded turn indices so a
-    # steered session replays to identical prompts.
+    # steered session replays to identical prompts, and feed the recorded
+    # join order to the deterministic scheduler (M11): a parallel replay
+    # folds subagent results in the order the recording observed, whatever
+    # order the replayed tasks happen to complete in.
     from parsec.models.events import EventType
 
     scripted: dict[int, list[str]] = {}
+    joins: dict[int, list[tuple[int, str]]] = {}
     for ev in event_log.read(original_session_id):
         if ev.event_type == EventType.STEERING_INJECTED:
             scripted.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
+        elif ev.event_type == EventType.SUBAGENT_JOINED:
+            joins.setdefault(ev.payload["wave"], []).append(
+                (ev.payload["join_index"], ev.payload["sq_id"])
+            )
     loop.scripted_steering = scripted
+    loop.scripted_join_order = [
+        [sq_id for _, sq_id in sorted(joins[wave])] for wave in sorted(joins)
+    ]
     result = await loop.run()
 
     proj_orig = event_log.projection(original_session_id)

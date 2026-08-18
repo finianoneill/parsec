@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS events (
   seq          INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL REFERENCES sessions(session_id),
-  idx          INTEGER NOT NULL,             -- 0-based per-session ordinal; replay keys off this
+  idx          INTEGER NOT NULL,             -- 0-based per-session arrival ordinal (volatile under
+                                             -- concurrency; replay keys off stream ordinals below)
+  stream_id    TEXT NOT NULL DEFAULT 'orchestrator',  -- M11: 'orchestrator' or the subagent's sq id
+  stream_idx   INTEGER NOT NULL DEFAULT 0,   -- 0-based ordinal WITHIN the stream; deterministic
   ts           TEXT NOT NULL,
   actor        TEXT NOT NULL,                -- harness | model | tool:<name> | user
   event_type   TEXT NOT NULL,

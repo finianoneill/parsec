@@ -67,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--max-seconds", type=int, default=Budgets().max_wall_seconds)
     ask.add_argument("--max-turns", type=int, default=Budgets().max_turns)
     ask.add_argument("--max-gap-rounds", type=int, default=Budgets().max_gap_rounds)
+    ask.add_argument(
+        "--parallel", type=int, default=Budgets().parallel_subagents,
+        help="Concurrent subagents per wave (1-5); 1 = sequential (required for fork --at-call)",
+    )
     ask.add_argument("--data-dir", type=Path, default=Path("data"))
     ask.add_argument("--search-fixtures", type=Path, default=None)
     ask.add_argument(
@@ -263,6 +267,7 @@ def cmd_ask(args) -> int:
             max_wall_seconds=args.max_seconds,
             max_turns=args.max_turns,
             max_gap_rounds=args.max_gap_rounds,
+            parallel_subagents=args.parallel,
         ),
         data_dir=args.data_dir,
         search_fixtures=args.search_fixtures,

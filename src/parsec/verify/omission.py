@@ -76,7 +76,8 @@ def detect_omissions(
     report = OmissionReport()
 
     # Every fetch this session performed is consulted evidence (v1 relevance
-    # signal). Dedup by doc; order by first fetch for determinism.
+    # signal). Dedup by doc; sort by URL — first-fetch order varies with
+    # cross-stream interleaving under concurrent subagents (M11).
     seen: set[str] = set()
     for ev in event_log.read(session_id):
         if ev.event_type != EventType.FETCH_PERFORMED:
@@ -87,6 +88,7 @@ def detect_omissions(
         seen.add(doc_hash)
         if doc_hash not in used_doc_hashes:
             report.unused_documents.append({"url": ev.payload["url"], "doc_hash": doc_hash})
+    report.unused_documents.sort(key=lambda d: d["url"])
 
     for nid in sorted(nodes):
         node = nodes[nid]

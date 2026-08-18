@@ -22,6 +22,8 @@ class EventType(StrEnum):
     SUBQUESTIONS_PLANNED = "subquestions_planned"
     SUBAGENT_STARTED = "subagent_started"
     SUBAGENT_COMPLETED = "subagent_completed"
+    SUBAGENT_JOINED = "subagent_joined"  # M11: observed completion/merge order
+    LLM_FAILED = "llm_failed"            # M11: adapter raised; failure is journaled
     COVERAGE_UPDATED = "coverage_updated"
     NOTEBOOK_APPENDED = "notebook_appended"
     CONTEXT_COMPACTED = "context_compacted"
@@ -47,3 +49,7 @@ class Event(BaseModel):
     event_type: EventType
     payload: dict
     parent_seq: int | None = None
+    # M11 per-stream ordering (T8): idx is the volatile arrival ordinal;
+    # (stream_id, stream_idx) is the deterministic coordinate replay keys off.
+    stream_id: str = "orchestrator"
+    stream_idx: int = 0

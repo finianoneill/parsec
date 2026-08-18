@@ -34,6 +34,18 @@ class ReplayDivergence(ParsecError):
         super().__init__(msg)
 
 
+class ModelCallFailed(ParsecError):
+    """An adapter raised mid-call. The gateway journals the failure as an
+    LLM_FAILED event and raises this typed wrapper, so a replayed run can
+    reproduce the SAME failure at the same per-stream call — a subagent
+    dying mid-wave leaves a replayable stream (M11 failure semantics)."""
+
+    def __init__(self, kind: str, detail: str):
+        self.kind = kind
+        self.detail = detail
+        super().__init__(f"{kind}: {detail}")
+
+
 class CacheMiss(ParsecError):
     """Replay-mode fetch requested a URL absent from the frozen corpus."""
 

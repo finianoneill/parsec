@@ -18,6 +18,33 @@ class FakeAdapter:
         return resp
 
 
+class StreamFakeAdapter:
+    """Scripted PER STREAM (M11): each stream consumes its own response list,
+    keyed off the current-stream contextvar — so concurrent subagents get
+    deterministic scripts whatever the arrival interleaving (exactly how the
+    replay adapter serves a parallel recording). A script entry that is an
+    Exception instance is raised instead of returned, to script a subagent
+    dying mid-wave."""
+
+    def __init__(self, scripts: dict[str, list[ModelResponse | Exception]]):
+        self._scripts = {stream: list(entries) for stream, entries in scripts.items()}
+        self._pos: dict[str, int] = {}
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        from parsec.store.event_log import CURRENT_STREAM
+
+        stream = CURRENT_STREAM.get()
+        entries = self._scripts.get(stream, [])
+        i = self._pos.get(stream, 0)
+        if i >= len(entries):
+            raise IndexError(f"StreamFakeAdapter exhausted for stream {stream!r} after {i} calls")
+        self._pos[stream] = i + 1
+        entry = entries[i]
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
+
+
 def scripted_response(
     content: list[dict],
     stop_reason: str = "end_turn",
