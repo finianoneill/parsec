@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="297 tests" src="https://img.shields.io/badge/tests-297%20passing-16a34a?style=flat-square">
+  <img alt="303 tests" src="https://img.shields.io/badge/tests-303%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -63,9 +63,49 @@ uv sync
 uv run pytest        # full suite — no network, no API keys needed
 ```
 
+To get a `parsec` command on your PATH (so it runs from any directory, not just via `uv run` inside the repo):
+
+```sh
+uv tool install --editable .   # installs ~/.local/bin/parsec; --editable tracks your checkout
+```
+
 Live runs need `ANTHROPIC_API_KEY`. The optional synthesis judge needs `OPENAI_API_KEY` (a *different model family* grades the prose — parsec never lets a model grade its own homework).
 
 ## Quick start
+
+No API keys? Start with the interactive shell and the built-in demo:
+
+```sh
+# Launch the interactive shell (welcome screen + REPL). With no
+# ANTHROPIC_API_KEY it points you at the offline tour:
+parsec
+
+# Or run the demo directly: a complete recorded run — scripted model,
+# bundled fixture corpus, no keys, no network. The recording is a real
+# session you can replay, verify, and inspect afterwards:
+parsec demo
+```
+
+(Prefix commands with `uv run` instead if you skipped the global tool install.)
+
+### The interactive shell
+
+Running `parsec` with no subcommand prints the welcome banner — the parallax mark, the gradient wordmark, and a status line showing your data directory and whether an API key was found — then drops into a REPL:
+
+```
+parsec ❯ /demo               # offline tour: full recorded run, no keys, no network
+parsec ❯ /sessions           # list recorded sessions
+parsec ❯ /show <id>          # one session's spend and coverage
+parsec ❯ /replay <id>        # re-run against the frozen corpus, verify byte-identical
+parsec ❯ /verify <id>        # mechanical verification + credence report
+parsec ❯ /notebook <id>      # the session's append-only notebook
+parsec ❯ how tall is Olympus Mons        # bare text runs a live query (needs a key)
+parsec ❯ /exit               # leave (ctrl-d works too)
+```
+
+Sessions record into `./data` relative to where you launch; pass `--data-dir` to keep one home for all recordings (`parsec --data-dir ~/.parsec/data`).
+
+With a key, live runs work from the shell or the CLI:
 
 ```sh
 export ANTHROPIC_API_KEY=...
@@ -73,16 +113,16 @@ export ANTHROPIC_API_KEY=...
 # Ask a question with a live search provider (SearXNG shown; brave/serper
 # need BRAVE_API_KEY / SERPER_API_KEY). fetch is robots-respecting and
 # write-through cached; provider responses are cached TTL-bounded:
-uv run parsec ask "your question" --search-provider searxng --searxng-url http://localhost:8080 --live
+parsec ask "your question" --search-provider searxng --searxng-url http://localhost:8080 --live
 
 # Or run fully offline with a fixture provider:
-uv run parsec ask "your question" --search-fixtures fixtures/queries.json
+parsec ask "your question" --search-fixtures fixtures/queries.json
 
 # Re-run it against the frozen corpus and verify byte-identical replay:
-uv run parsec replay <session-id>
+parsec replay <session-id>
 
 # Re-verify the evidence graph later (catches corpus tampering after the fact):
-uv run parsec verify <session-id>
+parsec verify <session-id>
 ```
 
 A search fixture file maps queries to result URLs:
@@ -101,6 +141,8 @@ While a run is live, type on stdin to **steer** it — your message is injected 
 
 | Command | What it does |
 |---|---|
+| `parsec` | Interactive shell: welcome screen + REPL over the commands below (bare text runs `ask`) |
+| `parsec demo` | Built-in offline demo — a full recorded run with no API keys and no network |
 | `parsec ask "…"` | Run a research query (`--live` for the progress view, `--parallel N` for concurrent subagents (≤5), `--brief-gate` to approve/edit the research brief before dispatch, `--max-usd`/`--max-tokens`/`--max-turns`/`--max-gap-rounds` for budgets, `--cache-mode record\|replay\|live-prefer-cache`) |
 | `parsec replay <session>` | Re-execute against the frozen corpus; verifies projections and answer bytes are identical |
 | `parsec verify <session>` | Mechanical verification (structural, temporal ordering, grounded-NLI advisories) + credence + omission report over the stored evidence graph |
@@ -148,6 +190,8 @@ uv run parsec eval compare results-main.json results-change.json   # exit 3 on r
 
 ```
 src/parsec/
+├── cli.py, interactive.py,      # entry points: subcommands, REPL shell,
+│   banner.py, demo.py           #   welcome banner, keyless offline demo
 ├── db/, store/      # the durable core: schema, event log, blobs, spans, DAG,
 │                    #   coverage ledger, notebook, budget ledger
 ├── gateway/         # the single door to any model: Anthropic generator,

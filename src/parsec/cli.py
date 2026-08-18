@@ -53,8 +53,24 @@ EXIT_ERROR = 4
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="parsec", description="Local-first research harness")
-    sub = p.add_subparsers(dest="command", required=True)
+    from parsec import __version__
+
+    p = argparse.ArgumentParser(
+        prog="parsec",
+        description="Local-first research harness. No subcommand starts the interactive shell.",
+    )
+    p.add_argument("--version", action="version", version=f"parsec {__version__}")
+    p.add_argument(
+        "--data-dir", type=Path, default=Path("data"),
+        help="Data directory for the interactive shell (subcommands take their own)",
+    )
+    sub = p.add_subparsers(dest="command", required=False)
+
+    demo = sub.add_parser(
+        "demo",
+        help="Run the built-in offline demo: a full recorded run, no API keys, no network",
+    )
+    demo.add_argument("--data-dir", type=Path, default=Path("data"))
 
     ask = sub.add_parser("ask", help="Run a research query")
     ask.add_argument("query")
@@ -375,6 +391,48 @@ def cmd_ask(args) -> int:
     if result.status in ("partial", "halted_budget"):
         return EXIT_PARTIAL
     return EXIT_ERROR
+
+
+def cmd_demo(args) -> int:
+    global adapter_factory, fetch_transport
+    from parsec import demo as demo_mod
+
+    fixtures = demo_mod.write_search_fixtures(args.data_dir)
+    clock = RealClock()
+    session_id = make_session_id(demo_mod.DEMO_QUERY, clock.now_iso())
+    console.print(
+        "[dim]offline demo: scripted model + bundled fixture corpus — "
+        "no API keys, no network. The recording is a real session.[/dim]\n"
+    )
+    prev = (adapter_factory, fetch_transport)
+    adapter_factory = demo_mod.demo_adapter_factory
+    fetch_transport = demo_mod.demo_transport()
+    try:
+        ask_args = build_parser().parse_args(
+            [
+                "ask", demo_mod.DEMO_QUERY,
+                "--session-id", session_id,
+                "--adapter", "fake",
+                "--model", "fake-model",
+                "--cache-mode", "record",
+                "--search-provider", "fixture",
+                "--search-fixtures", str(fixtures),
+                "--max-gap-rounds", "0",
+                "--data-dir", str(args.data_dir),
+            ]
+        )
+        code = cmd_ask(ask_args)
+    finally:
+        adapter_factory, fetch_transport = prev
+    if code == EXIT_OK:
+        d = f" --data-dir {args.data_dir}" if args.data_dir != Path("data") else ""
+        console.print(
+            f"\n[dim]poke at the recording:[/dim]\n"
+            f"  parsec replay {session_id}{d}\n"
+            f"  parsec verify {session_id}{d}\n"
+            f"  parsec notebook {session_id}{d}"
+        )
+    return code
 
 
 def cmd_replay(args) -> int:
@@ -757,8 +815,13 @@ def cmd_spans(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command is None:
+        from parsec.interactive import run_interactive
+
+        return run_interactive(args.data_dir)
     handlers = {
         "ask": cmd_ask,
+        "demo": cmd_demo,
         "replay": cmd_replay,
         "verify": cmd_verify,
         "fork": cmd_fork,
