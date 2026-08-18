@@ -34,7 +34,7 @@ The model never executes anything: it emits structured intents; the harness vali
 
 ```mermaid
 flowchart LR
-    Q([query]) --> P[decompose]
+    Q([query]) --> B[research brief<br/>optional approval gate] --> P[decompose]
     P --> C[(coverage ledger)]
     P --> S1[subagent sq-1]
     P --> S2[subagent sq-n]
