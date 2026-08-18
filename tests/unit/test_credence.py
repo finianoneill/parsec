@@ -55,19 +55,30 @@ def test_annotate_provenance_register():
     base = NodeCredence(0.9, frozenset({"a", "b"}))
     assert annotate(base) == "high"
     single = NodeCredence(0.4, frozenset({"a"}))
-    assert annotate(single) == "low, single source"  # the v1 string, byte-for-byte
+    assert annotate(single) == "low (single source)"
     conflicted = NodeCredence(0.5, frozenset({"a", "b"}), disbelief=0.6, conflicted=True)
-    assert annotate(conflicted) == "low, conflicting sources"
+    assert annotate(conflicted) == "low (conflicting sources)"
     stale = NodeCredence(0.3, frozenset({"a"}), stale=True)
-    assert annotate(stale) == "low, single source, possibly stale"
+    assert annotate(stale) == "low (single source; possibly stale)"
     superseded = NodeCredence(0.1, frozenset({"a"}), superseded_by="premise:x")
-    assert annotate(superseded) == "low, superseded, single source"
+    assert annotate(superseded) == "low (superseded; single source)"
+
+
+def test_annotate_caps_single_source_at_moderate():
+    """One independent source is not corroboration: the rendered tier for a
+    single-source node never reads "high", however strong its credence. The
+    credence value itself (and so stakes flagging) is untouched."""
+    assert annotate(NodeCredence(0.95, frozenset({"a"}))) == "moderate (single source)"
+    assert annotate(NodeCredence(0.95, frozenset({"a", "b"}))) == "high"
+    assert annotate(NodeCredence(0.7, frozenset({"a"}))) == "moderate (single source)"
 
 
 def test_annotate_with_calibrated_ranges():
     ranges = {"high": (72, 96), "moderate": (55, 72), "low": (12, 55)}
     assert annotate(NodeCredence(0.9, frozenset({"a", "b"})), ranges) == "high (72–96%)"
-    assert annotate(NodeCredence(0.4, frozenset({"a"})), ranges) == "low (12–55%), single source"
+    assert annotate(NodeCredence(0.4, frozenset({"a"})), ranges) == "low (12–55%; single source)"
+    # The single-source cap picks up the capped tier's range.
+    assert annotate(NodeCredence(0.9, frozenset({"a"})), ranges) == "moderate (55–72%; single source)"
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import select
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from parsec.config import (
     Budgets,
@@ -294,6 +296,26 @@ def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> Orch
     )
 
 
+# A bracketed citation group ([premise:...] / [finding:...], possibly several
+# comma-separated) or a [narrative] tag, as the writer emits them.
+_CITATION_TAG_RE = re.compile(
+    r"\[(?:\s*(?:premise|finding):[0-9a-f]{16}\s*,?)+\]|\[narrative\]"
+)
+
+
+def display_answer(answer: str) -> Text:
+    """Answer text prepared for the terminal: citation tags stripped and the
+    whitespace they leave before punctuation closed up. Returned as Text so
+    printing is markup-safe — previously Rich happened to eat the tags as
+    unknown markup, which also meant any bracketed text in an answer could
+    style or break the output."""
+    text = _CITATION_TAG_RE.sub("", answer)
+    text = re.sub(r"[ \t]+([.,;:!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
+    return Text(text)
+
+
 class SteeringReader:
     """Reads steering lines from stdin only while a run is in flight.
 
@@ -428,7 +450,7 @@ def cmd_ask(args) -> int:
             )
         )
     else:
-        console.print(result.answer)
+        console.print(display_answer(result.answer))
         if result.coverage:
             console.print(
                 "[dim]coverage: "
@@ -438,10 +460,16 @@ def cmd_ask(args) -> int:
         cached = int(
             totals.get("cache_read_tokens", 0) + totals.get("cache_creation_tokens", 0)
         )
+        spent_budget, budget_cap = ledger.spent_tokens(session_id), config.budgets.max_total_tokens
+        budget_note = f"budget {spent_budget}/{budget_cap}"
+        if spent_budget >= budget_cap:
+            # Research stops at the cap but the writer runs in the grace, so
+            # a finished run can land over — say so instead of hiding it.
+            budget_note = f"[red]{budget_note} (over)[/red]"
         token_note = (
             f"{int(totals.get('input_tokens', 0))} in / {int(totals.get('output_tokens', 0))} out"
             + (f" / {cached} cache" if cached else "")
-            + f" tokens · budget {ledger.spent_tokens(session_id)}/{config.budgets.max_total_tokens}"
+            + f" tokens · {budget_note}"
         )
         console.print(
             f"\n[dim]session {result.session_id} · {result.status} · {result.turns} turns · "
@@ -630,7 +658,7 @@ def cmd_sessions(args) -> int:
             table.add_row(c["sq_id"], c["status"], c["question"][:60], c["reason"] or "")
         console.print(table)
     if row["answer_blob"]:
-        console.print(blobs.get_text(row["answer_blob"]))
+        console.print(display_answer(blobs.get_text(row["answer_blob"])))
     return EXIT_OK
 
 
@@ -653,7 +681,7 @@ def cmd_fork(args) -> int:
     if args.as_json:
         print(json.dumps({"session_id": result.session_id, "status": result.status, "answer": result.answer}))
     else:
-        console.print(result.answer)
+        console.print(display_answer(result.answer))
         console.print(f"[dim]forked as {result.session_id} · {result.status}[/dim]")
     return EXIT_OK if result.status == "done" else EXIT_PARTIAL
 
