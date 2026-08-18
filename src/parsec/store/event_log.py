@@ -52,6 +52,9 @@ class EventLog:
     def __init__(self, conn: sqlite3.Connection, clock: Clock):
         self.conn = conn
         self.clock = clock
+        # Display-only tap (CLI activity view): called after each append with
+        # (event_type, payload, stream_id). Best-effort; never affects the log.
+        self.listener = None
 
     def append(
         self,
@@ -87,6 +90,11 @@ class EventLog:
                 parent_seq,
             ),
         )
+        if self.listener is not None:
+            try:
+                self.listener(event_type, payload, stream_id)
+            except Exception:  # noqa: BLE001 — display must never break the log
+                pass
         return cur.lastrowid
 
     def read(self, session_id: str) -> list[Event]:

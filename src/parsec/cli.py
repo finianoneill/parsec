@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--json", action="store_true", dest="as_json")
     ask.add_argument(
         "--live", action="store_true",
-        help="Show a live progress view (state, coverage, DAG counts, spend)",
+        help="Force the live activity view (on by default in a terminal; --json disables)",
     )
 
     fork = sub.add_parser("fork", help="Rewind a recorded session to call N and continue live")
@@ -325,23 +325,17 @@ def cmd_ask(args) -> int:
     )
     loop = _build_loop(config, conn, blobs, clock)
 
+    # Activity view: narrates the run from the event stream (thinking, searches,
+    # fetches, subagents, phases). Default on a terminal; --live forces it on,
+    # --json disables it.
     live_view = None
-    if args.live and not args.as_json:
-        from rich.live import Live
+    if not args.as_json and (args.live or sys.stdout.isatty()):
+        from parsec.activity import ActivityView
 
-        def render(snapshot: dict):
-            table = Table("state", "coverage", "premises", "findings", "claims", "turns", "tokens", "usd")
-            table.add_row(
-                snapshot["state"],
-                " ".join(f"{k}:{v}" for k, v in sorted(snapshot["coverage"].items())) or "—",
-                str(snapshot["premises"]), str(snapshot["findings"]), str(snapshot["claims"]),
-                str(snapshot["turns"]), str(snapshot["tokens"]), f"${snapshot['usd']:.4f}",
-            )
-            return table
-
-        live_view = Live(console=console, refresh_per_second=4)
-        live_view.start()
-        loop.reporter = lambda snapshot: live_view.update(render(snapshot))
+        live_view = ActivityView(console)
+        live_view.__enter__()
+        loop.event_log.listener = live_view.on_event
+        loop.reporter = live_view.on_snapshot
 
     # Steering (§3): lines typed on stdin mid-run are injected into the next
     # model call without tearing down the turn.
@@ -372,7 +366,8 @@ def cmd_ask(args) -> int:
         return EXIT_ERROR
     finally:
         if live_view is not None:
-            live_view.stop()
+            live_view.__exit__()
+            loop.event_log.listener = None
 
     ledger = Ledger(conn, clock)
     totals = ledger.totals(session_id)
