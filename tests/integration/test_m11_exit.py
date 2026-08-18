@@ -258,7 +258,7 @@ def test_exit_3_wave_allowance_starves_deterministically(tmp_path, transport, mo
         ("m11-starved",),
     ).fetchall()
     assert [r["status"] for r in rows] == ["blocked"] * 3
-    assert all("budget/turn cap" in r["reason"] for r in rows)
+    assert all("wave token allowance exhausted" in r["reason"] for r in rows)
 
     outcome = asyncio.run(run_replay(conn, blobs, RealClock(), "m11-starved"))
     assert outcome.projections_match, outcome.first_divergence

@@ -106,6 +106,18 @@ class WaveAllowance:
     tokens: float
 
 
+def _cap_reason(exc: BudgetExceeded) -> str:
+    """Human-readable name for the tripped cap; the limit, not the live
+    spend, so the string replays identically."""
+    if exc.category == "usd":
+        return f"USD budget (${exc.cap:.2f}) exhausted"
+    if exc.category == "tokens":
+        return f"token budget ({int(exc.cap)}) exhausted"
+    if exc.category == "wall_seconds":
+        return f"wall-clock budget ({int(exc.cap)}s) exhausted"
+    return f"{exc.category} budget exhausted"
+
+
 @dataclass
 class RunResult:
     session_id: str
@@ -152,6 +164,9 @@ class OrchestratorLoop:
         self.clock = tool_ctx.clock
         self.halt_requested = False
         self.turns = 0
+        # Which cap the research gate last tripped on (None while passing) —
+        # blocked-coverage reasons name it instead of a bare "budget".
+        self.gate_reason: str | None = None
         # Grounded-NLI tier for verification stage 2 (M9), from the frozen
         # config so replayed sessions verify identically.
         self.nli_checker = make_grounded_checker(config.nli_checker)
@@ -212,7 +227,7 @@ class OrchestratorLoop:
             if self.config.budgets.parallel_subagents > 1 and len(subquestions) > 1:
                 partial = await self._run_parallel(sm, subquestions)
             else:
-                for sq in subquestions:
+                for i, sq in enumerate(subquestions):
                     sm.transition(AgentState.DISPATCHING, sq.sq_id)
                     self._notify(sm)
                     if self._gate():
@@ -220,16 +235,16 @@ class OrchestratorLoop:
                         break
                     sm.transition(AgentState.COLLECTING, sq.sq_id)
                     self._notify(sm)
-                    await self._run_subagent(sq)
+                    await self._run_subagent(sq, remaining_sqs=len(subquestions) - i)
                     self._notify(sm)
 
             # Coverage gate (§2.3): the writer must not run over open items.
             # A budget break above leaves later items open — mark them blocked
-            # with an explicit reason so the ledger is fully resolved.
+            # with the cap that tripped, so the ledger is fully resolved AND
+            # diagnosable.
+            blocked_reason = f"{self.gate_reason or 'budget exhausted'} before dispatch"
             for row in self.coverage.open_items(sid):
-                self.coverage.set_status(
-                    sid, row["sq_id"], "blocked", "budget exhausted before dispatch"
-                )
+                self.coverage.set_status(sid, row["sq_id"], "blocked", blocked_reason)
                 partial = True
 
             # Writer/verify rounds with bounded gap-filling (§3): a low-credence
@@ -502,10 +517,12 @@ class OrchestratorLoop:
 
     # -- subagents -----------------------------------------------------------
 
-    async def _run_subagent(self, sq: Subquestion) -> None:
+    async def _run_subagent(self, sq: Subquestion, remaining_sqs: int = 1) -> None:
         """Sequential-mode dispatch (and gap-fill): run one subagent inline,
         fold its report immediately — the v1 shape, byte-for-byte."""
-        outcome = await self._subagent_task(sq, allowance=None)
+        outcome = await self._subagent_task(
+            sq, allowance=None, turn_cap=self._fair_turn_cap(remaining_sqs)
+        )
         self._fold_in(outcome)
 
     async def _run_parallel(self, sm: StateMachine, subquestions: list[Subquestion]) -> bool:
@@ -528,6 +545,7 @@ class OrchestratorLoop:
             )
             self._notify(sm)
             allowance = self._wave_allowance(len(wave))
+            turn_cap = self._fair_turn_cap(len(wave) + len(queue))
             sm.transition(AgentState.COLLECTING, f"{len(wave)} subagents concurrent")
             self._notify(sm)
 
@@ -535,7 +553,7 @@ class OrchestratorLoop:
 
             async def run_one(sq: Subquestion) -> SubagentOutcome:
                 try:
-                    return await self._subagent_task(sq, allowance)
+                    return await self._subagent_task(sq, allowance, turn_cap)
                 finally:
                     done_order.append(sq.sq_id)
 
@@ -570,17 +588,27 @@ class OrchestratorLoop:
         remaining_tokens = max(0.0, b.max_total_tokens - self.ledger.spent_tokens(sid))
         return WaveAllowance(usd=remaining_usd / n, tokens=remaining_tokens / n)
 
+    def _fair_turn_cap(self, remaining_sqs: int) -> int:
+        """Per-subagent turn cap: the effort cap, shrunk to a fair share of
+        the remaining global turn budget (one turn reserved for the writer).
+        Without this, early subagents run to their full cap and starve the
+        tail of the plan into "blocked before dispatch". Snapshotted at the
+        dispatch boundary, like the wave allowance."""
+        remaining_turns = self.config.budgets.max_turns - 1 - self.turns
+        share = max(1, remaining_turns // max(1, remaining_sqs))
+        return min(self.effort_limits.max_turns_per_subagent, share)
+
     async def _subagent_task(
-        self, sq: Subquestion, allowance: WaveAllowance | None
+        self, sq: Subquestion, allowance: WaveAllowance | None, turn_cap: int
     ) -> SubagentOutcome:
         """One subagent: own context, own event stream, retrieval tools only
         (T6). allowance=None means sequential mode (global gates, global turn
         counter, live steering — the v1 semantics, unchanged)."""
         with stream_scope(sq.sq_id):
-            return await self._subagent_body(sq, allowance)
+            return await self._subagent_body(sq, allowance, turn_cap)
 
     async def _subagent_body(
-        self, sq: Subquestion, allowance: WaveAllowance | None
+        self, sq: Subquestion, allowance: WaveAllowance | None, turn_cap: int
     ) -> SubagentOutcome:
         cfg = self.config
         sid = cfg.session_id
@@ -601,15 +629,16 @@ class OrchestratorLoop:
 
         try:
             while submission is None:
-                if self._subagent_gate(sq.sq_id, allowance, subagent_turns):
-                    end_reason = "budget/turn cap reached before submit_report"
+                gate_reason = self._subagent_gate(sq.sq_id, allowance, subagent_turns, turn_cap)
+                if gate_reason:
+                    end_reason = f"{gate_reason} before submit_report"
                     break
                 if sequential:
                     # Live steering into a CONCURRENT subagent would be
                     # interleaving-dependent; parallel mode drains steering
                     # only at orchestrator-stream boundaries.
                     messages = self._drain_steering(messages)
-                if subagent_turns == self.effort_limits.max_turns_per_subagent - 1:
+                if subagent_turns == turn_cap - 1:
                     # Deterministic (pure function of the turn count), so
                     # replay re-injects identically in both dispatch modes.
                     messages.append({"role": "user", "content": prompts.FINAL_TURN_NUDGE})
@@ -671,21 +700,29 @@ class OrchestratorLoop:
         return SubagentOutcome(sq, submission, recorded_premises, end_reason, subagent_turns, sequential)
 
     def _subagent_gate(
-        self, stream: str, allowance: WaveAllowance | None, subagent_turns: int
-    ) -> bool:
-        """Sequential: the v1 global gate. Parallel: stream-local spend vs the
-        wave allowance only — a concurrent gate must not read totals that
-        depend on sibling interleaving (T8), or replay diverges. Turn caps
-        come from the effort limits (M12): the brief's estimate, enforced."""
-        max_turns = self.effort_limits.max_turns_per_subagent
+        self, stream: str, allowance: WaveAllowance | None, subagent_turns: int, turn_cap: int
+    ) -> str | None:
+        """The tripped cap's name, or None to keep going. Sequential: the v1
+        global gate. Parallel: stream-local spend vs the wave allowance only —
+        a concurrent gate must not read totals that depend on sibling
+        interleaving (T8), or replay diverges. turn_cap is the fair-share
+        slice of the effort limit, fixed at the dispatch boundary."""
         if allowance is None:
-            return self._gate() or subagent_turns >= max_turns
+            if self._gate():
+                return self.gate_reason or "budget exhausted"
+            if subagent_turns >= turn_cap:
+                return f"subagent turn cap ({turn_cap}) reached"
+            return None
         if self.halt_requested:
             raise HaltRequested()
-        if subagent_turns >= max_turns:
-            return True
+        if subagent_turns >= turn_cap:
+            return f"subagent turn cap ({turn_cap}) reached"
         spend = self.gateway.stream_spend.get(stream, {})
-        return spend.get("usd", 0.0) >= allowance.usd or spend.get("tokens", 0.0) >= allowance.tokens
+        if spend.get("usd", 0.0) >= allowance.usd:
+            return "wave USD allowance exhausted"
+        if spend.get("tokens", 0.0) >= allowance.tokens:
+            return "wave token allowance exhausted"
+        return None
 
     def _compact_if_needed(
         self, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
@@ -1140,7 +1177,9 @@ class OrchestratorLoop:
     # -- gates ---------------------------------------------------------------
 
     def _gate(self) -> bool:
-        """Research-side stop gate (§3 priority order). True = stop dispatching.
+        """Research-side stop gate (§3 priority order). True = stop dispatching,
+        with the tripped cap named in self.gate_reason — "budget exhausted"
+        without saying WHICH budget makes runs undiagnosable.
 
         Gate slots for the gap-fill milestone: coverage-completeness stop and
         saturation (no new premise clusters in the last K waves)."""
@@ -1153,9 +1192,12 @@ class OrchestratorLoop:
         except BudgetExceeded as exc:
             if exc.category == "usd" and exc.spent >= self.config.budgets.max_usd * 1.25:
                 raise  # hard breach: not even a writer call is affordable
+            self.gate_reason = _cap_reason(exc)
             return True
         if self.turns >= self.config.budgets.max_turns - 1:
+            self.gate_reason = f"turn budget ({self.config.budgets.max_turns}) exhausted"
             return True
+        self.gate_reason = None
         return False
 
     def _writer_gate(self) -> None:

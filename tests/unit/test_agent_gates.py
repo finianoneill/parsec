@@ -55,6 +55,8 @@ async def test_max_turns_skips_everything_ends_partial(tmp_path, db, blobs, even
     assert result.status == "partial"
     assert result.turns == 1  # writer only
     assert result.coverage == {"sq-1": "blocked"}
+    rows = CoverageLedger(db, event_log).all(loop.config.session_id)
+    assert rows[0]["reason"] == "turn budget (1) exhausted before dispatch"
 
 
 async def test_token_budget_blocks_remaining_subquestions(tmp_path, db, blobs, event_log, ledger, sessions, clock):
@@ -79,7 +81,7 @@ async def test_token_budget_blocks_remaining_subquestions(tmp_path, db, blobs, e
     assert result.turns == 2  # decomposer + writer
     assert result.coverage == {"sq-1": "blocked", "sq-2": "blocked"}
     rows = CoverageLedger(db, event_log).all("s-tokens")
-    assert all("budget" in r["reason"] for r in rows)
+    assert all("token budget (200000) exhausted before dispatch" == r["reason"] for r in rows)
 
 
 async def test_invalid_decomposition_falls_back_to_whole_query(tmp_path, db, blobs, event_log, ledger, sessions, clock):
@@ -138,6 +140,37 @@ async def test_writer_sees_only_query_evidence_and_gaps(tmp_path, db, blobs, eve
     assert content.startswith("Question:")
     assert "Unresolved subquestions" in content
     assert "found nothing useful" not in content  # no subagent transcript leaks
+
+
+async def test_fair_share_turn_split_dispatches_every_subquestion(tmp_path, db, blobs, event_log, ledger, sessions, clock):
+    """8-turn budget, 6-turn subagent cap, 2 subquestions: v1 let sq-1 run to
+    its full cap and starved sq-2 into "blocked before dispatch"; the fair
+    share gives each subquestion its slice of the remaining turns."""
+    responses = [decompose_response(["part one?", "part two?"])]
+    for i in range(6):  # each subagent burns its slice on unknown tools
+        responses.append(
+            scripted_response(
+                [{"type": "tool_use", "id": f"tu_{i}", "name": "missing_tool", "input": {}}],
+                stop_reason="tool_use", index=i + 1,
+            )
+        )
+    responses.append(
+        scripted_response([{"type": "text", "text": "Ran dry. [narrative]"}], stop_reason="end_turn", index=9)
+    )
+    adapter = FakeAdapter(responses)
+    loop = build_loop(
+        tmp_path, db, blobs, event_log, ledger, sessions, clock, adapter,
+        Budgets(max_turns=8, max_turns_per_subagent=6), session_id="s-fair",
+    )
+    result = await loop.run()
+    rows = CoverageLedger(db, event_log).all("s-fair")
+    # both dispatched — neither is "blocked before dispatch"
+    assert [r["status"] for r in rows] == ["blocked", "blocked"]
+    assert rows[0]["reason"] == "subagent turn cap (3) reached before submit_report"
+    # sq-2's slice ends exactly where the global budget does; the global
+    # gate is checked first, so its (equally true) reason wins.
+    assert rows[1]["reason"] == "turn budget (8) exhausted before submit_report"
+    assert result.turns == 8  # decomposer + 3 + 3 + writer
 
 
 async def test_subagent_turn_cap_marks_partial(tmp_path, db, blobs, event_log, ledger, sessions, clock):

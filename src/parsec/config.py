@@ -55,10 +55,19 @@ class EffortLimits(BaseModel):
     max_gap_rounds: int
 
 
+# The least a dispatched subagent can usefully do: search, fetch/record,
+# submit. Planning more subquestions than can each get this many turns dooms
+# the tail of the plan to "blocked before dispatch".
+MIN_SUBAGENT_TURNS = 3
+
+
 def effort_limits(effort: str, budgets: "Budgets") -> EffortLimits:
     """quick: one subagent, few calls, no gap-fill. standard: small fan-out.
     deep (and anything unrecognized — the v1-compatible default): the full
-    configured caps."""
+    configured caps. Every tier is additionally clamped to the number of
+    subquestions the TURN budget can actually dispatch (decomposer and
+    writer take a turn each) — the caps must agree with each other."""
+    turn_fit = max(1, (budgets.max_turns - 2) // MIN_SUBAGENT_TURNS)
     if effort == "quick":
         return EffortLimits(
             max_subquestions=1,
@@ -67,12 +76,12 @@ def effort_limits(effort: str, budgets: "Budgets") -> EffortLimits:
         )
     if effort == "standard":
         return EffortLimits(
-            max_subquestions=min(2, budgets.max_subquestions),
+            max_subquestions=min(2, budgets.max_subquestions, turn_fit),
             max_turns_per_subagent=budgets.max_turns_per_subagent,
             max_gap_rounds=budgets.max_gap_rounds,
         )
     return EffortLimits(
-        max_subquestions=budgets.max_subquestions,
+        max_subquestions=min(budgets.max_subquestions, turn_fit),
         max_turns_per_subagent=budgets.max_turns_per_subagent,
         max_gap_rounds=budgets.max_gap_rounds,
     )
