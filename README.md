@@ -67,6 +67,21 @@ Live runs need `ANTHROPIC_API_KEY`. The optional synthesis judge needs `OPENAI_A
 
 ## Quick start
 
+No API keys? Start with the interactive shell and the built-in demo:
+
+```sh
+# Launch the interactive shell (welcome screen + REPL). With no
+# ANTHROPIC_API_KEY it points you at the offline tour:
+uv run parsec
+
+# Or run the demo directly: a complete recorded run — scripted model,
+# bundled fixture corpus, no keys, no network. The recording is a real
+# session you can replay, verify, and inspect afterwards:
+uv run parsec demo
+```
+
+With a key, live runs work from the shell or the CLI:
+
 ```sh
 export ANTHROPIC_API_KEY=...
 
@@ -101,6 +116,8 @@ While a run is live, type on stdin to **steer** it — your message is injected 
 
 | Command | What it does |
 |---|---|
+| `parsec` | Interactive shell: welcome screen + REPL over the commands below (bare text runs `ask`) |
+| `parsec demo` | Built-in offline demo — a full recorded run with no API keys and no network |
 | `parsec ask "…"` | Run a research query (`--live` for the progress view, `--parallel N` for concurrent subagents (≤5), `--brief-gate` to approve/edit the research brief before dispatch, `--max-usd`/`--max-tokens`/`--max-turns`/`--max-gap-rounds` for budgets, `--cache-mode record\|replay\|live-prefer-cache`) |
 | `parsec replay <session>` | Re-execute against the frozen corpus; verifies projections and answer bytes are identical |
 | `parsec verify <session>` | Mechanical verification (structural, temporal ordering, grounded-NLI advisories) + credence + omission report over the stored evidence graph |
