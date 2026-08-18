@@ -46,6 +46,17 @@ def test_under_caps_passes(ledger, sid):
     ledger.check_caps(sid, Budgets(), wall_elapsed_s=1)
 
 
+def test_cache_tokens_weighted_at_price_ratio(ledger, sid):
+    """spent_tokens is a spend proxy: cache reads count a tenth, cache
+    writes 1.25x — full-weight cache reads were exhausting the token cap
+    silently while the footer showed only input/output."""
+    ledger.debit(sid, "input_tokens", 100, "gateway:m")
+    ledger.debit(sid, "output_tokens", 50, "gateway:m")
+    ledger.debit(sid, "cache_read_tokens", 1000, "gateway:m")
+    ledger.debit(sid, "cache_creation_tokens", 100, "gateway:m")
+    assert ledger.spent_tokens(sid) == 100 + 50 + 100 + 125
+
+
 def test_attribution_by_actor(ledger, sid):
     ledger.debit(sid, "input_tokens", 10, "gateway:a")
     ledger.debit(sid, "input_tokens", 20, "gateway:b")

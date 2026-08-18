@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from parsec.models.report import PremiseDraft
+from parsec.models.report import PREMISE_MAX_CHARS, PremiseDraft
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
 from parsec.store.spans import SpanStore
@@ -30,10 +30,18 @@ from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, make_grounded_checker
 
 
+class LenientPremiseDraft(PremiseDraft):
+    """PremiseDraft without the schema-level length cap: run() checks the cap
+    per premise, so one overlong text is rejected alone (with the reason)
+    instead of failing the entire batch before the tool runs."""
+
+    text: str = Field(min_length=1)
+
+
 class RecordPremisesInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    premises: list[PremiseDraft] = Field(min_length=1, max_length=20)
+    premises: list[LenientPremiseDraft] = Field(min_length=1, max_length=20)
 
 
 class RecordPremisesTool:
@@ -43,9 +51,11 @@ class RecordPremisesTool:
         "subject, one predicate, quantities stated exactly as the span states them (or add "
         "transform_note explaining a derivation). A premise must stand alone: name the "
         "specific entity (never a bare 'it' or 'the study'), and state specifics instead of "
-        "vague terms like 'benefits' or 'significant'. span_refs must be span IDs returned by "
-        "fetch. Returns premise IDs — your final answer will cite these, so record every fact "
-        "you intend to use. Rejected premises include the reason; fix and re-record them."
+        "vague terms like 'benefits' or 'significant'. Keep each premise text under "
+        f"{PREMISE_MAX_CHARS} characters — longer ones are rejected; split them. span_refs "
+        "must be span IDs returned by fetch. Returns premise IDs — your final answer will "
+        "cite these, so record every fact you intend to use, as soon as you have its spans. "
+        "Rejected premises include the reason; fix and re-record them."
     )
     input_model = RecordPremisesInput
     max_context_chars = 6000
@@ -74,6 +84,14 @@ class RecordPremisesTool:
         span_node_ids: dict[str, str] = {}
 
         for i, draft in enumerate(input.premises):
+            if len(draft.text) > PREMISE_MAX_CHARS:
+                error = (
+                    f"text is {len(draft.text)} chars (max {PREMISE_MAX_CHARS}); "
+                    "split it into atomic premises, one subject and one predicate each"
+                )
+                results.append({"index": i, "error": error})
+                lines.append(f"REJECTED premise {i}: {error}")
+                continue
             span_rows = []
             missing = []
             for ref in draft.span_refs:

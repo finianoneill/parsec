@@ -609,6 +609,10 @@ class OrchestratorLoop:
                     # interleaving-dependent; parallel mode drains steering
                     # only at orchestrator-stream boundaries.
                     messages = self._drain_steering(messages)
+                if subagent_turns == self.effort_limits.max_turns_per_subagent - 1:
+                    # Deterministic (pure function of the turn count), so
+                    # replay re-injects identically in both dispatch modes.
+                    messages.append({"role": "user", "content": prompts.FINAL_TURN_NUDGE})
                 messages = self._compact_if_needed(messages, sq, recorded_premises)
                 resp = await self.gateway.complete(
                     prompts.build_subagent_request(cfg, tool_schemas, list(messages))
@@ -620,7 +624,11 @@ class OrchestratorLoop:
                 if resp.stop_reason == "tool_use":
                     submission = self._extract_submission(resp, recorded_premises)
                     if submission is not None:
-                        break  # report accepted; remaining tool_use blocks are moot
+                        # Report accepted — but first run the sibling tool
+                        # calls: record_premises alongside submit_report must
+                        # still land in the DAG, not be silently dropped.
+                        await self._run_tools(resp, recorded_premises, skip_submit=True)
+                        break
                     messages.append({"role": "assistant", "content": resp.content})
                     messages.append(
                         {"role": "user", "content": await self._run_tools(resp, recorded_premises)}
@@ -775,10 +783,14 @@ class OrchestratorLoop:
             return submission
         return None
 
-    async def _run_tools(self, resp: ModelResponse, recorded_premises: list[str]) -> list[dict]:
+    async def _run_tools(
+        self, resp: ModelResponse, recorded_premises: list[str], skip_submit: bool = False
+    ) -> list[dict]:
         blocks = []
         for tool_use in resp.tool_uses:
             if tool_use.get("name") == "submit_report":
+                if skip_submit:
+                    continue  # the submission validated; nothing to correct
                 # reached only when validation failed above
                 blocks.append(
                     {

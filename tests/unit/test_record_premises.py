@@ -156,6 +156,31 @@ async def test_unsupported_premise_recorded_with_advisory_note(setup, config):
     assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1  # advisory, not a gate
 
 
+async def test_overlong_premise_rejected_alone_not_the_batch(setup, config, blobs):
+    """A >300-char premise is rejected individually with the reason; sibling
+    premises in the same batch still record — the length cap must never fail
+    the whole call at schema level."""
+    registry, ctx, dag, s1, s2 = setup
+    long_text = "Water boils at 100 degrees Celsius at sea level, " * 8
+    assert len(long_text) > 300
+    intent = ToolIntent(
+        tool_use_id="t-long",
+        tool_name="record_premises",
+        input={
+            "premises": [
+                {"text": long_text, "span_refs": [s1]},
+                {"text": "Water boils at 100 degrees Celsius at sea level.", "span_refs": [s1]},
+            ]
+        },
+    )
+    result = await registry.dispatch(intent, ctx)
+    assert result.ok
+    full = json.loads(blobs.get_text(result.full_blob))
+    assert "max 300" in full["results"][0]["error"]
+    assert "premise_id" in full["results"][1]
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+
+
 async def test_idempotent_re_record(setup, config):
     registry, ctx, dag, s1, s2 = setup
     intent = ToolIntent(

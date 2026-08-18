@@ -10,13 +10,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Atomicity guard (§10.1): one subject, one predicate — enforced softly via a
+# hard length cap. The record_premises tool checks it per premise so one
+# overlong text cannot fail a whole batch at schema level.
+PREMISE_MAX_CHARS = 300
+
 
 class PremiseDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Atomicity guard (§10.1): one subject, one predicate — enforced softly via
-    # a hard length cap; specificity itself is an eval metric, not a schema rule.
-    text: str = Field(min_length=1, max_length=300)
+    # Specificity itself is an eval metric, not a schema rule.
+    text: str = Field(min_length=1, max_length=PREMISE_MAX_CHARS)
     span_refs: list[str] = Field(min_length=1)
     # FreshQA-style mutability classes (M10): stable never decays, slow
     # decays gently with evidence age, volatile decays fast and can be
