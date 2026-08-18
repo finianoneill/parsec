@@ -35,7 +35,7 @@ from typing import Callable
 
 from pydantic import ValidationError
 
-from parsec.config import RunConfig
+from parsec.config import EffortLimits, RunConfig, effort_limits
 from parsec.errors import BudgetExceeded, HaltRequested, ModelCallFailed, ReplayDivergence
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop import compaction, prompts
@@ -61,12 +61,26 @@ from parsec.verify.omission import OmissionReport, detect_omissions
 from parsec.verify.structural import verify_session
 
 MAX_REPAIR_ROUNDS = 1
+MAX_BRIEF_ROUNDS = 3  # brief-gate edit rounds before the latest brief proceeds
+
+_APPROVALS = frozenset({"approve", "approved", "ok", "yes", "y", "lgtm"})
 
 
 @dataclass
 class Subquestion:
     sq_id: str
     question: str
+
+
+@dataclass
+class Brief:
+    """The scoping artifact (M12, WS-F.1): what the research will cover, how
+    hard to try, and the decomposition. Persisted as a RESEARCH_BRIEF event
+    and (with --brief-gate) approvable/editable via recorded steering."""
+
+    scope: str
+    effort: str  # quick | standard | deep
+    questions: list[str]
 
 
 @dataclass
@@ -153,6 +167,13 @@ class OrchestratorLoop:
         # steering at the recorded turn indices via scripted_steering.
         self._steer_queue: deque[str] = deque()
         self.scripted_steering: dict[int, list[str]] = {}
+        # M12 brief gate: recorded approvals/edits, keyed by turn index like
+        # steering (they ARE steering events, payload-tagged gate="brief").
+        self.scripted_brief_gate: dict[int, list[str]] = {}
+        # Brief state: scope rides in subagent prompts; effort limits are the
+        # harness-enforced dispatch caps. Defaults = full configured caps.
+        self.brief_scope = ""
+        self.effort_limits: EffortLimits = effort_limits("deep", config.budgets)
         # M11 replay scheduler: recorded join order per wave. Empty on live
         # runs (observed completion order is used and journaled); set by the
         # replay runner from the recorded SUBAGENT_JOINED events.
@@ -243,7 +264,7 @@ class OrchestratorLoop:
                 )
                 if (
                     credence.flagged_claims
-                    and gap_rounds < self.config.budgets.max_gap_rounds
+                    and gap_rounds < self.effort_limits.max_gap_rounds
                     and not partial
                     and not self._gate()
                 ):
@@ -318,22 +339,42 @@ class OrchestratorLoop:
     # -- planning ------------------------------------------------------------
 
     async def _plan(self) -> list[Subquestion]:
-        """Decompose the query into coverage-ledger rows. The decomposer sees
-        only the query; on an invalid response the harness falls back to
-        treating the whole query as a single subquestion (never crashes)."""
+        """Scoping phase (M12): the decomposer produces a research BRIEF —
+        scope, effort estimate, subquestions — persisted as a RESEARCH_BRIEF
+        event. With --brief-gate, the brief waits for recorded steering:
+        "approve" dispatches, anything else is an edit fed back to the
+        decomposer. On an invalid response the harness falls back to the
+        whole query as a single subquestion (never crashes)."""
         cfg = self.config
         sid = cfg.session_id
         if self._gate():
-            questions = [cfg.query]
+            brief = Brief("", "deep", [cfg.query])
             note = "decomposition skipped (budget); whole query as sq-1"
         else:
             resp = await self.gateway.complete(prompts.build_decomposer_request(cfg, cfg.query))
             self.turns += 1
-            questions, note = self._parse_decomposition(resp)
+            brief, note = self._parse_brief(resp)
+            if cfg.brief_gate:
+                brief, note = await self._brief_gate(brief, note, resp)
 
-        subquestions = [
-            Subquestion(f"sq-{i + 1}", q) for i, q in enumerate(questions[: cfg.budgets.max_subquestions])
-        ]
+        self.brief_scope = brief.scope
+        # WS-F.4: the effort estimate becomes harness-enforced dispatch caps.
+        self.effort_limits = effort_limits(brief.effort, cfg.budgets)
+        questions = brief.questions[: self.effort_limits.max_subquestions]
+        subquestions = [Subquestion(f"sq-{i + 1}", q) for i, q in enumerate(questions)]
+
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.RESEARCH_BRIEF,
+            {
+                "scope": brief.scope,
+                "effort": brief.effort,
+                "subquestions": questions,
+                "limits": self.effort_limits.model_dump(),
+                "gated": cfg.brief_gate,
+            },
+        )
         self.event_log.append(
             sid,
             "harness",
@@ -344,14 +385,17 @@ class OrchestratorLoop:
             self.coverage.create(sid, s.sq_id, s.question)
         # No session id in notebook text: replayed sessions must produce
         # byte-identical entries (the entry hash is in the event projection).
-        md = [f"**Query:** {cfg.query}", "", "## Plan"]
+        md = [f"**Query:** {cfg.query}", ""]
+        if brief.scope:
+            md += ["## Research brief", brief.scope, f"_Effort: {brief.effort}_", ""]
+        md.append("## Plan")
         md += [f"- {s.sq_id}: {s.question}" for s in subquestions]
         if note:
             md.append(f"\n_{note}_")
         self.notebook.append(sid, "orchestrator", "\n".join(md))
         return subquestions
 
-    def _parse_decomposition(self, resp: ModelResponse) -> tuple[list[str], str]:
+    def _parse_brief(self, resp: ModelResponse) -> tuple[Brief, str]:
         for block in resp.tool_uses:
             if block.get("name") != "submit_subquestions":
                 continue
@@ -362,8 +406,92 @@ class OrchestratorLoop:
                 and questions
                 and all(isinstance(q, str) and len(q.strip()) >= 3 for q in questions)
             ):
-                return [q.strip() for q in questions], ""
-        return [self.config.query], "decomposition invalid; whole query as sq-1"
+                scope = raw.get("scope") if isinstance(raw.get("scope"), str) else ""
+                effort = raw.get("effort")
+                if effort not in ("quick", "standard", "deep"):
+                    effort = "deep"  # absent/invalid estimate never clamps (v1 behavior)
+                return Brief(scope.strip(), effort, [q.strip() for q in questions]), ""
+        return Brief("", "deep", [self.config.query]), "decomposition invalid; whole query as sq-1"
+
+    async def _brief_gate(
+        self, brief: Brief, note: str, resp: ModelResponse
+    ) -> tuple[Brief, str]:
+        """The approvable gate (M12): each proposal is journaled, then the
+        loop blocks for one steering message. Approvals proceed; edits extend
+        the decomposer transcript (append-only — the prefix stays cached) and
+        produce a revised brief. Every message is a recorded steering event,
+        so gated sessions replay byte-identically."""
+        cfg = self.config
+        sid = cfg.session_id
+        messages: list[dict] = [{"role": "user", "content": cfg.query}]
+        for round_index in range(MAX_BRIEF_ROUNDS):
+            self.event_log.append(
+                sid,
+                "harness",
+                EventType.RESEARCH_BRIEF,
+                {
+                    "scope": brief.scope,
+                    "effort": brief.effort,
+                    "subquestions": brief.questions,
+                    "proposal": round_index,
+                    "status": "proposed",
+                },
+            )
+            text = await self._await_gate_message()
+            if text.strip().lower() in _APPROVALS:
+                return brief, note
+            if self._gate():
+                return brief, (note + "; " if note else "") + "brief edits cut short by budget"
+            messages.append({"role": "assistant", "content": resp.content})
+            tool_results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": "brief received; the user requested changes",
+                }
+                for block in resp.tool_uses
+                if block.get("name") == "submit_subquestions"
+            ]
+            messages.append(
+                {
+                    "role": "user",
+                    "content": tool_results
+                    + [{"type": "text", "text": f"[brief edit] {text}\nRevise the brief and call submit_subquestions again."}],
+                }
+            )
+            resp = await self.gateway.complete(
+                prompts.build_decomposer_request(cfg, cfg.query, messages=list(messages))
+            )
+            self.turns += 1
+            brief, note = self._parse_brief(resp)
+        return brief, (note + "; " if note else "") + "brief edit rounds exhausted; proceeding"
+
+    async def _await_gate_message(self) -> str:
+        """Block until one steering message arrives (live) or take the next
+        scripted gate message at this turn index (replay). Wall-clock budget
+        still applies — an unattended gate degrades to the best-effort path."""
+        sid = self.config.session_id
+        while True:
+            scripted = self.scripted_brief_gate.get(self.turns)
+            if scripted:
+                text = scripted.pop(0)
+                break
+            if self._steer_queue:
+                text = self._steer_queue.popleft()
+                break
+            if self.halt_requested:
+                raise HaltRequested()
+            elapsed = self.clock.monotonic() - self._start_mono
+            if elapsed >= self.config.budgets.max_wall_seconds:
+                raise BudgetExceeded("wall_seconds", elapsed, self.config.budgets.max_wall_seconds)
+            await self.clock.sleep(0.05)
+        self.event_log.append(
+            sid,
+            "user",
+            EventType.STEERING_INJECTED,
+            {"turn_index": self.turns, "text": text, "gate": "brief"},
+        )
+        return text
 
     # -- subagents -----------------------------------------------------------
 
@@ -454,7 +582,10 @@ class OrchestratorLoop:
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
         tool_schemas = self.registry.export_schemas()
         messages: list[dict] = [
-            {"role": "user", "content": prompts.subagent_user_prompt(sq.sq_id, sq.question)}
+            {
+                "role": "user",
+                "content": prompts.subagent_user_prompt(sq.sq_id, sq.question, self.brief_scope),
+            }
         ]
         recorded_premises: list[str] = []  # premise IDs this subagent recorded
         subagent_turns = 0
@@ -529,12 +660,14 @@ class OrchestratorLoop:
     ) -> bool:
         """Sequential: the v1 global gate. Parallel: stream-local spend vs the
         wave allowance only — a concurrent gate must not read totals that
-        depend on sibling interleaving (T8), or replay diverges."""
+        depend on sibling interleaving (T8), or replay diverges. Turn caps
+        come from the effort limits (M12): the brief's estimate, enforced."""
+        max_turns = self.effort_limits.max_turns_per_subagent
         if allowance is None:
-            return self._gate() or subagent_turns >= self.config.budgets.max_turns_per_subagent
+            return self._gate() or subagent_turns >= max_turns
         if self.halt_requested:
             raise HaltRequested()
-        if subagent_turns >= self.config.budgets.max_turns_per_subagent:
+        if subagent_turns >= max_turns:
             return True
         spend = self.gateway.stream_spend.get(stream, {})
         return spend.get("usd", 0.0) >= allowance.usd or spend.get("tokens", 0.0) >= allowance.tokens
@@ -542,20 +675,28 @@ class OrchestratorLoop:
     def _compact_if_needed(
         self, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
     ) -> list[dict]:
-        """Compaction ladder (§7): evict, then reset. Pure function of the
-        transcript's char counts — replays deterministically."""
+        """Compaction ladder (§7, all three rungs as of M12): evict, then
+        reconstruct the workspace from the evidence DAG + notebook, then
+        reset. Pure function of the transcript's char counts and the
+        recorded evidence — replays deterministically."""
         cfg = self.config
         before = compaction.context_chars(messages)
         if before <= cfg.max_context_chars:
             return messages
+        prompt = prompts.subagent_user_prompt(sq.sq_id, sq.question, self.brief_scope)
         messages, evicted = compaction.evict_tool_results(messages, cfg.evict_keep_last)
         action = "evict"
         if compaction.context_chars(messages) > cfg.max_context_chars:
+            action = "reconstruct"
+            workspace = compaction.render_workspace(
+                self._premise_slice_lines(recorded_premises),
+                self.notebook.render(cfg.session_id),
+            )
+            messages = compaction.reconstruct_context(prompt, workspace)
+        if compaction.context_chars(messages) > cfg.max_context_chars:
             action = "reset"
             texts = self._premise_texts(recorded_premises)
-            messages = compaction.reset_context(
-                prompts.subagent_user_prompt(sq.sq_id, sq.question), texts
-            )
+            messages = compaction.reset_context(prompt, texts)
         self.event_log.append(
             cfg.session_id,
             f"subagent:{sq.sq_id}",
@@ -582,6 +723,25 @@ class OrchestratorLoop:
             for row in self.dag.nodes_for_session(self.config.session_id, tier=1)
         }
         return [payloads[pid]["text"] for pid in premise_ids if pid in payloads]
+
+    def _premise_slice_lines(self, premise_ids: list[str]) -> list[str]:
+        """The rung-2 DAG slice: this subagent's premises with span refs and
+        source URLs, in record order — a deterministic render of the log."""
+        payloads = {
+            row["node_id"]: json.loads(row["payload_json"])
+            for row in self.dag.nodes_for_session(self.config.session_id, tier=1)
+        }
+        sources = self._premise_sources(self.config.session_id)
+        lines = []
+        for pid in premise_ids:
+            if pid not in payloads:
+                continue
+            p = payloads[pid]
+            provenance = f"spans: {', '.join(p['span_refs'])}"
+            if pid in sources:
+                provenance += f"; source: {sources[pid]}"
+            lines.append(f"- [{pid}] {p['text']} ({provenance})")
+        return lines
 
     def _extract_submission(
         self, resp: ModelResponse, recorded_premises: list[str]

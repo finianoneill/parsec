@@ -2,6 +2,8 @@ from parsec.loop.compaction import (
     EVICTION_MARKER,
     context_chars,
     evict_tool_results,
+    reconstruct_context,
+    render_workspace,
     reset_context,
 )
 
@@ -61,3 +63,27 @@ def test_reset_context_carries_evidence():
 def test_reset_context_without_evidence():
     msgs = reset_context("Subquestion sq-1: q?", [])
     assert "Premises already recorded" not in msgs[0]["content"]
+
+
+def test_render_workspace_carries_slice_and_notebook():
+    md = render_workspace(
+        ["- [premise:x] Water boils at 100C. (spans: doc:ab#0-10; source: https://a.example)"],
+        "## Plan\n- sq-1: boiling point",
+    )
+    assert "reconstructed from the evidence graph" in md
+    assert "do NOT re-record" in md
+    assert "[premise:x]" in md and "https://a.example" in md
+    assert "## Session notebook" in md and "sq-1: boiling point" in md
+
+
+def test_render_workspace_without_premises():
+    md = render_workspace([], "")
+    assert "(none yet)" in md
+    assert "## Session notebook" not in md
+
+
+def test_reconstruct_context_is_one_user_message():
+    msgs = reconstruct_context("Subquestion sq-1: q?", "## workspace")
+    assert len(msgs) == 1 and msgs[0]["role"] == "user"
+    assert msgs[0]["content"].startswith("Subquestion sq-1")
+    assert "## workspace" in msgs[0]["content"]

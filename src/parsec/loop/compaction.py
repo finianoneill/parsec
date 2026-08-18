@@ -1,16 +1,21 @@
-"""Compaction ladder (§7), v1 rungs for subagent contexts.
+"""Compaction ladder (§7), full three rungs as of M12.
 
 Rung 1 — EVICT: replace old tool-result contents with explicit markers.
 The evidence is not lost: spans and premises live in the store, not the
 context (§5 — provenance by construction).
-Rung 3 — RESET: fresh context seeded from the recorded evidence, a
-controlled restart rather than a truncation.
-Rung 2 (model-written squeeze into the notebook) is deferred: it costs
-model calls; the notebook already receives distilled evidence at
-submit_report time.
+Rung 2 — RECONSTRUCT (M12, WS-F.2): round-based context reconstruction.
+The field moved past transcript compaction to workspace reconstruction —
+and our evidence DAG IS the external memory, so rung 2 re-renders the
+relevant DAG slice (this subagent's premises with span refs and sources)
+plus the notebook into a fresh workspace. A deterministic function of the
+log — better AND cheaper than the once-planned model-written squeeze,
+which is why that never shipped.
+Rung 3 — RESET: the minimal fallback when even the reconstructed
+workspace exceeds the budget — assignment plus bare premise texts.
 
 Every decision here is a pure function of the transcript's character
-counts, so compaction replays byte-identically (T4).
+counts and the recorded evidence, so compaction replays byte-identically
+(T4).
 """
 
 from __future__ import annotations
@@ -56,6 +61,32 @@ def evict_tool_results(messages: list[dict], keep_last: int) -> tuple[list[dict]
         else:
             out.append(m)
     return out, evicted
+
+
+def reconstruct_context(subagent_prompt: str, workspace_md: str) -> list[dict]:
+    """Rung 2: fresh context = the assignment + a workspace re-rendered from
+    the evidence DAG and notebook (built by the orchestrator, which owns the
+    stores). One user message, so the phase's cache prefix stays stable."""
+    return [{"role": "user", "content": f"{subagent_prompt}\n\n{workspace_md}"}]
+
+
+def render_workspace(
+    premise_lines: list[str], notebook_md: str
+) -> str:
+    """The rung-2 workspace body: what is already saved (do not re-record),
+    with provenance, plus the session notebook."""
+    lines = [
+        "(Your context was compacted. This workspace was reconstructed from the "
+        "evidence graph — everything below is already saved in the store; do NOT "
+        "re-record it. Continue researching what is still missing, or call "
+        "submit_report.)",
+        "",
+        "## Premises you have recorded",
+    ]
+    lines += premise_lines if premise_lines else ["(none yet)"]
+    if notebook_md:
+        lines += ["", "## Session notebook", notebook_md]
+    return "\n".join(lines)
 
 
 def reset_context(

@@ -107,15 +107,20 @@ async def run_replay(
     from parsec.models.events import EventType
 
     scripted: dict[int, list[str]] = {}
+    scripted_gate: dict[int, list[str]] = {}
     joins: dict[int, list[tuple[int, str]]] = {}
     for ev in event_log.read(original_session_id):
         if ev.event_type == EventType.STEERING_INJECTED:
-            scripted.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
+            # Brief-gate approvals/edits (M12) are consumed by the gate, not
+            # drained into model context — keep the two channels separate.
+            target = scripted_gate if ev.payload.get("gate") == "brief" else scripted
+            target.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
         elif ev.event_type == EventType.SUBAGENT_JOINED:
             joins.setdefault(ev.payload["wave"], []).append(
                 (ev.payload["join_index"], ev.payload["sq_id"])
             )
     loop.scripted_steering = scripted
+    loop.scripted_brief_gate = scripted_gate
     loop.scripted_join_order = [
         [sq_id for _, sq_id in sorted(joins[wave])] for wave in sorted(joins)
     ]
