@@ -181,6 +181,161 @@ async def test_overlong_premise_rejected_alone_not_the_batch(setup, config, blob
     assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
 
 
+async def test_near_duplicate_returns_existing_premise_and_corroborates(setup, config, blobs):
+    """A rephrased known fact must not fragment into a second premise node:
+    the existing ID comes back, and a genuinely new span attaches to it as
+    corroboration."""
+    registry, ctx, dag, s1, s2 = setup
+    first = ToolIntent(
+        tool_use_id="t-orig",
+        tool_name="record_premises",
+        input={"premises": [{"text": "Water boils at 100 degrees Celsius at sea level.", "span_refs": [s1]}]},
+    )
+    result = await registry.dispatch(first, ctx)
+    original_id = json.loads(blobs.get_text(result.full_blob))["results"][0]["premise_id"]
+
+    rephrased = ToolIntent(
+        tool_use_id="t-dup",
+        tool_name="record_premises",
+        input={
+            "premises": [
+                # Same fact, new phrasing, same span: nothing new to attach —
+                # the existing ID just comes back.
+                {"text": "At sea level water boils at 100 degrees Celsius.", "span_refs": [s1]},
+            ]
+        },
+    )
+    result = await registry.dispatch(rephrased, ctx)
+    assert result.ok
+    full = json.loads(blobs.get_text(result.full_blob))
+    assert full["results"][0]["premise_id"] == original_id
+    assert full["results"][0]["duplicate"] is True
+    assert "already recorded" in result.truncated_text
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+
+
+async def test_duplicate_with_supporting_new_span_attaches_corroboration(setup, config, blobs, db, clock):
+    registry, ctx, dag, s1, s2 = setup
+    # A second document that independently states the fact.
+    documents = DocumentStore(db, clock)
+    spans_store = SpanStore(db)
+    text = "Reference tables list water's sea-level boiling point as 100 degrees Celsius."
+    raw = text.encode()
+    doc_hash = ids.doc_hash(raw)
+    blobs.put(raw)
+    text_blob = blobs.put(text)
+    documents.put_document(doc_hash, "https://other.test/ref", "text/plain", 200, len(raw), text_blob, {})
+    s3 = ids.span_id(doc_hash, 0, len(text))
+    spans_store.put_spans(doc_hash, [(s3, 0, len(text), text)])
+
+    await registry.dispatch(
+        ToolIntent(
+            tool_use_id="t-c1",
+            tool_name="record_premises",
+            input={"premises": [{"text": "Water boils at 100 degrees Celsius at sea level.", "span_refs": [s1]}]},
+        ),
+        ctx,
+    )
+    result = await registry.dispatch(
+        ToolIntent(
+            tool_use_id="t-c2",
+            tool_name="record_premises",
+            input={"premises": [{"text": "At sea level, water boils at 100 degrees Celsius.", "span_refs": [s3]}]},
+        ),
+        ctx,
+    )
+    assert result.ok
+    assert "1 corroborating span(s) attached" in result.truncated_text
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+    edges = [e for e in dag.edges_for_session(config.session_id) if e["edge_type"] == "extracts"]
+    assert len(edges) == 2  # original span + the corroborating one
+
+
+async def test_duplicate_with_uncontained_span_does_not_attach(setup, config, blobs, db, clock):
+    """Corroboration has the same mechanical bar as recording: the RECORDED
+    text (here, its quoted phrase) must be contained in the new spans on
+    their own — else the span rides in without stating the fact."""
+    registry, ctx, dag, s1, s2 = setup
+    documents = DocumentStore(db, clock)
+    spans_store = SpanStore(db)
+    text = "Sea-level boiling point: 100 degrees Celsius exactly."
+    raw = text.encode()
+    doc_hash = ids.doc_hash(raw)
+    blobs.put(raw)
+    text_blob = blobs.put(text)
+    documents.put_document(doc_hash, "https://other.test/alt", "text/plain", 200, len(raw), text_blob, {})
+    s3 = ids.span_id(doc_hash, 0, len(text))
+    spans_store.put_spans(doc_hash, [(s3, 0, len(text), text)])
+
+    await registry.dispatch(
+        ToolIntent(
+            tool_use_id="t-a",
+            tool_name="record_premises",
+            input={"premises": [{"text": 'Water "boils at 100 degrees Celsius" at sea level.', "span_refs": [s1]}]},
+        ),
+        ctx,
+    )
+    result = await registry.dispatch(
+        ToolIntent(
+            tool_use_id="t-b",
+            tool_name="record_premises",
+            # near-duplicate phrasing, but s3 lacks the recorded quote verbatim
+            input={"premises": [{"text": "Water boils at 100 degrees Celsius at sea level too.", "span_refs": [s3]}]},
+        ),
+        ctx,
+    )
+    assert result.ok
+    full = json.loads(blobs.get_text(result.full_blob))
+    assert full["results"][0]["duplicate"] is True
+    assert "attached" not in result.truncated_text
+    # only the original extracts edge exists
+    edges = [e for e in dag.edges_for_session(config.session_id) if e["edge_type"] == "extracts"]
+    assert len(edges) == 1
+
+
+async def test_different_quantity_is_not_a_duplicate(setup, config):
+    """Same phrasing, different number: a conflict to record, never a merge."""
+    registry, ctx, dag, s1, s2 = setup
+    await registry.dispatch(
+        ToolIntent(
+            tool_use_id="t-n1",
+            tool_name="record_premises",
+            input={"premises": [{"text": "Water boils at 100 degrees Celsius at sea level.", "span_refs": [s1]}]},
+        ),
+        ctx,
+    )
+    result = await registry.dispatch(
+        ToolIntent(
+            tool_use_id="t-n2",
+            tool_name="record_premises",
+            input={"premises": [{"text": "Water boils at about 70 degrees Celsius at sea level.", "span_refs": [s2]}]},
+        ),
+        ctx,
+    )
+    assert result.ok
+    assert "already recorded" not in result.truncated_text
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 2
+
+
+async def test_in_batch_near_duplicates_collapse(setup, config, blobs):
+    registry, ctx, dag, s1, s2 = setup
+    intent = ToolIntent(
+        tool_use_id="t-batch",
+        tool_name="record_premises",
+        input={
+            "premises": [
+                {"text": "Everest boiling is about 70 degrees Celsius.", "span_refs": [s2]},
+                {"text": "Boiling on Everest is about 70 degrees Celsius.", "span_refs": [s2]},
+            ]
+        },
+    )
+    result = await registry.dispatch(intent, ctx)
+    full = json.loads(blobs.get_text(result.full_blob))
+    assert full["results"][0]["premise_id"] == full["results"][1]["premise_id"]
+    assert full["results"][1].get("duplicate") is True
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+
+
 async def test_idempotent_re_record(setup, config):
     registry, ctx, dag, s1, s2 = setup
     intent = ToolIntent(
