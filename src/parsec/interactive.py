@@ -71,12 +71,20 @@ def run_interactive(
     data_dir: Path,
     console: Console | None = None,
     config_sources: list[Path] | None = None,
+    user_config: dict | None = None,
 ) -> int:
     # Imported here, not at module top: cli imports us for the no-args path.
     import parsec.cli as cli
 
     console = console or cli.console
-    keyed = has_api_key()
+    bedrock = (user_config or {}).get("adapter") == "bedrock"
+    keyed = bedrock or has_api_key()
+    if bedrock:
+        model_status = "model: bedrock (AWS credential chain — run okta-awscli/aws sso if expired)"
+    elif keyed:
+        model_status = "model: anthropic (ANTHROPIC_API_KEY found)"
+    else:
+        model_status = "model: none — no ANTHROPIC_API_KEY; /demo runs fully offline"
     status = [
         f"data: {data_dir}",
         *(
@@ -84,8 +92,7 @@ def run_interactive(
             if config_sources
             else []
         ),
-        "model: anthropic (ANTHROPIC_API_KEY found)" if keyed
-        else "model: none — no ANTHROPIC_API_KEY; /demo runs fully offline",
+        model_status,
     ]
     print_banner(console, status)
     console.print("[dim]type a question, /demo for the offline tour, /help for commands[/dim]\n")

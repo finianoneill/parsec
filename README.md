@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="312 tests" src="https://img.shields.io/badge/tests-312%20passing-16a34a?style=flat-square">
+  <img alt="316 tests" src="https://img.shields.io/badge/tests-316%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -123,6 +123,28 @@ Every flag you'd otherwise repeat can live in JSON config, layered as `~/.parsec
 ```
 
 Unknown keys are rejected loudly (typo protection). The interactive banner shows which config files were loaded.
+
+### Claude via Amazon Bedrock
+
+If your org reaches Claude through Bedrock instead of an Anthropic API key, install the signing dependencies and point the adapter at your AWS profile:
+
+```sh
+uv sync --extra bedrock              # or: uv tool install --editable ".[bedrock]"
+okta-awscli --profile okta           # or aws sso login, etc. — anything that writes
+                                     # credentials into the standard AWS chain
+```
+
+Then set it once in config (or pass `--adapter bedrock --aws-region … --aws-profile …` per run):
+
+```json
+{
+  "adapter": "bedrock",
+  "aws_region": "us-east-1",
+  "aws_profile": "okta"
+}
+```
+
+Auth is the standard AWS credential chain — env vars, then `~/.aws/credentials` — which is exactly where okta-awscli drops its temporary STS credentials, so re-running `okta-awscli` when they expire is the whole refresh story. Model IDs are prefixed automatically (`claude-opus-5` → `anthropic.claude-opus-5`); no `ANTHROPIC_API_KEY` is needed. Recording, replay, and budgets behave identically to the first-party adapter.
 
 ### Editing the research brief in $EDITOR
 

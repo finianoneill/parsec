@@ -20,6 +20,10 @@ nli = [
     "transformers>=4.44",
     "torch>=2.3",
 ]
+# Claude via Amazon Bedrock (SigV4 signing for the Mantle client).
+bedrock = [
+    "anthropic[bedrock]>=0.40",
+]
 
 [project.scripts]
 parsec = "parsec.cli:main"

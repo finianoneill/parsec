@@ -86,7 +86,11 @@ class RunConfig(BaseModel):
     model: str = DEFAULT_MODEL
     max_tokens_per_call: int = 8192
     cache_mode: CacheMode = CacheMode.LIVE_PREFER_CACHE
-    adapter: Literal["anthropic", "fake", "replay"] = "anthropic"
+    adapter: Literal["anthropic", "bedrock", "fake", "replay"] = "anthropic"
+    # Bedrock (Mantle client): auth is the AWS credential chain — aws_profile
+    # pins the ~/.aws/credentials profile (e.g. the one okta-awscli writes).
+    aws_region: str | None = None
+    aws_profile: str | None = None
     budgets: Budgets = Field(default_factory=Budgets)
     data_dir: Path = Path("data")
     search_fixtures: Path | None = None

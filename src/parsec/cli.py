@@ -76,7 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("query")
     ask.add_argument("--session-id")
     ask.add_argument("--cache-mode", choices=[m.value for m in CacheMode], default=CacheMode.LIVE_PREFER_CACHE.value)
-    ask.add_argument("--adapter", choices=["anthropic", "fake", "replay"], default="anthropic")
+    ask.add_argument(
+        "--adapter", choices=["anthropic", "bedrock", "fake", "replay"], default="anthropic"
+    )
+    ask.add_argument(
+        "--aws-region", default=None,
+        help="Bedrock region (adapter=bedrock); also settable as aws_region in config",
+    )
+    ask.add_argument(
+        "--aws-profile", default=None,
+        help="AWS credentials profile for Bedrock (e.g. the one okta-awscli writes)",
+    )
     ask.add_argument("--model", default=DEFAULT_MODEL)
     ask.add_argument("--max-usd", type=float, default=Budgets().max_usd)
     ask.add_argument("--max-tokens", type=int, default=Budgets().max_total_tokens)
@@ -228,6 +238,13 @@ def make_adapter(config: RunConfig):
         from parsec.gateway.anthropic_adapter import AnthropicAdapter
 
         return AnthropicAdapter()
+    if config.adapter == "bedrock":
+        from parsec.gateway.bedrock_adapter import BedrockAdapter
+
+        return BedrockAdapter(
+            aws_region=config.aws_region or os.environ.get("AWS_REGION"),
+            aws_profile=config.aws_profile,
+        )
     raise SystemExit(
         f"adapter {config.adapter!r} is not runnable from `parsec ask` without a test adapter factory"
     )
@@ -281,6 +298,8 @@ def cmd_ask(args) -> int:
         model=args.model,
         cache_mode=CacheMode(args.cache_mode),
         adapter=args.adapter,
+        aws_region=args.aws_region,
+        aws_profile=args.aws_profile,
         budgets=Budgets(
             max_usd=args.max_usd,
             max_total_tokens=args.max_tokens,
@@ -875,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         from parsec.interactive import run_interactive
 
-        return run_interactive(args.data_dir, config_sources=_sources)
+        return run_interactive(args.data_dir, config_sources=_sources, user_config=config)
     handlers = {
         "ask": cmd_ask,
         "demo": cmd_demo,
