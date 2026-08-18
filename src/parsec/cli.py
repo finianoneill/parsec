@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import os
+import select
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from rich.console import Console
@@ -292,6 +294,45 @@ def _build_loop(config: RunConfig, conn, blobs: BlobStore, clock: Clock) -> Orch
     )
 
 
+class SteeringReader:
+    """Reads steering lines from stdin only while a run is in flight.
+
+    Polls with select() instead of blocking in a read so stop() can end the
+    thread at run completion — a reader left blocked on stdin would race the
+    interactive shell's readline for every later keystroke.
+    """
+
+    _POLL_SECONDS = 0.2
+
+    def __init__(self, on_line, stdin=None):
+        self._on_line = on_line
+        self._stdin = stdin if stdin is not None else sys.stdin
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._read, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2 * self._POLL_SECONDS)
+
+    def _read(self) -> None:
+        try:
+            while not self._stop.is_set():
+                ready, _, _ = select.select([self._stdin], [], [], self._POLL_SECONDS)
+                if not ready:
+                    continue
+                line = self._stdin.readline()
+                if not line:  # EOF
+                    return
+                text = line.strip()
+                if text:
+                    self._on_line(text)
+        except (ValueError, OSError):
+            pass
+
+
 def cmd_ask(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -344,25 +385,15 @@ def cmd_ask(args) -> int:
 
     # Steering (§3): lines typed on stdin mid-run are injected into the next
     # model call without tearing down the turn.
+    steering = None
     if sys.stdin.isatty() and not args.as_json:
-        import threading
-
         if config.brief_gate:
             console.print(
                 "[dim]brief gate: type 'approve' to dispatch, 'edit' to open the "
                 "proposed brief in $EDITOR, or any other text to request changes[/dim]"
             )
-
-        def read_stdin():
-            try:
-                for line in sys.stdin:
-                    text = line.strip()
-                    if text:
-                        handle_steer_line(loop, text)
-            except (ValueError, OSError):
-                pass
-
-        threading.Thread(target=read_stdin, daemon=True).start()
+        steering = SteeringReader(lambda text: handle_steer_line(loop, text))
+        steering.start()
 
     try:
         result = asyncio.run(loop.run())
@@ -370,6 +401,8 @@ def cmd_ask(args) -> int:
         console.print("[red]aborted[/red]")
         return EXIT_ERROR
     finally:
+        if steering is not None:
+            steering.stop()
         if live_view is not None:
             live_view.__exit__()
             loop.event_log.listener = None
