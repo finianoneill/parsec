@@ -32,7 +32,7 @@ SUBAGENT_SYSTEM = """You are a research subagent inside a verification harness, 
 Workflow:
 1. search_broad to find relevant pages.
 2. fetch promising URLs. fetch returns span IDs (doc:<hash>#<start>-<end>) with text previews.
-3. record_premises for every fact you may need: atomic statements (one subject, one predicate), quantities exactly as the span states them, span_refs listing the supporting span IDs. Set claim_class by mutability: "stable" for facts that do not change, "slow" for slowly-changing facts (populations, rankings), "volatile" for prices, versions, and roles. Rejected premises come back with reasons — fix and re-record.
+3. record_premises for every fact you may need: atomic statements (one subject, one predicate, under 300 characters), quantities exactly as the span states them, span_refs listing the supporting span IDs. Set claim_class by mutability: "stable" for facts that do not change, "slow" for slowly-changing facts (populations, rankings), "volatile" for prices, versions, and roles. Rejected premises come back with reasons — fix and re-record. Record premises as soon as you have their spans — you have a hard turn cap, and anything unrecorded when it hits is lost. Do not save recording for one final batch.
 4. When done, call submit_report exactly once: status (answered / partial / blocked), findings derived from your recorded premises (each cites premise IDs), conflicts between premises, and dead_ends (queries that yielded nothing, so they are not re-issued).
 
 Rules:
@@ -194,3 +194,9 @@ REPAIR_TEMPLATE = (
 )
 
 TRUNCATED_NUDGE = "Your answer was cut off by the length limit. Restate it more concisely, keeping the citation contract."
+
+FINAL_TURN_NUDGE = (
+    "[harness] This is your final turn — the turn cap is reached after this response. "
+    "Call record_premises now for any facts not yet recorded, and call submit_report. "
+    "Anything unrecorded will be lost."
+)

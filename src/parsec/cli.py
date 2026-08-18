@@ -435,9 +435,17 @@ def cmd_ask(args) -> int:
                 + " · ".join(f"{sq} {status}" for sq, status in sorted(result.coverage.items()))
                 + "[/dim]"
             )
+        cached = int(
+            totals.get("cache_read_tokens", 0) + totals.get("cache_creation_tokens", 0)
+        )
+        token_note = (
+            f"{int(totals.get('input_tokens', 0))} in / {int(totals.get('output_tokens', 0))} out"
+            + (f" / {cached} cache" if cached else "")
+            + f" tokens · budget {ledger.spent_tokens(session_id)}/{config.budgets.max_total_tokens}"
+        )
         console.print(
             f"\n[dim]session {result.session_id} · {result.status} · {result.turns} turns · "
-            f"{int(totals.get('input_tokens', 0))} in / {int(totals.get('output_tokens', 0))} out tokens · "
+            f"{token_note} · "
             f"${totals.get('usd', 0.0):.4f} · claims {result.claims_total}"
             + (f" · [red]{len(result.unresolved)} unresolved[/red]" if result.unresolved else "")
             + (f" · [red]{len(result.violations)} verification violations[/red]" if result.violations else "")

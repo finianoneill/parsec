@@ -6,13 +6,18 @@ import sqlite3
 
 from parsec.config import Budgets, Clock
 from parsec.errors import BudgetExceeded
+from parsec.gateway.pricing import CACHE_READ_MULT, CACHE_WRITE_MULT
 
-TOKEN_CATEGORIES = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_creation_tokens",
-)
+# max_total_tokens is a spend proxy, so each category counts at its price
+# relative to a plain input token (cache reads bill at a tenth) — counting
+# cache reads at full weight was exhausting the cap silently while the
+# session footer showed only input/output.
+TOKEN_WEIGHTS = {
+    "input_tokens": 1.0,
+    "output_tokens": 1.0,
+    "cache_read_tokens": CACHE_READ_MULT,
+    "cache_creation_tokens": CACHE_WRITE_MULT,
+}
 
 
 class Ledger:
@@ -52,7 +57,7 @@ class Ledger:
 
     def spent_tokens(self, session_id: str) -> int:
         totals = self.totals(session_id)
-        return int(sum(totals.get(c, 0.0) for c in TOKEN_CATEGORIES))
+        return int(sum(totals.get(c, 0.0) * w for c, w in TOKEN_WEIGHTS.items()))
 
     def spent_usd(self, session_id: str) -> float:
         return self.totals(session_id).get("usd", 0.0)
