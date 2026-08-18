@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import os
 import shlex
+import sys
 from pathlib import Path
 
 from rich.console import Console
 
 from parsec.banner import print_banner
 
+HISTORY_FILE = Path("~/.parsec_history").expanduser()
+
 HELP = """\
   <question>          run a research query (needs ANTHROPIC_API_KEY)
+  /edit               compose a query in $EDITOR (for long or multi-line asks)
   /demo               run the built-in offline demo — no keys, no network
   /sessions           list recorded sessions
   /show <id>          show one session
@@ -32,7 +36,42 @@ def has_api_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def run_interactive(data_dir: Path, console: Console | None = None) -> int:
+def _init_history() -> None:
+    """Arrow-key history across sessions. readline is absent or libedit on
+    some builds — every step is best-effort."""
+    try:
+        import readline
+    except ImportError:
+        return
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except OSError:
+        pass
+    readline.set_history_length(1000)
+
+
+def _save_history() -> None:
+    try:
+        import readline
+
+        readline.write_history_file(HISTORY_FILE)
+    except (ImportError, OSError):
+        pass
+
+
+def _read_line(console: Console) -> str:
+    if sys.stdin.isatty():
+        # Plain input() so readline owns the line; \001/\002 mark the ANSI
+        # codes as zero-width so history redraw stays aligned.
+        return input("\001\x1b[1;38;2;34;211;238m\002parsec ❯\001\x1b[0m\002 ")
+    return console.input("[bold #22d3ee]parsec ❯[/] ")
+
+
+def run_interactive(
+    data_dir: Path,
+    console: Console | None = None,
+    config_sources: list[Path] | None = None,
+) -> int:
     # Imported here, not at module top: cli imports us for the no-args path.
     import parsec.cli as cli
 
@@ -40,15 +79,27 @@ def run_interactive(data_dir: Path, console: Console | None = None) -> int:
     keyed = has_api_key()
     status = [
         f"data: {data_dir}",
+        *(
+            [f"config: {' + '.join(str(p) for p in config_sources)}"]
+            if config_sources
+            else []
+        ),
         "model: anthropic (ANTHROPIC_API_KEY found)" if keyed
         else "model: none — no ANTHROPIC_API_KEY; /demo runs fully offline",
     ]
     print_banner(console, status)
     console.print("[dim]type a question, /demo for the offline tour, /help for commands[/dim]\n")
+    _init_history()
+    try:
+        return _repl(cli, console, data_dir, keyed)
+    finally:
+        _save_history()
 
+
+def _repl(cli, console: Console, data_dir: Path, keyed: bool) -> int:
     while True:
         try:
-            line = console.input("[bold #22d3ee]parsec ❯[/] ").strip()
+            line = _read_line(console).strip()
         except (EOFError, KeyboardInterrupt, OSError):
             console.print()
             return cli.EXIT_OK
@@ -62,11 +113,21 @@ def run_interactive(data_dir: Path, console: Console | None = None) -> int:
             if cmd == "help":
                 console.print(HELP)
                 continue
-            argv = _slash_to_argv(cmd, rest, data_dir)
-            if argv is None:
-                console.print(f"[red]unknown command /{cmd}[/red] — /help lists them")
-                continue
+            if cmd == "edit":
+                line = cli.compose_in_editor() or ""
+                if not line:
+                    console.print("[dim]nothing composed[/dim]")
+                    continue
+                console.print(f"[dim]query:[/dim] {line}")
+                argv = None  # falls through to the bare-text path below
+            else:
+                argv = _slash_to_argv(cmd, rest, data_dir)
+                if argv is None:
+                    console.print(f"[red]unknown command /{cmd}[/red] — /help lists them")
+                    continue
         else:
+            argv = None
+        if argv is None:
             if not keyed:
                 console.print(
                     "[yellow]no ANTHROPIC_API_KEY set[/yellow] — live queries need one. "

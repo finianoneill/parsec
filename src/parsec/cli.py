@@ -329,12 +329,18 @@ def cmd_ask(args) -> int:
     if sys.stdin.isatty() and not args.as_json:
         import threading
 
+        if config.brief_gate:
+            console.print(
+                "[dim]brief gate: type 'approve' to dispatch, 'edit' to open the "
+                "proposed brief in $EDITOR, or any other text to request changes[/dim]"
+            )
+
         def read_stdin():
             try:
                 for line in sys.stdin:
                     text = line.strip()
                     if text:
-                        loop.steer(text)
+                        handle_steer_line(loop, text)
             except (ValueError, OSError):
                 pass
 
@@ -813,12 +819,63 @@ def cmd_spans(args) -> int:
     return EXIT_OK
 
 
+def compose_in_editor(initial: str = "") -> str | None:
+    """Open $VISUAL/$EDITOR on a temp file seeded with `initial`; return the
+    saved text (stripped), or None on abort/empty."""
+    import shlex
+    import subprocess
+    import tempfile
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    fd, path = tempfile.mkstemp(suffix=".md", prefix="parsec-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(initial)
+        code = subprocess.call([*shlex.split(editor), path])
+        text = Path(path).read_text(encoding="utf-8").strip()
+    finally:
+        os.unlink(path)
+    return text if code == 0 and text else None
+
+
+def render_brief_for_editor(brief) -> str:
+    questions = "".join(f"- {q}\n" for q in brief.questions)
+    return (
+        "<!-- Edit the research brief below, then save and quit to submit it\n"
+        "     as one brief-edit steering message. Quit without saving (or save\n"
+        "     empty) to abort the edit and keep waiting at the gate. -->\n\n"
+        f"## Scope\n{brief.scope or '(none)'}\n\n"
+        f"## Effort\n{brief.effort}\n\n"
+        f"## Subquestions\n{questions}"
+    )
+
+
+def handle_steer_line(loop, text: str) -> None:
+    """One stdin line during a live run. At the brief gate, `edit` opens
+    $EDITOR seeded with the proposed brief; the saved text is what gets
+    steered (and recorded), so replay semantics are untouched."""
+    brief = getattr(loop, "current_brief", None)
+    if text.lower() == "edit" and brief is not None:
+        edited = compose_in_editor(render_brief_for_editor(brief))
+        if edited:
+            loop.steer(edited)
+        else:
+            console.print("[dim]edit aborted; still at the brief gate[/dim]")
+        return
+    loop.steer(text)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    from parsec.user_config import apply_config, load_user_config
+
+    parser = build_parser()
+    config, _sources = load_user_config()
+    apply_config(parser, config)
+    args = parser.parse_args(argv)
     if args.command is None:
         from parsec.interactive import run_interactive
 
-        return run_interactive(args.data_dir)
+        return run_interactive(args.data_dir, config_sources=_sources)
     handlers = {
         "ask": cmd_ask,
         "demo": cmd_demo,

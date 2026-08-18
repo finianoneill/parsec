@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="303 tests" src="https://img.shields.io/badge/tests-303%20passing-16a34a?style=flat-square">
+  <img alt="312 tests" src="https://img.shields.io/badge/tests-312%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -100,10 +100,33 @@ parsec ❯ /replay <id>        # re-run against the frozen corpus, verify byte-i
 parsec ❯ /verify <id>        # mechanical verification + credence report
 parsec ❯ /notebook <id>      # the session's append-only notebook
 parsec ❯ how tall is Olympus Mons        # bare text runs a live query (needs a key)
+parsec ❯ /edit               # compose a long/multi-line query in $EDITOR
 parsec ❯ /exit               # leave (ctrl-d works too)
 ```
 
-Sessions record into `./data` relative to where you launch; pass `--data-dir` to keep one home for all recordings (`parsec --data-dir ~/.parsec/data`).
+The shell keeps arrow-key history across sessions (`~/.parsec_history`), and `/edit` opens `$EDITOR` to compose long or multi-line queries.
+
+Sessions record into `./data` relative to where you launch; pass `--data-dir` (or set `data_dir` in a config file, below) to keep one home for all recordings.
+
+### Configuration files
+
+Every flag you'd otherwise repeat can live in JSON config, layered as `~/.parsec.json` (user) < `./.parsec.json` (project) < explicit flags. Keys mirror the CLI option names; string values expand `${ENV_VARS}`:
+
+```json
+{
+  "data_dir": "~/.parsec/data",
+  "search_provider": "searxng",
+  "searxng_url": "http://localhost:8080",
+  "contact": "you@example.com",
+  "max_usd": 2.0
+}
+```
+
+Unknown keys are rejected loudly (typo protection). The interactive banner shows which config files were loaded.
+
+### Editing the research brief in $EDITOR
+
+With `ask --brief-gate`, the run pauses at the proposed research brief. Besides typing `approve` or feedback on stdin, type `edit` to open the proposed brief (scope, effort, subquestions) in `$EDITOR` — the text you save is submitted as the brief-edit steering message, so the gated session still replays byte-identically.
 
 With a key, live runs work from the shell or the CLI:
 
