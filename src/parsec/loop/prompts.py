@@ -20,9 +20,12 @@ from parsec.config import RunConfig
 from parsec.models.gateway import ModelRequest
 from parsec.models.report import SubagentSubmission
 
-DECOMPOSER_SYSTEM = """You are the planning phase of a research harness. Split the user's question into the smallest set of independent subquestions that together fully cover it. A simple question needs exactly one subquestion. Do not add subquestions the user did not ask about.
+DECOMPOSER_SYSTEM = """You are the scoping phase of a research harness. Produce a research brief for the user's question:
+- scope: 1-3 sentences stating what the research will and will not cover.
+- effort: an honest complexity estimate the harness will enforce as dispatch caps — "quick" (a single simple lookup: one subagent, few calls), "standard" (a question with a couple of facets), "deep" (multi-facet synthesis needing full fan-out).
+- subquestions: the smallest set of independent subquestions that together fully cover the scope. A simple question needs exactly one. Do not add subquestions the user did not ask about.
 
-Call submit_subquestions exactly once with your decomposition. Do not answer the question."""
+Call submit_subquestions exactly once with the brief. Do not answer the question. If the user requests changes to a proposed brief, revise it and call submit_subquestions again."""
 
 SUBAGENT_SYSTEM = """You are a research subagent inside a verification harness, assigned ONE subquestion. Gather evidence for it and record premises. You will not write any answer — a separate writer will, using only recorded premises and findings. Anything you do not record is lost.
 
@@ -56,15 +59,24 @@ Be concise. Answer directly."""
 
 SUBMIT_SUBQUESTIONS_SCHEMA = {
     "name": "submit_subquestions",
-    "description": "Submit the decomposition of the user's question.",
+    "description": "Submit the research brief: scope, effort estimate, and decomposition.",
     "input_schema": {
         "type": "object",
         "properties": {
+            "scope": {
+                "type": "string",
+                "description": "1-3 sentences: what the research will and will not cover",
+            },
+            "effort": {
+                "type": "string",
+                "enum": ["quick", "standard", "deep"],
+                "description": "Complexity estimate; the harness enforces it as dispatch caps",
+            },
             "subquestions": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 3},
                 "minItems": 1,
-            }
+            },
         },
         "required": ["subquestions"],
         "additionalProperties": False,
@@ -90,13 +102,18 @@ def _system_block(text: str) -> list[dict]:
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
-def build_decomposer_request(config: RunConfig, query: str) -> ModelRequest:
+def build_decomposer_request(
+    config: RunConfig, query: str, messages: list[dict] | None = None
+) -> ModelRequest:
+    """messages overrides the default single-query turn for brief-gate
+    revision rounds (M12) — the transcript stays append-only, so the
+    decomposer's system+tools prefix keeps its KV-cache hit (§7)."""
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
         system=_system_block(DECOMPOSER_SYSTEM),
         tools=[SUBMIT_SUBQUESTIONS_SCHEMA],
-        messages=[{"role": "user", "content": query}],
+        messages=messages if messages is not None else [{"role": "user", "content": query}],
     )
 
 
@@ -122,7 +139,11 @@ def build_writer_request(config: RunConfig, messages: list[dict]) -> ModelReques
     )
 
 
-def subagent_user_prompt(sq_id: str, question: str) -> str:
+def subagent_user_prompt(sq_id: str, question: str, scope: str = "") -> str:
+    """The brief's scope rides in the FIRST user message only (M12): it never
+    mutates mid-session, so the subagent's prompt prefix stays cache-stable."""
+    if scope:
+        return f"Research brief: {scope}\n\nSubquestion {sq_id}: {question}"
     return f"Subquestion {sq_id}: {question}"
 
 

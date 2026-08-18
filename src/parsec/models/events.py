@@ -19,6 +19,7 @@ class EventType(StrEnum):
     NODE_ADDED = "node_added"
     EDGE_ADDED = "edge_added"
     BUDGET_DEBIT = "budget_debit"
+    RESEARCH_BRIEF = "research_brief"  # M12: persisted scoping artifact (scope, effort, subquestions)
     SUBQUESTIONS_PLANNED = "subquestions_planned"
     SUBAGENT_STARTED = "subagent_started"
     SUBAGENT_COMPLETED = "subagent_completed"

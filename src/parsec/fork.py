@@ -110,12 +110,16 @@ async def run_fork(
         parent_session_id=original_session_id,
     )
     # Head prompts must match the recording: re-inject recorded steering that
-    # happened before the fork point. A new steer message lands AT the fork.
+    # happened before the fork point (brief-gate messages via their own
+    # channel). A new steer message lands AT the fork.
     scripted: dict[int, list[str]] = {}
+    scripted_gate: dict[int, list[str]] = {}
     for ev in event_log.read(original_session_id):
         if ev.event_type == EventType.STEERING_INJECTED and ev.payload["turn_index"] < at_call:
-            scripted.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
+            target = scripted_gate if ev.payload.get("gate") == "brief" else scripted
+            target.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
     if steer:
         scripted.setdefault(at_call, []).append(steer)
     loop.scripted_steering = scripted
+    loop.scripted_brief_gate = scripted_gate
     return await loop.run()

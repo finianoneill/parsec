@@ -71,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--parallel", type=int, default=Budgets().parallel_subagents,
         help="Concurrent subagents per wave (1-5); 1 = sequential (required for fork --at-call)",
     )
+    ask.add_argument(
+        "--brief-gate", action="store_true",
+        help="Pause after the research brief for approval/edits via stdin steering (type 'approve' to dispatch)",
+    )
     ask.add_argument("--data-dir", type=Path, default=Path("data"))
     ask.add_argument("--search-fixtures", type=Path, default=None)
     ask.add_argument(
@@ -275,6 +279,7 @@ def cmd_ask(args) -> int:
         searxng_url=args.searxng_url,
         respect_robots=not args.no_robots,
         contact=args.contact,
+        brief_gate=args.brief_gate,
         nli_checker=args.nli_checker,
         learned_reliability=args.learned_reliability,
         calibration=(

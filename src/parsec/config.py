@@ -42,6 +42,42 @@ class Budgets(BaseModel):
     max_gap_rounds: int = 1      # §3 gap-filling: bounded rewrite rounds targeting weak evidence
 
 
+class EffortLimits(BaseModel):
+    """Effective dispatch caps for one run, derived from the decomposer's
+    effort estimate (M12, WS-F.4): spend scales with query complexity, and
+    the estimate is enforced by the harness gates — never by the prompt.
+    Effort can only clamp BELOW the configured budgets, never raise them."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_subquestions: int
+    max_turns_per_subagent: int
+    max_gap_rounds: int
+
+
+def effort_limits(effort: str, budgets: "Budgets") -> EffortLimits:
+    """quick: one subagent, few calls, no gap-fill. standard: small fan-out.
+    deep (and anything unrecognized — the v1-compatible default): the full
+    configured caps."""
+    if effort == "quick":
+        return EffortLimits(
+            max_subquestions=1,
+            max_turns_per_subagent=min(3, budgets.max_turns_per_subagent),
+            max_gap_rounds=0,
+        )
+    if effort == "standard":
+        return EffortLimits(
+            max_subquestions=min(2, budgets.max_subquestions),
+            max_turns_per_subagent=budgets.max_turns_per_subagent,
+            max_gap_rounds=budgets.max_gap_rounds,
+        )
+    return EffortLimits(
+        max_subquestions=budgets.max_subquestions,
+        max_turns_per_subagent=budgets.max_turns_per_subagent,
+        max_gap_rounds=budgets.max_gap_rounds,
+    )
+
+
 class RunConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -61,6 +97,11 @@ class RunConfig(BaseModel):
     search_provider: Literal["fixture", "searxng", "brave", "serper"] = "fixture"
     searxng_url: str | None = None
     provider_cache_ttl_s: int = 7 * 24 * 3600
+    # M12 brief gate (WS-F.1): pause after the research brief is proposed and
+    # wait for a steering message — "approve" dispatches, anything else is an
+    # edit fed back to the decomposer. Approval and edits are recorded
+    # steering events, so a gated session still replays byte-identically.
+    brief_gate: bool = False
     # Politeness 2.0: robots respected by purpose; contact appended to the UA.
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600
