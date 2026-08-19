@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--max-turns", type=int, default=Budgets().max_turns)
     ask.add_argument("--max-gap-rounds", type=int, default=Budgets().max_gap_rounds)
     ask.add_argument(
+        "--max-coverage-gap-rounds", type=int, default=Budgets().max_coverage_gap_rounds,
+        help="Retries for subquestions still PARTIAL while budget headroom remains (0 disables)",
+    )
+    ask.add_argument(
         "--max-turns-per-subagent", type=int, default=Budgets().max_turns_per_subagent,
         help="Model calls each subagent may spend (search/fetch/record/report all count)",
     )
@@ -373,6 +377,7 @@ def cmd_ask(args) -> int:
             max_wall_seconds=args.max_seconds,
             max_turns=args.max_turns,
             max_gap_rounds=args.max_gap_rounds,
+            max_coverage_gap_rounds=args.max_coverage_gap_rounds,
             max_turns_per_subagent=args.max_turns_per_subagent,
             parallel_subagents=args.parallel,
         ),
@@ -512,6 +517,7 @@ def cmd_demo(args) -> int:
                 "--search-provider", "fixture",
                 "--search-fixtures", str(fixtures),
                 "--max-gap-rounds", "0",
+                "--max-coverage-gap-rounds", "0",
                 "--data-dir", str(args.data_dir),
             ]
         )

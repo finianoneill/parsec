@@ -35,7 +35,7 @@ from typing import Callable
 
 from pydantic import ValidationError
 
-from parsec.config import EffortLimits, RunConfig, effort_limits
+from parsec.config import MIN_SUBAGENT_TURNS, EffortLimits, RunConfig, effort_limits
 from parsec.errors import BudgetExceeded, HaltRequested, ModelCallFailed, ReplayDivergence
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop import compaction, prompts
@@ -55,13 +55,24 @@ from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.verify.calibration import PlattScaling, tier_ranges
 from parsec.verify.conflict import dual_perspective_question
-from parsec.verify.credence import CredenceReport, annotate, compute_credences, render_tier
+from parsec.verify.credence import (
+    CredenceReport,
+    annotate,
+    compute_credences,
+    render_tier,
+    source_tier,
+)
 from parsec.verify.nli import make_grounded_checker
-from parsec.verify.omission import OmissionReport, detect_omissions
+from parsec.verify.omission import OmissionReport, detect_omissions, extraction_note
 from parsec.verify.structural import verify_session
 
 MAX_REPAIR_ROUNDS = 1
 MAX_BRIEF_ROUNDS = 3  # brief-gate edit rounds before the latest brief proceeds
+
+# Source-tier prior at/above which a source counts as PRIMARY: a fetch of
+# such a source that yields no citable text is a loud coverage failure, never
+# a silent downgrade to whatever secondary sources happened to extract.
+PRIMARY_SOURCE_TIER = 0.8
 
 _APPROVALS = frozenset({"approve", "approved", "ok", "yes", "y", "lgtm"})
 
@@ -247,10 +258,21 @@ class OrchestratorLoop:
                 self.coverage.set_status(sid, row["sq_id"], "blocked", blocked_reason)
                 partial = True
 
+            # Primary-source audit: a high-tier fetch that yielded no citable
+            # text demotes its subquestion from answered to partial — the
+            # ledger (and the writer's gaps) must say the central document
+            # went unread, not let secondary evidence stand in silently.
+            failed_primary = self._failed_primary_sources()
+            self._demote_for_failed_primaries(failed_primary)
+
             # Writer/verify rounds with bounded gap-filling (§3): a low-credence
             # verdict is a search gradient, not a pass/fail gate — localize the
-            # weakest premise, dispatch ONE targeted subagent, rewrite.
+            # weakest premise, dispatch ONE targeted subagent, rewrite. A
+            # PARTIAL coverage row with budget headroom is the same kind of
+            # gradient: retry the subquestion before settling for the gap.
             gap_rounds = 0
+            coverage_rounds = 0
+            retried_sqs: set[str] = set()
             while True:
                 sm.transition(AgentState.WRITING, "writer over premises/findings")
                 self._notify(sm)
@@ -294,6 +316,24 @@ class OrchestratorLoop:
                     # node_added events remain in the log as the audit trail.
                     self.dag.delete_claims(sid)
                     continue
+                coverage_target = self._coverage_gap_target(retried_sqs)
+                if (
+                    coverage_target is not None
+                    and coverage_rounds < self.effort_limits.max_coverage_gap_rounds
+                    and not partial
+                    and self._coverage_headroom()
+                    and not self._gate()
+                ):
+                    sm.transition(
+                        AgentState.GAP_FILLING,
+                        f"coverage round {coverage_rounds + 1}: {coverage_target['sq_id']}",
+                    )
+                    self._notify(sm)
+                    retried_sqs.add(coverage_target["sq_id"])
+                    await self._coverage_gap_fill(coverage_target, coverage_rounds)
+                    coverage_rounds += 1
+                    self.dag.delete_claims(sid)
+                    continue
                 break
 
             violations = [f"{v.check}: {v.detail}" for v in vreport.violations]
@@ -302,7 +342,7 @@ class OrchestratorLoop:
             self.event_log.append(
                 sid, "harness", EventType.OMISSION_DETECTED, omissions.to_payload()
             )
-            answer = answer + self._build_appendix(credence, omissions)
+            answer = answer + self._build_appendix(credence, omissions, failed_primary)
             low_confidence = self._low_confidence_lines(credence)
 
             answer_blob = self.blobs.put(answer)
@@ -1002,6 +1042,119 @@ class OrchestratorLoop:
         self.coverage.create(sid, sq_id, question)
         await self._run_subagent(Subquestion(sq_id, question))
 
+    def _failed_primary_sources(self) -> list[dict]:
+        """Fetches of PRIMARY-tier sources that yielded no citable text:
+        outcome not ok, an HTTP error, or zero indexed spans (an unminable
+        PDF, an empty extraction). Deduped by URL in event order; a URL that
+        EVER yielded spans is readable, whatever earlier attempts did.
+        Deterministic — a pure function of the event log."""
+        sid = self.config.session_id
+        spans_by_doc: dict[str, int] = {}
+        fetches: list[tuple[str, str, str | None, int, str]] = []
+        for ev in self.event_log.read(sid):
+            if ev.event_type == EventType.SPAN_INDEXED:
+                spans_by_doc[ev.payload["doc_hash"]] = len(ev.payload["span_ids"])
+            elif ev.event_type == EventType.FETCH_PERFORMED:
+                fetches.append(
+                    (
+                        ev.payload["url"],
+                        ev.payload["doc_hash"],
+                        ev.payload.get("outcome"),
+                        ev.payload.get("status_code") or 0,
+                        ev.stream_id,
+                    )
+                )
+        readable = {url for url, doc_hash, _, _, _ in fetches if spans_by_doc.get(doc_hash)}
+        seen: set[str] = set()
+        failed: list[dict] = []
+        for url, doc_hash, outcome, status, stream in fetches:
+            if url in seen or url in readable:
+                continue
+            seen.add(url)
+            if source_tier(url, self.config.source_tiers) < PRIMARY_SOURCE_TIER:
+                continue
+            if outcome == "ok" and status < 400 and spans_by_doc.get(doc_hash):
+                continue
+            note = extraction_note(self.ctx.conn, doc_hash)
+            if not note:
+                note = outcome if outcome != "ok" else f"HTTP {status}" if status >= 400 else "no indexable text"
+            failed.append({"url": url, "sq_id": stream, "note": note})
+        return failed
+
+    def _demote_for_failed_primaries(self, failed_primary: list[dict]) -> None:
+        """An 'answered' subquestion whose stream lost a primary source is
+        really partial: the loss lands in the coverage reason (so the writer
+        acknowledges it and coverage gap-fill can retry it) and the notebook."""
+        if not failed_primary:
+            return
+        sid = self.config.session_id
+        by_sq: dict[str, list[str]] = {}
+        for f in failed_primary:
+            by_sq.setdefault(f["sq_id"], []).append(f["url"])
+        rows = {r["sq_id"]: r for r in self.coverage.all(sid)}
+        for sq_id in sorted(by_sq):
+            row = rows.get(sq_id)
+            if row is None or row["status"] != "answered":
+                continue
+            self.coverage.set_status(
+                sid, sq_id, "partial", "primary source unreadable: " + ", ".join(by_sq[sq_id])
+            )
+        md = ["## Primary sources that could not be read"]
+        md += [f"- {f['url']} — {f['note']}" for f in failed_primary]
+        self.notebook.append(sid, "harness", "\n".join(md))
+
+    def _coverage_gap_target(self, retried: set[str]) -> object | None:
+        """The first original subquestion still PARTIAL and not yet retried
+        (sq_id order — deterministic). Gap/retry rows are never themselves
+        retried: a retry that comes back partial is the budget's answer."""
+        for row in self.coverage.all(self.config.session_id):
+            sq_id = row["sq_id"]
+            if row["status"] != "partial" or sq_id in retried:
+                continue
+            if sq_id.startswith(("sq-gap-", "sq-cov-")):
+                continue
+            return row
+        return None
+
+    def _coverage_headroom(self) -> bool:
+        """True while enough budget remains to be worth a coverage retry:
+        the headroom fraction of BOTH usd and token budgets, plus turns for
+        one useful subagent and the rewrite. Clock-free — wall time never
+        participates — so the decision replays byte-identically."""
+        sid = self.config.session_id
+        b = self.config.budgets
+        keep = b.coverage_gap_headroom
+        if self.ledger.spent_usd(sid) > b.max_usd * (1.0 - keep):
+            return False
+        if self.ledger.spent_tokens(sid) > b.max_total_tokens * (1.0 - keep):
+            return False
+        return b.max_turns - 1 - self.turns >= MIN_SUBAGENT_TURNS + 1
+
+    async def _coverage_gap_fill(self, row, coverage_rounds: int) -> None:
+        """Re-dispatch one PARTIAL subquestion with its shortfall named. If
+        the retry answers it, the original row is marked recovered — the
+        writer's gap list then reflects what is STILL missing, not what was."""
+        sid = self.config.session_id
+        sq_id = f"sq-cov-{coverage_rounds + 1}"
+        reason = row["reason"] or "no reason recorded"
+        question = (
+            f"{row['question']}\n\nA previous attempt left this subquestion PARTIAL — "
+            f"{reason}. Close that gap: focus on what is missing. If a specific source "
+            "could not be read, find an accessible version of it (an HTML rendering, "
+            "the publisher's landing page, a mirror) or an equivalent primary source."
+        )
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.GAP_FILL_STARTED,
+            {"sq_id": sq_id, "kind": "coverage", "target_sq": row["sq_id"], "reason": reason},
+        )
+        self.coverage.create(sid, sq_id, question)
+        await self._run_subagent(Subquestion(sq_id, question))
+        retry = {r["sq_id"]: r for r in self.coverage.all(sid)}[sq_id]
+        if retry["status"] == "answered":
+            self.coverage.set_status(sid, row["sq_id"], "answered", f"recovered by {sq_id}")
+
     def _weakest_premise(self, credence) -> tuple[str, str]:
         """Deterministic: lowest credence premise supporting any flagged claim
         (walking claim refs through findings), ties broken by node_id."""
@@ -1085,14 +1238,28 @@ class OrchestratorLoop:
         the credence model, never invented here."""
         return annotate(credence.nodes[node_id], self._tier_ranges)
 
-    def _build_appendix(self, credence: CredenceReport, omissions: OmissionReport) -> str:
+    def _build_appendix(
+        self,
+        credence: CredenceReport,
+        omissions: OmissionReport,
+        failed_primary: list[dict] | None = None,
+    ) -> str:
         """Mechanical appendix (harness-built, deterministic): a one-line
         confidence tally over all claims (§10.3 — tiers, never raw numbers),
         itemizing only the claims that carry a real warning — restating every
         high-confidence claim verbatim drowned the signal the block exists
         to surface — and the consulted-but-unused list (§6 stage 4)."""
         sid = self.config.session_id
-        lines = ["", "---", "Confidence (computed by the harness):"]
+        # A bare "---" reads as a markdown rule, and downstream readers (and
+        # judges) have mistaken this block for part of the answer — the
+        # boundary must say what it is.
+        lines = [
+            "",
+            "--- end of answer ---",
+            "Harness appendix — machine-generated metadata about the answer above; not part of the answer.",
+            "",
+            "Confidence (computed by the harness):",
+        ]
         claims = [
             row
             for row in self.dag.nodes_for_session(sid, tier=4)
@@ -1122,6 +1289,9 @@ class OrchestratorLoop:
                 continue
             text = json.loads(row["payload_json"])["text"]
             lines.append(f"- \"{text}\" — {self._annotation(credence, nid)} confidence")
+        if failed_primary:
+            lines += ["", "Primary sources that could not be read (high-tier fetches yielding no citable text):"]
+            lines += [f"- {f['url']} — {f['note']}" for f in failed_primary]
         if omissions.unused_documents:
             lines += ["", "Consulted but unused (fetched, but no recorded evidence reached the answer):"]
             lines += [

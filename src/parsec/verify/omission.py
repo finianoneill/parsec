@@ -91,7 +91,7 @@ def detect_omissions(
         seen.add(doc_hash)
         if doc_hash not in used_doc_hashes:
             entry = {"url": ev.payload["url"], "doc_hash": doc_hash}
-            note = _extraction_note(conn, doc_hash)
+            note = extraction_note(conn, doc_hash)
             if note:
                 entry["note"] = note
             report.unused_documents.append(entry)
@@ -105,7 +105,7 @@ def detect_omissions(
     return report
 
 
-def _extraction_note(conn: sqlite3.Connection, doc_hash: str) -> str | None:
+def extraction_note(conn: sqlite3.Connection, doc_hash: str) -> str | None:
     """The extractor's diagnosis for a document that yielded no usable text
     (from document meta), or None for a normally-extracted document."""
     row = conn.execute(

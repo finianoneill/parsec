@@ -40,6 +40,15 @@ class Budgets(BaseModel):
     # writer is always single (WS-E.3).
     parallel_subagents: int = Field(default=1, ge=1, le=5)
     max_gap_rounds: int = 1      # §3 gap-filling: bounded rewrite rounds targeting weak evidence
+    # Coverage gap-fill: a run must not stop with subquestions still partial
+    # while a substantial share of its budget sits unspent — partial coverage
+    # plus headroom is unfinished work, not a result. Bounded like weak-
+    # evidence gap-fill; 0 disables.
+    max_coverage_gap_rounds: int = 2
+    # Fraction of BOTH the usd and token budgets that must remain for a
+    # coverage retry to dispatch (clock-free: wall time never participates,
+    # so the decision replays byte-identically).
+    coverage_gap_headroom: float = Field(default=0.25, ge=0.0, le=1.0)
 
 
 class EffortLimits(BaseModel):
@@ -53,6 +62,7 @@ class EffortLimits(BaseModel):
     max_subquestions: int
     max_turns_per_subagent: int
     max_gap_rounds: int
+    max_coverage_gap_rounds: int
 
 
 # The least a dispatched subagent can usefully do: search, fetch/record,
@@ -73,17 +83,20 @@ def effort_limits(effort: str, budgets: "Budgets") -> EffortLimits:
             max_subquestions=1,
             max_turns_per_subagent=min(3, budgets.max_turns_per_subagent),
             max_gap_rounds=0,
+            max_coverage_gap_rounds=0,
         )
     if effort == "standard":
         return EffortLimits(
             max_subquestions=min(2, budgets.max_subquestions, turn_fit),
             max_turns_per_subagent=budgets.max_turns_per_subagent,
             max_gap_rounds=budgets.max_gap_rounds,
+            max_coverage_gap_rounds=budgets.max_coverage_gap_rounds,
         )
     return EffortLimits(
         max_subquestions=min(budgets.max_subquestions, turn_fit),
         max_turns_per_subagent=budgets.max_turns_per_subagent,
         max_gap_rounds=budgets.max_gap_rounds,
+        max_coverage_gap_rounds=budgets.max_coverage_gap_rounds,
     )
 
 
