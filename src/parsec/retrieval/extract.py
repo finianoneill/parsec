@@ -4,16 +4,19 @@ Pure function of (raw bytes, content type). HTML goes through trafilatura
 (main-content extraction, markdown output — benchmark F1 ~0.94 vs ~0.91
 for readability-class tools) with the v1 stdlib tag-stripper as fallback
 for pages trafilatura declines (tiny/low-content documents). text/* passes
-through; anything else yields empty text plus a note. Replay determinism
-depends on this staying pure; the extractor version is stamped into
-document metadata so drift is detectable.
+through; PDFs go through pypdf (v3 — primary sources in regulatory and
+academic research are disproportionately PDFs, and "fetched but zero
+spans" quietly pushed whole runs onto secondary sources); anything else
+yields empty text plus a note. Replay determinism depends on this staying
+pure; the extractor version is stamped into document metadata so drift is
+detectable.
 """
 
 from __future__ import annotations
 
 from html.parser import HTMLParser
 
-EXTRACTOR_VERSION = "2"
+EXTRACTOR_VERSION = "3"
 _MIN_TRAFILATURA_CHARS = 40  # below this, trust the fallback more than main-content detection
 
 _SKIP_TAGS = {"script", "style", "noscript", "template", "head"}
@@ -65,6 +68,12 @@ def _normalize_whitespace(text: str) -> str:
 def extract_text(raw: bytes, content_type: str | None) -> tuple[str, str | None, str | None]:
     """Return (text, title, note)."""
     ct = (content_type or "").split(";")[0].strip().lower()
+    # PDFs before any charset decoding — they are binary. Sniff the magic
+    # bytes too: PDF endpoints often serve application/octet-stream.
+    if ct == "application/pdf" or (
+        ct in ("", "application/octet-stream") and raw[:5] == b"%PDF-"
+    ):
+        return _extract_pdf(raw)
     charset = "utf-8"
     if content_type and "charset=" in content_type:
         charset = content_type.split("charset=")[-1].split(";")[0].strip()
@@ -78,6 +87,28 @@ def extract_text(raw: bytes, content_type: str | None) -> tuple[str, str | None,
     if ct.startswith("text/") or ct in ("application/json", "application/xml"):
         return _normalize_whitespace(decoded), None, None
     return "", None, f"unsupported content type: {ct or 'unknown'}"
+
+
+def _extract_pdf(raw: bytes) -> tuple[str, str | None, str | None]:
+    import io
+
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        title: str | None = None
+        try:
+            if reader.metadata is not None and reader.metadata.title:
+                title = " ".join(str(reader.metadata.title).split()) or None
+        except Exception:
+            title = None
+        pages = [(page.extract_text() or "") for page in reader.pages]
+    except Exception as exc:  # damaged or encrypted document
+        return "", None, f"pdf extraction failed: {type(exc).__name__}"
+    text = _normalize_whitespace("\n\n".join(pages))
+    if not text:
+        return "", title, "pdf contains no extractable text (likely scanned images)"
+    return text, title, None
 
 
 def _extract_html(decoded: str) -> tuple[str, str | None, str | None]:

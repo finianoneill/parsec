@@ -23,7 +23,10 @@ from parsec.store.event_log import EventLog
 
 @dataclass
 class OmissionReport:
-    unused_documents: list[dict] = field(default_factory=list)  # {url, doc_hash}
+    # {url, doc_hash, note?} — note carries the extraction diagnosis, so
+    # "fetched but unminable" (a PDF with no text, an unsupported type) is
+    # distinguishable from "fetched but ignored".
+    unused_documents: list[dict] = field(default_factory=list)
     uncited_premises: list[dict] = field(default_factory=list)  # {node_id, text}
 
     @property
@@ -87,7 +90,11 @@ def detect_omissions(
             continue
         seen.add(doc_hash)
         if doc_hash not in used_doc_hashes:
-            report.unused_documents.append({"url": ev.payload["url"], "doc_hash": doc_hash})
+            entry = {"url": ev.payload["url"], "doc_hash": doc_hash}
+            note = _extraction_note(conn, doc_hash)
+            if note:
+                entry["note"] = note
+            report.unused_documents.append(entry)
     report.unused_documents.sort(key=lambda d: d["url"])
 
     for nid in sorted(nodes):
@@ -96,3 +103,14 @@ def detect_omissions(
             report.uncited_premises.append({"node_id": nid, "text": node["payload"]["text"]})
 
     return report
+
+
+def _extraction_note(conn: sqlite3.Connection, doc_hash: str) -> str | None:
+    """The extractor's diagnosis for a document that yielded no usable text
+    (from document meta), or None for a normally-extracted document."""
+    row = conn.execute(
+        "SELECT meta_json FROM documents WHERE doc_hash=?", (doc_hash,)
+    ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["meta_json"]).get("note")

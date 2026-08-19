@@ -1124,7 +1124,10 @@ class OrchestratorLoop:
             lines.append(f"- \"{text}\" — {self._annotation(credence, nid)} confidence")
         if omissions.unused_documents:
             lines += ["", "Consulted but unused (fetched, but no recorded evidence reached the answer):"]
-            lines += [f"- {d['url']}" for d in omissions.unused_documents]
+            lines += [
+                f"- {d['url']}" + (f" — {d['note']}" if d.get("note") else "")
+                for d in omissions.unused_documents
+            ]
         if omissions.uncited_premises:
             lines += ["", "Recorded but uncited premises:"]
             lines += [f"- {p['text']}" for p in omissions.uncited_premises]

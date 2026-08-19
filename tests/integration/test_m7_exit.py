@@ -161,7 +161,9 @@ def test_m7_exit(tmp_path, transport, scripted_adapter, capsys):
 
     # trafilatura path was used (no fallback note) and boilerplate-free spans exist
     doc = conn.execute("SELECT * FROM documents WHERE url=?", (PAGE_URL,)).fetchone()
-    assert json.loads(doc["meta_json"]).get("extractor_version") == "2"
+    from parsec.retrieval.extract import EXTRACTOR_VERSION
+
+    assert json.loads(doc["meta_json"]).get("extractor_version") == EXTRACTOR_VERSION
 
     # typed fetch outcomes, recorded as cached outcome documents
     events = list(open_events(conn, session_id))

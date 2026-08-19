@@ -110,7 +110,12 @@ class FetchTool:
         if doc.status_code >= 400:
             return outcome.model_dump(exclude={"from_cache"}), header + "\nHTTP error — content not usable for citation."
         if not span_ids:
-            return outcome.model_dump(exclude={"from_cache"}), header + "\nNo indexable text content."
+            why = f" — {doc.note}" if doc.note else ""
+            return outcome.model_dump(exclude={"from_cache"}), (
+                header
+                + f"\nNo indexable text content{why}."
+                + " Try an HTML version of this document or a different source."
+            )
         lines = [header]
         for sid_, s, e, text in span_rows:
             preview = " ".join(text[:PREVIEW_CHARS].split())
