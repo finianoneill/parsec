@@ -56,6 +56,65 @@ def test_binary_unsupported():
     assert note and "unsupported" in note
 
 
+def make_pdf(text: str) -> bytes:
+    """A minimal valid single-page PDF (correct xref offsets and %%EOF)
+    whose content stream draws `text` — enough for pypdf to extract."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        None,  # content stream, built below
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    objects[3] = (
+        b"<< /Length " + str(len(stream)).encode() + b" >> stream\n" + stream + b"\nendstream"
+    )
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_pos = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+def test_pdf_extraction():
+    pdf = make_pdf("Adaptive designs guidance text.")
+    text, title, note = extract_text(pdf, "application/pdf")
+    assert text == "Adaptive designs guidance text."
+    assert note is None
+
+
+def test_pdf_sniffed_from_magic_bytes():
+    # PDF endpoints often serve application/octet-stream (or nothing).
+    pdf = make_pdf("Sniffed fine.")
+    for ct in ("application/octet-stream", None):
+        text, title, note = extract_text(pdf, ct)
+        assert text == "Sniffed fine."
+        assert note is None
+
+
+def test_pdf_extraction_deterministic():
+    pdf = make_pdf("Same bytes, same text.")
+    assert extract_text(pdf, "application/pdf") == extract_text(pdf, "application/pdf")
+
+
+def test_damaged_pdf_yields_note_not_crash():
+    text, title, note = extract_text(b"%PDF-1.4 but truncated garbage", "application/pdf")
+    assert text == ""
+    assert note and note.startswith("pdf extraction failed")
+
+
 def test_deterministic():
     html = b"<html><body><p>Stable output.</p></body></html>"
     assert extract_text(html, "text/html") == extract_text(html, "text/html")

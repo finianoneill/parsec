@@ -59,6 +59,10 @@ class FetchedDoc:
     # replayed session reproduces them byte-identically.
     outcome: str = "ok"
     license_url: str | None = None
+    # Extractor note ("unsupported content type: ...", "pdf extraction
+    # failed: ..."): surfaced to the model so an unusable fetch is
+    # diagnosable, not a bare "no content".
+    note: str | None = None
 
 
 class Fetcher:
@@ -101,6 +105,7 @@ class Fetcher:
                     from_cache=True,
                     outcome=meta.get("outcome", "ok"),
                     license_url=meta.get("license_url"),
+                    note=meta.get("note"),
                 )
             if self.mode == CacheMode.REPLAY:
                 raise CacheMiss(canonical_url)
@@ -161,6 +166,7 @@ class Fetcher:
             text=text,
             title=title,
             from_cache=False,
+            note=note,
         )
 
     def _record_outcome(
