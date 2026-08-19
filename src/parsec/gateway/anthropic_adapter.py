@@ -12,10 +12,20 @@ from parsec.models.gateway import ModelRequest, ModelResponse, Usage
 
 
 class AnthropicAdapter:
-    def __init__(self, api_key: str | None = None, max_retries: int = 4):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_retries: int = 4,
+        timeout: float | None = None,
+    ):
         import anthropic
 
-        self._client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=max_retries)
+        kwargs: dict = {"api_key": api_key, "max_retries": max_retries}
+        if timeout is not None:
+            # Only when set: passing None would DISABLE the SDK's default
+            # 10-minute timeout entirely, the opposite of the intent.
+            kwargs["timeout"] = timeout
+        self._client = anthropic.AsyncAnthropic(**kwargs)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         kwargs: dict = {
