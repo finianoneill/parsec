@@ -102,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Retries for subquestions still PARTIAL while budget headroom remains (0 disables)",
     )
     ask.add_argument(
+        "--request-timeout", type=float, default=None, metavar="SECONDS",
+        help="Per-request HTTP timeout for model calls (default: SDK's 10 minutes); "
+        "a tripped timeout is journaled as a model-call failure, never a silent hang",
+    )
+    ask.add_argument(
         "--max-turns-per-subagent", type=int, default=Budgets().max_turns_per_subagent,
         help="Model calls each subagent may spend (search/fetch/record/report all count)",
     )
@@ -249,13 +254,14 @@ def make_adapter(config: RunConfig):
     if config.adapter == "anthropic":
         from parsec.gateway.anthropic_adapter import AnthropicAdapter
 
-        return AnthropicAdapter()
+        return AnthropicAdapter(timeout=config.request_timeout_s)
     if config.adapter == "bedrock":
         from parsec.gateway.bedrock_adapter import BedrockAdapter
 
         return BedrockAdapter(
             aws_region=config.aws_region or os.environ.get("AWS_REGION"),
             aws_profile=config.aws_profile,
+            timeout=config.request_timeout_s,
         )
     raise SystemExit(
         f"adapter {config.adapter!r} is not runnable from `parsec ask` without a test adapter factory"
@@ -381,6 +387,7 @@ def cmd_ask(args) -> int:
             max_turns_per_subagent=args.max_turns_per_subagent,
             parallel_subagents=args.parallel,
         ),
+        request_timeout_s=args.request_timeout,
         data_dir=args.data_dir,
         search_fixtures=args.search_fixtures,
         search_provider=args.search_provider,

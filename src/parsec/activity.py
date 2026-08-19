@@ -8,6 +8,7 @@ so recording and replay are untouched.
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from urllib.parse import urlparse
 
@@ -49,8 +50,18 @@ class ActivityView:
         )
         self._tail: deque[Text] = deque(maxlen=_TAIL)
         self._stats = Text("")
+        # Busy line state: the label, an optional start time for an elapsed
+        # ticker (in-flight model calls — a frozen counter and a silent SDK
+        # retry are otherwise indistinguishable), and the loop phase so
+        # orchestrator calls get named by role instead of a bare per-stream
+        # call index ("writer thinking" beats "model call 1" 39 turns in).
+        self._busy_label = "starting…"
+        self._busy_since: float | None = None
+        self._phase = "PLANNING"
+        # get_renderable (not a static renderable): the auto-refresh thread
+        # re-renders 8x/s, so the elapsed ticker advances between events.
         self._live = Live(
-            self._render(), console=console, refresh_per_second=8, transient=True
+            get_renderable=self._render, console=console, refresh_per_second=8, transient=True
         )
 
     def __enter__(self) -> "ActivityView":
@@ -67,7 +78,10 @@ class ActivityView:
         line: Text | None = None
         match event_type:
             case EventType.LLM_REQUEST:
-                self._busy(f"{who}thinking (model call {payload.get('call_index', '?')})…")
+                self._busy(self._call_label(who, payload), timed=True)
+            case EventType.LLM_RESPONSE:
+                self._busy_since = None  # call landed; stop the ticker
+                return
             case EventType.TOOL_INTENT:
                 line = self._tool_line(who, payload)
             case EventType.FETCH_PERFORMED:
@@ -75,7 +89,8 @@ class ActivityView:
                 style = _DIM if outcome == "ok" else "yellow"
                 line = Text(f"  ↓ {who}{_host(payload.get('url', ''))} — {outcome}", style=style)
             case EventType.STATE_TRANSITION:
-                to = str(payload.get("to_state", "")).replace("_", " ").lower()
+                self._phase = str(payload.get("to_state", ""))
+                to = self._phase.replace("_", " ").lower()
                 self._busy(f"{to}…")
                 line = Text(f"  → {to}", style="#818cf8")
             case EventType.RESEARCH_BRIEF:
@@ -107,7 +122,7 @@ class ActivityView:
                 return
         if line is not None:
             self._tail.append(line)
-        self._live.update(self._render())
+        self._live.refresh()
 
     def on_snapshot(self, snap: dict) -> None:
         self._stats = Text(
@@ -116,7 +131,7 @@ class ActivityView:
             f"${snap.get('usd', 0.0):.4f}",
             style=_DIM,
         )
-        self._live.update(self._render())
+        self._live.refresh()
 
     # -- rendering ----------------------------------------------------------
 
@@ -140,8 +155,33 @@ class ActivityView:
             case _:
                 return Text(f"  · {who}{name}", style=_DIM)
 
-    def _busy(self, text: str) -> None:
-        self._spinner.update(text=Text(text, style="#22d3ee"))
+    def _call_label(self, who: str, payload: dict) -> str:
+        """Subagent calls keep their per-stream index (it counts that
+        subagent's own turns); orchestrator calls are named by what the loop
+        is doing, since their index is meaningless to a reader."""
+        if who:
+            return f"{who}thinking (model call {payload.get('call_index', '?')})…"
+        match self._phase:
+            case "PLANNING":
+                return "decomposer thinking…"
+            case "WRITING":
+                return "writer thinking…"
+            case "VERIFYING":
+                return "writer repairing citations…"
+        return f"thinking (model call {payload.get('call_index', '?')})…"
+
+    def _busy(self, text: str, timed: bool = False) -> None:
+        self._busy_label = text
+        self._busy_since = time.monotonic() if timed else None
+
+    @staticmethod
+    def _fmt_elapsed(seconds: float) -> str:
+        s = int(seconds)
+        return f"{s}s" if s < 60 else f"{s // 60}m{s % 60:02d}s"
 
     def _render(self) -> Group:
+        label = self._busy_label
+        if self._busy_since is not None:
+            label += f" · {self._fmt_elapsed(time.monotonic() - self._busy_since)}"
+        self._spinner.update(text=Text(label, style="#22d3ee"))
         return Group(self._spinner, *self._tail, self._stats)

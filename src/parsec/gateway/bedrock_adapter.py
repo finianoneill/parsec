@@ -24,6 +24,7 @@ class BedrockAdapter:
         aws_region: str | None = None,
         aws_profile: str | None = None,
         max_retries: int = 4,
+        timeout: float | None = None,
     ):
         try:
             from anthropic import AsyncAnthropicBedrockMantle
@@ -36,9 +37,15 @@ class BedrockAdapter:
             raise SystemExit(
                 "Bedrock needs a region: --aws-region, or aws_region in .parsec.json"
             )
-        self._client = AsyncAnthropicBedrockMantle(
-            aws_region=aws_region, aws_profile=aws_profile, max_retries=max_retries
-        )
+        kwargs: dict = {
+            "aws_region": aws_region,
+            "aws_profile": aws_profile,
+            "max_retries": max_retries,
+        }
+        if timeout is not None:
+            # Only when set: None would disable the SDK default, not keep it.
+            kwargs["timeout"] = timeout
+        self._client = AsyncAnthropicBedrockMantle(**kwargs)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         kwargs: dict = {

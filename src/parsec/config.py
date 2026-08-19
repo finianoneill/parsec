@@ -132,6 +132,12 @@ class RunConfig(BaseModel):
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600
     contact: str | None = None
+    # Per-request HTTP timeout for live model calls, in seconds. None keeps
+    # the SDK default (10 minutes per attempt). A tripped timeout surfaces
+    # through the gateway as a journaled model-call failure — bounded and
+    # diagnosable, never an indefinitely wedged call the wall-clock budget
+    # cannot see.
+    request_timeout_s: float | None = Field(default=None, gt=0)
     # Pricing table pinned at session start so replay reproduces recorded costs.
     pricing_override: dict[str, dict[str, float]] | None = None
     # Credence model (§2.1, T3; 2.0 at M10). source_tiers merges over the
