@@ -36,7 +36,13 @@ from typing import Callable
 from pydantic import ValidationError
 
 from parsec.config import MIN_SUBAGENT_TURNS, EffortLimits, RunConfig, effort_limits
-from parsec.errors import BudgetExceeded, HaltRequested, ModelCallFailed, ReplayDivergence
+from parsec.errors import (
+    BudgetExceeded,
+    HaltRequested,
+    ModelCallFailed,
+    ModelErrorKind,
+    ReplayDivergence,
+)
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop import compaction, prompts
 from parsec.loop.citations import check_citations, write_claims
@@ -211,6 +217,11 @@ class OrchestratorLoop:
         # global created_seq would vary with cross-stream interleaving.
         self._writer_premises: list[str] = []
         self._writer_findings: list[str] = []
+        # Writer degradation level (Phase 2): 0 = full evidence text, 1/2 =
+        # clipped lines. Monotonic across writer rounds — once reduced, stay
+        # reduced (deterministic under gap-fill rewrites).
+        self._writer_level = 0
+        self._writer_view: tuple | None = None
         # Optional progress hook for the live CLI view; called with snapshots.
         self.reporter: Callable[[dict], None] | None = None
 
@@ -666,6 +677,11 @@ class OrchestratorLoop:
         actor = f"subagent:{sq.sq_id}"
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
         tool_schemas = self.registry.export_schemas()
+        # The per-phase immutable prefix, counted by the compaction trigger
+        # (the old char trigger ignored it and could not react to overflow).
+        static_chars = compaction.static_prefix_chars(
+            prompts.SUBAGENT_SYSTEM, tool_schemas + [prompts.submit_report_schema()]
+        )
         messages: list[dict] = [
             {
                 "role": "user",
@@ -676,6 +692,11 @@ class OrchestratorLoop:
         subagent_turns = 0
         submission: SubagentSubmission | None = None
         end_reason = ""
+        # Token anchor for the compaction estimate: the total usage the model
+        # reported for the previous turn (None after compaction rewrites the
+        # transcript — the model has not seen the new one yet).
+        last_usage: int | None = None
+        overflow_rungs = 0
 
         try:
             while submission is None:
@@ -688,13 +709,43 @@ class OrchestratorLoop:
                     # interleaving-dependent; parallel mode drains steering
                     # only at orchestrator-stream boundaries.
                     messages = self._drain_steering(messages)
-                if subagent_turns == turn_cap - 1:
-                    # Deterministic (pure function of the turn count), so
-                    # replay re-injects identically in both dispatch modes.
+                if subagent_turns == turn_cap - 1 and (
+                    not messages or messages[-1].get("content") != prompts.FINAL_TURN_NUDGE
+                ):
+                    # Deterministic (pure function of the turn count and
+                    # transcript), so replay re-injects identically in both
+                    # dispatch modes; the tail guard keeps overflow-retry
+                    # iterations of the same turn from stacking duplicates.
                     messages.append({"role": "user", "content": prompts.FINAL_TURN_NUDGE})
-                messages = self._compact_if_needed(messages, sq, recorded_premises)
-                resp = await self.gateway.complete(
-                    prompts.build_subagent_request(cfg, tool_schemas, list(messages))
+                messages, compacted = self._compact_if_needed(
+                    messages, sq, recorded_premises, static_chars, last_usage
+                )
+                if compacted:
+                    last_usage = None
+                try:
+                    resp = await self.gateway.complete(
+                        prompts.build_subagent_request(cfg, tool_schemas, list(messages))
+                    )
+                except ModelCallFailed as exc:
+                    if exc.error_kind == ModelErrorKind.CONTEXT_OVERFLOW and overflow_rungs < 3:
+                        # The estimate was wrong — the API said so. Escalate
+                        # one rung per consecutive overflow and retry the
+                        # turn (the failed call is journaled, costs no
+                        # tokens, and does not count as a turn). Past rung 3
+                        # the failure propagates and the subagent dies as
+                        # before.
+                        overflow_rungs += 1
+                        est = compaction.estimate_tokens(messages, static_chars, last_usage)
+                        messages = self._compact_reactive(
+                            messages, sq, recorded_premises, static_chars, overflow_rungs, est
+                        )
+                        last_usage = None
+                        continue
+                    raise
+                u = resp.usage
+                last_usage = (
+                    u.input_tokens + u.output_tokens
+                    + u.cache_read_input_tokens + u.cache_creation_input_tokens
                 )
                 if sequential:
                     self.turns += 1
@@ -774,41 +825,88 @@ class OrchestratorLoop:
             return "wave token allowance exhausted"
         return None
 
-    def _compact_if_needed(
-        self, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
-    ) -> list[dict]:
-        """Compaction ladder (§7, all three rungs as of M12): evict, then
-        reconstruct the workspace from the evidence DAG + notebook, then
-        reset. Pure function of the transcript's char counts and the
-        recorded evidence — replays deterministically."""
+    _RUNG_ACTIONS = {1: "evict", 2: "reconstruct", 3: "reset"}
+
+    def _apply_rung(
+        self, rung: int, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
+    ) -> tuple[list[dict], int]:
+        """One ladder rung (§7); returns (messages, evicted_result_count)."""
         cfg = self.config
-        before = compaction.context_chars(messages)
-        if before <= cfg.max_context_chars:
-            return messages
         prompt = prompts.subagent_user_prompt(sq.sq_id, sq.question, self.brief_scope)
-        messages, evicted = compaction.evict_tool_results(messages, cfg.evict_keep_last)
-        action = "evict"
-        if compaction.context_chars(messages) > cfg.max_context_chars:
-            action = "reconstruct"
+        if rung == 1:
+            return compaction.evict_tool_results(messages, cfg.evict_keep_last)
+        if rung == 2:
             workspace = compaction.render_workspace(
                 self._premise_slice_lines(recorded_premises),
                 self.notebook.render(cfg.session_id),
             )
-            messages = compaction.reconstruct_context(prompt, workspace)
-        if compaction.context_chars(messages) > cfg.max_context_chars:
-            action = "reset"
-            texts = self._premise_texts(recorded_premises)
-            messages = compaction.reset_context(prompt, texts)
-        self.event_log.append(
-            cfg.session_id,
-            f"subagent:{sq.sq_id}",
-            EventType.CONTEXT_COMPACTED,
-            {
-                "action": action,
-                "evicted_results": evicted,
-                "chars_before": before,
-                "chars_after": compaction.context_chars(messages),
-            },
+            return compaction.reconstruct_context(prompt, workspace), 0
+        return compaction.reset_context(prompt, self._premise_texts(recorded_premises)), 0
+
+    def _journal_compaction(
+        self, actor: str, trigger: str, action: str, evicted: int,
+        tokens_before: int, tokens_after: int, level: int | None = None,
+    ) -> None:
+        payload = {
+            "action": action,
+            "trigger": trigger,  # proactive (estimate over cap) | overflow (API rejected)
+            "evicted_results": evicted,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+        }
+        if level is not None:
+            payload["level"] = level
+        self.event_log.append(self.config.session_id, actor, EventType.CONTEXT_COMPACTED, payload)
+
+    def _compact_if_needed(
+        self,
+        messages: list[dict],
+        sq: Subquestion,
+        recorded_premises: list[str],
+        static_chars: int,
+        last_usage: int | None,
+    ) -> tuple[list[dict], bool]:
+        """Proactive compaction (§7): when the token estimate — system +
+        tools + transcript, floored by the previous response's journaled
+        usage — crosses the cap, walk the ladder until the estimate fits
+        (rung 3 is the floor either way). Pure function of the transcript
+        and recorded data — replays deterministically."""
+        cfg = self.config
+        before = compaction.estimate_tokens(messages, static_chars, last_usage)
+        if before <= cfg.max_context_tokens:
+            return messages, False
+        rung = 1
+        messages, evicted = self._apply_rung(rung, messages, sq, recorded_premises)
+        # Post-rung estimates carry no usage anchor: the model has not seen
+        # the compacted transcript yet.
+        while (
+            rung < 3
+            and compaction.estimate_tokens(messages, static_chars, None) > cfg.max_context_tokens
+        ):
+            rung += 1
+            messages, _ = self._apply_rung(rung, messages, sq, recorded_premises)
+        self._journal_compaction(
+            f"subagent:{sq.sq_id}", "proactive", self._RUNG_ACTIONS[rung], evicted,
+            before, compaction.estimate_tokens(messages, static_chars, None),
+        )
+        return messages, True
+
+    def _compact_reactive(
+        self,
+        messages: list[dict],
+        sq: Subquestion,
+        recorded_premises: list[str],
+        static_chars: int,
+        rung: int,
+        tokens_before: int,
+    ) -> list[dict]:
+        """Reactive compaction: the API rejected the call as context_overflow,
+        so the estimate was wrong — apply exactly the given rung (one harder
+        per consecutive overflow) and let the caller retry the turn."""
+        messages, evicted = self._apply_rung(rung, messages, sq, recorded_premises)
+        self._journal_compaction(
+            f"subagent:{sq.sq_id}", "overflow", self._RUNG_ACTIONS[rung], evicted,
+            tokens_before, compaction.estimate_tokens(messages, static_chars, None),
         )
         return messages
 
@@ -1006,27 +1104,78 @@ class OrchestratorLoop:
             for row in rows
             if row["node_id"] in credence.nodes
         }
-        messages: list[dict] = [
-            {
-                "role": "user",
-                "content": prompts.writer_user_prompt(
-                    self.config.query, premises, findings, sources, unresolved, confidence
-                ),
-            }
-        ]
+        self._writer_view = (premises, findings, sources, unresolved, confidence)
+        messages: list[dict] = [self._writer_head()]
+        # Proactive degradation (Phase 2): the writer prompt is rebuilt whole
+        # from the DAG, so "too big" is knowable before asking — clip
+        # evidence lines until the estimate fits (or level 2, the floor).
+        while (
+            self._writer_level < 2
+            and self._writer_estimate(messages) > self.config.max_context_tokens
+        ):
+            before = self._writer_estimate(messages)
+            self._writer_level += 1
+            messages = [self._writer_head()]
+            self._journal_compaction(
+                "harness", "proactive", "writer_clip", 0,
+                before, self._writer_estimate(messages), level=self._writer_level,
+            )
         messages = self._drain_steering(messages)
-        self._writer_gate()
-        resp = await self.gateway.complete(prompts.build_writer_request(self.config, list(messages)))
+        resp, messages = await self._writer_complete(messages)
         self.turns += 1
         if resp.stop_reason == "max_tokens":
             messages.append({"role": "assistant", "content": resp.content})
             messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
-            self._writer_gate()
-            resp = await self.gateway.complete(
-                prompts.build_writer_request(self.config, list(messages))
-            )
+            resp, messages = await self._writer_complete(messages)
             self.turns += 1
         return resp.text, messages
+
+    _WRITER_TEXT_CAPS = {0: None, 1: 300, 2: 120}
+
+    def _writer_head(self) -> dict:
+        """The writer's base user message, rebuilt at the current reduction
+        level. Levels clip evidence TEXT only — node IDs, sources,
+        confidence tiers, and coverage gaps are never dropped, so the
+        citation universe is unchanged (degrade, don't die)."""
+        premises, findings, sources, unresolved, confidence = self._writer_view
+        return {
+            "role": "user",
+            "content": prompts.writer_user_prompt(
+                self.config.query, premises, findings, sources, unresolved, confidence,
+                max_text_chars=self._WRITER_TEXT_CAPS[self._writer_level],
+            ),
+        }
+
+    def _writer_estimate(self, messages: list[dict]) -> int:
+        # Fresh context each writer round — no prior-usage anchor to floor it.
+        return (
+            len(prompts.WRITER_SYSTEM) + compaction.context_chars(messages)
+        ) // compaction.CHARS_PER_TOKEN
+
+    async def _writer_complete(self, messages: list[dict]) -> tuple[ModelResponse, list[dict]]:
+        """Every writer-phase model call goes through here: budget-gated,
+        with overflow degradation. On context_overflow the head is rebuilt
+        at the next clip level (the tail — steering, nudges, repair rounds —
+        is preserved) and the turn retries; past level 2 the failure
+        propagates and the run halts as before. Returns (resp, messages)
+        because degradation rewrites the head."""
+        while True:
+            self._writer_gate()
+            try:
+                resp = await self.gateway.complete(
+                    prompts.build_writer_request(self.config, list(messages))
+                )
+                return resp, messages
+            except ModelCallFailed as exc:
+                if exc.error_kind != ModelErrorKind.CONTEXT_OVERFLOW or self._writer_level >= 2:
+                    raise
+                before = self._writer_estimate(messages)
+                self._writer_level += 1
+                messages = [self._writer_head()] + messages[1:]
+                self._journal_compaction(
+                    "harness", "overflow", "writer_clip", 0,
+                    before, self._writer_estimate(messages), level=self._writer_level,
+                )
 
     # -- gap-filling (§3) ----------------------------------------------------
 
@@ -1348,10 +1497,7 @@ class OrchestratorLoop:
             writer_messages.append(
                 {"role": "user", "content": prompts.REPAIR_TEMPLATE.format(problems=problems)}
             )
-            self._writer_gate()
-            resp = await self.gateway.complete(
-                prompts.build_writer_request(self.config, list(writer_messages))
-            )
+            resp, writer_messages = await self._writer_complete(writer_messages)
             self.turns += 1
             answer = resp.text
             check = check_citations(answer, sid, self.dag)

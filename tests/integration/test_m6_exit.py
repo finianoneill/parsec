@@ -221,10 +221,14 @@ async def test_fork_at_call_out_of_range(env, db, blobs, event_log, clock, tmp_p
 
 async def test_compaction_reset_preserves_evidence(env, db, event_log, tmp_path):
     make_loop, span_ref = env
+    from tests.integration.test_m12_exit import _subagent_token_cap
+
+    probe = make_loop(tmp_path, FakeAdapter([]), "s-compact-probe")
     adapter = SpyAdapter(_base_script(span_ref, "Nothing citable. [narrative]"))
     loop = make_loop(
         tmp_path, adapter, "s-compact",
-        budgets=Budgets(max_gap_rounds=0), max_context_chars=300,
+        budgets=Budgets(max_gap_rounds=0),
+        max_context_tokens=_subagent_token_cap(probe, 300),
     )
     result = await loop.run()
     assert result.status in ("done", "partial")

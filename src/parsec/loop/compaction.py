@@ -13,9 +13,13 @@ which is why that never shipped.
 Rung 3 — RESET: the minimal fallback when even the reconstructed
 workspace exceeds the budget — assignment plus bare premise texts.
 
-Every decision here is a pure function of the transcript's character
-counts and the recorded evidence, so compaction replays byte-identically
-(T4).
+Triggering is TOKEN-aware as of Phase 2: the estimate counts the system
+prompt and tool schemas (previously invisible to the char trigger) and is
+anchored on the previous response's journaled usage — the exact context
+the model last consumed is a recorded lower bound, and only content
+appended since is estimated at ~4 chars/token. Every decision remains a
+pure function of the transcript and recorded data, so compaction replays
+byte-identically (T4).
 """
 
 from __future__ import annotations
@@ -27,9 +31,45 @@ EVICTION_MARKER = (
     "via recorded span and premise IDs]"
 )
 
+# The classic English/JSON heuristic. Deliberately crude: the REACTIVE
+# path (context_overflow -> compact -> retry) catches what it misses.
+CHARS_PER_TOKEN = 4
+
 
 def context_chars(messages: list[dict]) -> int:
     return len(canonical_json(messages))
+
+
+def static_prefix_chars(system_text: str, tools: list[dict]) -> int:
+    """Serialized size of the per-phase immutable prefix (system + tool
+    schemas) — part of every request, previously uncounted by the trigger."""
+    return len(system_text) + len(canonical_json(tools))
+
+
+def trailing_chars(messages: list[dict]) -> int:
+    """Chars of messages appended after the last assistant message — i.e.
+    content the model has not seen (and usage has not measured) yet."""
+    last_assistant = None
+    for i, m in enumerate(messages):
+        if m.get("role") == "assistant":
+            last_assistant = i
+    if last_assistant is None:
+        return context_chars(messages)
+    return context_chars(messages[last_assistant + 1 :])
+
+
+def estimate_tokens(messages: list[dict], static_chars: int, last_usage_tokens: int | None) -> int:
+    """Estimated input tokens for the next call on this transcript.
+
+    The char estimate covers everything at ~4 chars/token; when the
+    previous response's usage is known (input + output + cache tokens =
+    the whole context the model just consumed), it floors the estimate:
+    the next call cannot be smaller than that plus what was appended
+    since. Both inputs are recorded, so the estimate replays (T4)."""
+    chars_est = (static_chars + context_chars(messages)) // CHARS_PER_TOKEN
+    if last_usage_tokens is None:
+        return chars_est
+    return max(chars_est, last_usage_tokens + trailing_chars(messages) // CHARS_PER_TOKEN)
 
 
 def evict_tool_results(messages: list[dict], keep_last: int) -> tuple[list[dict], int]:
