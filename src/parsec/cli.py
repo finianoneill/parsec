@@ -94,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="AWS credentials profile for Bedrock (e.g. the one okta-awscli writes)",
     )
     ask.add_argument("--model", default=DEFAULT_MODEL)
+    ask.add_argument(
+        "--cache-strategy", choices=["system", "full"], default="full",
+        help="Prompt-cache breakpoints: 'full' (default) caches system + tool schemas + "
+        "the rolling message prefix; 'system' is the pre-Phase-4 system-block-only shape",
+    )
     ask.add_argument("--max-usd", type=float, default=Budgets().max_usd)
     ask.add_argument("--max-tokens", type=int, default=Budgets().max_total_tokens)
     ask.add_argument("--max-seconds", type=int, default=Budgets().max_wall_seconds)
@@ -389,6 +394,7 @@ def cmd_ask(args) -> int:
         query=args.query,
         model=args.model,
         cache_mode=CacheMode(args.cache_mode),
+        cache_strategy=args.cache_strategy,
         adapter=args.adapter,
         aws_region=args.aws_region,
         aws_profile=args.aws_profile,

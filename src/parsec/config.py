@@ -123,6 +123,17 @@ class RunConfig(BaseModel):
     model: str = DEFAULT_MODEL
     max_tokens_per_call: int = 8192
     cache_mode: CacheMode = CacheMode.LIVE_PREFER_CACHE
+    # Prompt-cache breakpoint placement (Phase 4). "system": the pre-Phase-4
+    # wire shape — one ephemeral breakpoint on the system block. "full":
+    # additionally cache the tool-schema array (breakpoint on the last tool)
+    # and roll a breakpoint onto the final block of the final message, so
+    # each request writes cache over its whole prompt and the next
+    # append-only request reads it (multi-turn subagent prefixes re-bill at
+    # 0.1x instead of full price). The FIELD default stays "system" because
+    # cache_control is part of the prompt bytes and hashes: a recorded
+    # config missing this key must rebuild pre-Phase-4 requests exactly.
+    # The CLI records "full" for new runs.
+    cache_strategy: Literal["system", "full"] = "system"
     adapter: Literal["anthropic", "bedrock", "fake", "replay"] = "anthropic"
     # Bedrock (Mantle client): auth is the AWS credential chain — aws_profile
     # pins the ~/.aws/credentials profile (e.g. the one okta-awscli writes).

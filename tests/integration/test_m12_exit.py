@@ -319,3 +319,49 @@ async def test_exit_3_kv_cache_prefix_audit(env, db, blobs, event_log, clock, tm
             )
             audited_pairs += 1
     assert audited_pairs >= 3  # the audit actually exercised consecutive calls
+
+
+def _strip_cache(obj):
+    if isinstance(obj, dict):
+        return {k: _strip_cache(v) for k, v in obj.items() if k != "cache_control"}
+    if isinstance(obj, list):
+        return [_strip_cache(x) for x in obj]
+    return obj
+
+
+async def test_full_cache_strategy_audit_and_replay(env, db, blobs, event_log, clock, tmp_path):
+    """Phase 4: under cache_strategy="full" every request carries the tool
+    and rolling-message breakpoints, the prefix stays append-only once
+    markers are stripped, and the run replays byte-identically (markers are
+    part of the hashed bytes, rebuilt from the recorded config)."""
+    adapter = FakeAdapter(_long_script(_answer()))
+    loop = env(tmp_path, adapter, "s-full-cache",
+               cache_strategy="full", budgets=Budgets(max_gap_rounds=0))
+    result = await loop.run()
+    assert result.status == "done"
+
+    requests_by_stream: dict[str, list[tuple[int, dict]]] = {}
+    for ev in event_log.read("s-full-cache"):
+        if ev.event_type == EventType.LLM_REQUEST:
+            body = json.loads(blobs.get_text(ev.payload["request_blob"]))
+            requests_by_stream.setdefault(ev.stream_id, []).append((ev.stream_idx, body))
+
+    for stream, requests in requests_by_stream.items():
+        requests.sort()
+        for _, body in requests:
+            assert "cache_control" in body["system"][0]
+            if body["tools"]:
+                assert "cache_control" in body["tools"][-1]
+                assert all("cache_control" not in t for t in body["tools"][:-1])
+            final_block = body["messages"][-1]["content"][-1]
+            assert "cache_control" in final_block  # the rolling marker
+        # markers stripped, same-phase consecutive requests are strict prefix extensions
+        for (_, a), (_, b) in zip(requests, requests[1:]):
+            if (a["system"], a["tools"]) != (b["system"], b["tools"]):
+                continue
+            sa, sb = _strip_cache(a["messages"]), _strip_cache(b["messages"])
+            assert sb[: len(sa)] == sa
+
+    outcome = await run_replay(db, blobs, clock, "s-full-cache")
+    assert outcome.projections_match, outcome.first_divergence
+    assert outcome.verified
