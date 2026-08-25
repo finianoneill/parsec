@@ -169,8 +169,11 @@ def _strip_volatile(event_type: EventType, payload: dict) -> dict | None:
             config.pop("adapter", None)  # replay swaps anthropic->replay
             config.pop("cache_mode", None)  # replay forces replay mode
             # Transport/provenance fields no recorded trajectory depends on;
-            # stripping keeps pre-Phase-0 recordings replayable.
+            # stripping keeps pre-Phase-0 recordings replayable. model_retry's
+            # effects ARE the journaled LLM_RETRY events (which are compared),
+            # so the knob itself is likewise volatile.
             config.pop("model_max_retries", None)
+            config.pop("model_retry", None)
             config.pop("parsec_version", None)
             payload["config"] = config
     if event_type == EventType.FETCH_PERFORMED:

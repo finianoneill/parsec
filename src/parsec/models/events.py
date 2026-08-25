@@ -25,6 +25,7 @@ class EventType(StrEnum):
     SUBAGENT_COMPLETED = "subagent_completed"
     SUBAGENT_JOINED = "subagent_joined"  # M11: observed completion/merge order
     LLM_FAILED = "llm_failed"            # M11: adapter raised; failure is journaled
+    LLM_RETRY = "llm_retry"              # harness retry of a failed attempt (classified kind + backoff delay)
     COVERAGE_UPDATED = "coverage_updated"
     NOTEBOOK_APPENDED = "notebook_appended"
     CONTEXT_COMPACTED = "context_compacted"

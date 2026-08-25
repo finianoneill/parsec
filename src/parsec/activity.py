@@ -112,6 +112,15 @@ class ActivityView:
                 line = Text(f"  ≋ {who}context compacted", style=_DIM)
             case EventType.STEERING_INJECTED:
                 line = Text(f"  ⇨ steering: {_short(payload.get('text', ''), 60)}", style="magenta")
+            case EventType.LLM_RETRY:
+                # The reason the busy ticker exists: a retry is now a visible
+                # journaled event, not a silent SDK re-attempt.
+                line = Text(
+                    f"  ↻ {who}model {payload.get('error_kind', 'error')} — "
+                    f"retry {payload.get('attempt', '?')} in {payload.get('delay_s', '?')}s",
+                    style="yellow",
+                )
+                self._busy(f"{who}waiting to retry ({payload.get('error_kind', 'error')})…", timed=True)
             case EventType.LLM_FAILED:
                 line = Text(f"  ✗ {who}model call failed", style="red")
             case EventType.VERIFICATION_COMPLETED:

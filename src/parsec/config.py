@@ -52,6 +52,20 @@ class Budgets(BaseModel):
     coverage_gap_headroom: float = Field(default=0.25, ge=0.0, le=1.0)
 
 
+class ModelRetry(BaseModel):
+    """Harness-owned retry policy for model calls (throttle/overload/
+    transient failures). Every retry is journaled as an LLM_RETRY event
+    with a delay that is a pure function of the attempt number, so retried
+    runs replay byte-identically. max_attempts=1 disables retries.
+    Defaults are sized to the (deliberately low) default wall budget."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_attempts: int = Field(default=4, ge=1)
+    base_delay_s: float = Field(default=2.0, gt=0)
+    max_delay_s: float = Field(default=30.0, gt=0)
+
+
 class EffortLimits(BaseModel):
     """Effective dispatch caps for one run, derived from the decomposer's
     effort estimate (M12, WS-F.4): spend scales with query complexity, and
@@ -140,12 +154,17 @@ class RunConfig(BaseModel):
     # cannot see.
     request_timeout_s: float | None = Field(default=None, gt=0)
     # The Anthropic SDK's transparent retry count for live model calls.
-    # Interim knob: these retries are invisible to the journal (the activity
-    # view cannot tell a retry from a hang), so harness-owned journaled
-    # retries will replace them, and this then drops to 0 so the harness is
-    # the only retry owner. Stripped from projections like adapter above —
-    # a transport detail no recorded trajectory depends on.
-    model_max_retries: int = Field(default=4, ge=0)
+    # Default 0: the harness owns retries (model_retry below) and journals
+    # each one — SDK-internal retries are invisible to the journal and were
+    # indistinguishable from a hang. Escape hatch only. Stripped from
+    # projections like adapter above — a transport detail no recorded
+    # trajectory depends on.
+    model_max_retries: int = Field(default=0, ge=0)
+    # Harness retry policy (T1): applied by the gateway, journaled per
+    # attempt. Stripped from projections — its effects ARE the journaled
+    # LLM_RETRY events, so comparing the knob too would only break replay
+    # of pre-taxonomy recordings.
+    model_retry: ModelRetry = Field(default_factory=ModelRetry)
     # Provenance stamp: the parsec version that recorded this session.
     # Replay/fork warn on mismatch — recordings only replay byte-identically
     # against the code that produced them, so skew is the first thing to

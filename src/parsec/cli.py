@@ -23,6 +23,7 @@ from parsec.config import (
     CacheMode,
     Clock,
     DEFAULT_MODEL,
+    ModelRetry,
     RealClock,
     RunConfig,
     make_session_id,
@@ -108,9 +109,14 @@ def build_parser() -> argparse.ArgumentParser:
         "a tripped timeout is journaled as a model-call failure, never a silent hang",
     )
     ask.add_argument(
+        "--retry-attempts", type=int, default=ModelRetry().max_attempts,
+        help="Max attempts per model call for retryable failures "
+        "(throttled/overloaded/transient); each retry is journaled; 1 disables",
+    )
+    ask.add_argument(
         "--model-max-retries", type=int, default=RunConfig.model_fields["model_max_retries"].default,
-        help="SDK-internal transparent retries per model call (interim knob; "
-        "harness-owned journaled retries will replace it)",
+        help="SDK-internal transparent retries per model call (default 0: the "
+        "harness owns and journals retries — escape hatch only)",
     )
     ask.add_argument(
         "--max-turns-per-subagent", type=int, default=Budgets().max_turns_per_subagent,
@@ -398,6 +404,7 @@ def cmd_ask(args) -> int:
         ),
         request_timeout_s=args.request_timeout,
         model_max_retries=args.model_max_retries,
+        model_retry=ModelRetry(max_attempts=args.retry_attempts),
         data_dir=args.data_dir,
         search_fixtures=args.search_fixtures,
         search_provider=args.search_provider,

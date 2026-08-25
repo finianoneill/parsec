@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from parsec.canonical import canonical_json
 from parsec.config import RunConfig
-from parsec.errors import HaltRequested, ModelCallFailed, ReplayDivergence
+from parsec.errors import HaltRequested, ModelCallFailed, ModelErrorKind, ReplayDivergence
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.pricing import compute_cost
+from parsec.gateway.retry import RetryPolicy, classify_model_error
 from parsec.models.events import EventType
 from parsec.models.gateway import ModelRequest, ModelResponse
 from parsec.store.blobs import BlobStore
@@ -33,6 +34,11 @@ class ModelGateway:
         self.blobs = blobs
         self.ledger = ledger
         self.config = config
+        self.clock = event_log.clock
+        r = config.model_retry
+        self.retry_policy = RetryPolicy(
+            max_attempts=r.max_attempts, base_delay_s=r.base_delay_s, max_delay_s=r.max_delay_s
+        )
         # M11 (T8): call indices are PER STREAM — cross-stream arrival order
         # is nondeterministic under concurrency, so replay keys on
         # (stream, call_index) instead of a global counter.
@@ -68,19 +74,32 @@ class ModelGateway:
             },
         )
 
-        try:
-            response = await self.adapter.complete(request)
-        except (ReplayDivergence, HaltRequested):
-            raise  # harness-level: never journaled as a model failure
-        except ModelCallFailed as exc:
-            # A replayed recorded failure: journal it identically and re-raise.
-            self._record_failure(sid, call_index, exc.kind, exc.detail, req_seq)
-            raise
-        except Exception as exc:
-            # Journal the failure so replay reproduces it at the same
-            # per-stream call, then raise the typed wrapper (M11).
-            self._record_failure(sid, call_index, type(exc).__name__, str(exc), req_seq)
-            raise ModelCallFailed(type(exc).__name__, str(exc)) from exc
+        # Harness-owned retry loop (T1): retryable failures back off and
+        # re-attempt, each attempt journaled as LLM_RETRY; the final failure
+        # journals LLM_FAILED and raises as before. Replayed failures take
+        # the same path — the ReplayAdapter serves the recorded attempt
+        # sequence, so a throttled-then-recovered call replays identically.
+        attempt = 1
+        while True:
+            try:
+                response = await self.adapter.complete(request)
+                break
+            except (ReplayDivergence, HaltRequested):
+                raise  # harness-level: never journaled as a model failure
+            except ModelCallFailed as exc:
+                if await self._retry(sid, call_index, attempt, exc.kind, exc.detail, exc.error_kind, req_seq):
+                    attempt += 1
+                    continue
+                self._record_failure(sid, call_index, exc.kind, exc.detail, exc.error_kind, req_seq)
+                raise
+            except Exception as exc:
+                kind, detail = type(exc).__name__, str(exc)
+                error_kind = classify_model_error(exc)
+                if await self._retry(sid, call_index, attempt, kind, detail, error_kind, req_seq):
+                    attempt += 1
+                    continue
+                self._record_failure(sid, call_index, kind, detail, error_kind, req_seq)
+                raise ModelCallFailed(kind, detail, error_kind) from exc
 
         response_json = canonical_json(response.model_dump(mode="json"))
         response_blob = self.blobs.put(response_json)
@@ -133,13 +152,53 @@ class ModelGateway:
         spend["usd"] += cost.usd
         return response
 
-    def _record_failure(
-        self, sid: str, call_index: int, kind: str, detail: str, req_seq: int
-    ) -> None:
+    async def _retry(
+        self,
+        sid: str,
+        call_index: int,
+        attempt: int,
+        kind: str,
+        detail: str,
+        error_kind: ModelErrorKind | None,
+        req_seq: int,
+    ) -> bool:
+        """Journal-and-wait for one retryable failed attempt; False = give up."""
+        if not self.retry_policy.should_retry(error_kind, attempt):
+            return False
+        delay = self.retry_policy.delay_s(attempt)
         self.event_log.append(
             sid,
             "harness",
-            EventType.LLM_FAILED,
-            {"call_index": call_index, "kind": kind, "detail": detail},
+            EventType.LLM_RETRY,
+            {
+                "call_index": call_index,
+                "attempt": attempt,
+                "error_kind": error_kind,
+                "kind": kind,
+                "detail": detail,
+                "delay_s": delay,
+            },
             parent_seq=req_seq,
         )
+        # Replay serves the recorded attempt sequence instantly; sleeping
+        # would re-run a throttled session in real time for no fidelity gain
+        # (the journaled delay_s is already compared byte-for-byte).
+        if self.config.adapter != "replay":
+            await self.clock.sleep(delay)
+        return True
+
+    def _record_failure(
+        self,
+        sid: str,
+        call_index: int,
+        kind: str,
+        detail: str,
+        error_kind: ModelErrorKind | None,
+        req_seq: int,
+    ) -> None:
+        payload = {"call_index": call_index, "kind": kind, "detail": detail}
+        if error_kind is not None:
+            # None = unclassified (a pre-taxonomy recording replaying); the
+            # key is omitted so those old projections still match.
+            payload["error_kind"] = error_kind
+        self.event_log.append(sid, "harness", EventType.LLM_FAILED, payload, parent_seq=req_seq)
