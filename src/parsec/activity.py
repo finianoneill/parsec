@@ -112,6 +112,13 @@ class ActivityView:
                 line = Text(f"  ≋ {who}context compacted", style=_DIM)
             case EventType.STEERING_INJECTED:
                 line = Text(f"  ⇨ steering: {_short(payload.get('text', ''), 60)}", style="magenta")
+            case EventType.GATE_PROPOSED:
+                line = Text(
+                    f"  ⏸ {payload.get('gate', '?')} gate: ${payload.get('spent_usd', 0.0):.4f} of "
+                    f"${payload.get('cap_usd', 0.0):.2f} spent — approve to continue",
+                    style="yellow",
+                )
+                self._busy(f"waiting at the {payload.get('gate', '?')} gate…")
             case EventType.LLM_RETRY:
                 # The reason the busy ticker exists: a retry is now a visible
                 # journaled event, not a silent SDK re-attempt.

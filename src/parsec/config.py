@@ -154,6 +154,12 @@ class RunConfig(BaseModel):
     # edit fed back to the decomposer. Approval and edits are recorded
     # steering events, so a gated session still replays byte-identically.
     brief_gate: bool = False
+    # Cost gate (Phase 5): pause once for approval when spend crosses this
+    # fraction of budgets.max_usd at a dispatch boundary. None = off.
+    # Approval continues; any other reply stops dispatching and the writer
+    # wraps up what was gathered. The reply is a recorded, gate-tagged
+    # steering event, so gated sessions replay byte-identically.
+    cost_gate_threshold: float | None = Field(default=None, gt=0, le=1)
     # Politeness 2.0: robots respected by purpose; contact appended to the UA.
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600

@@ -43,6 +43,7 @@ _ALLOWED = _PATH_KEYS | {
     "request_timeout",
     "parallel",
     "brief_gate",
+    "cost_gate",
     "epsilon",
 }
 
