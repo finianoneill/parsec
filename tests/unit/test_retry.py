@@ -168,7 +168,7 @@ async def test_replay_reproduces_retry_sequence(db, blobs, event_log, ledger, se
     adapter = _FlakyAdapter(
         [
             RateLimitError("429"),  # decomposer, attempt 1: throttled
-            decompose_response(["q?"]),
+            decompose_response(["what is q?"]),
             RateLimitError("429"),  # subagent, attempt 1: throttled
             scripted_response([{"type": "text", "text": "nothing found"}], index=1),
             scripted_response([{"type": "text", "text": "No evidence. [narrative]"}], index=2),

@@ -72,7 +72,7 @@ async def test_overflow_compacts_and_retries_the_turn(
 ):
     adapter = _ScriptAdapter(
         [
-            decompose_response(["q?"]),
+            decompose_response(["what is q?"]),
             ContextOverflowError(),  # subagent turn 1: API rejects
             scripted_response([{"type": "text", "text": "done looking"}], index=1),
             scripted_response([{"type": "text", "text": "No evidence. [narrative]"}], index=2),
@@ -104,7 +104,7 @@ async def test_consecutive_overflows_escalate_then_die(
     other model failure — the run degrades, the wave survives."""
     adapter = _ScriptAdapter(
         [
-            decompose_response(["q?"]),
+            decompose_response(["what is q?"]),
             ContextOverflowError(), ContextOverflowError(),
             ContextOverflowError(), ContextOverflowError(),
             scripted_response([{"type": "text", "text": "Nothing. [narrative]"}], index=1),
@@ -136,7 +136,7 @@ async def test_writer_overflow_clips_and_retries(
 ):
     adapter = _ScriptAdapter(
         [
-            decompose_response(["q?"]),
+            decompose_response(["what is q?"]),
             scripted_response([{"type": "text", "text": "found nothing"}], index=1),
             ContextOverflowError(),  # writer call: API rejects
             scripted_response([{"type": "text", "text": "No evidence. [narrative]"}], index=2),
@@ -204,7 +204,7 @@ async def test_overflow_compacted_run_replays(
 
     adapter = _ScriptAdapter(
         [
-            decompose_response(["q?"]),
+            decompose_response(["what is q?"]),
             ContextOverflowError(),
             scripted_response([{"type": "text", "text": "nothing found"}], index=1),
             scripted_response([{"type": "text", "text": "No evidence. [narrative]"}], index=2),

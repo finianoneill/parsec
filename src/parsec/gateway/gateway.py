@@ -61,6 +61,9 @@ class ModelGateway:
             "tools": request.tools,
             "messages": request.messages,
         }
+        if request.tool_choice is not None:
+            # Only when set: pre-Phase-3 request blobs must stay byte-identical.
+            request_body["tool_choice"] = request.tool_choice
         request_blob = self.blobs.put(canonical_json(request_body))
         req_seq = self.event_log.append(
             sid,

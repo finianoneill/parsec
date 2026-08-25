@@ -48,18 +48,24 @@ class ModelRequest(BaseModel):
     system: list[dict] = Field(default_factory=list)
     tools: list[dict] = Field(default_factory=list)
     messages: list[dict]
+    # Forced tool selection (Phase 3), e.g. {"type": "tool", "name": "..."}
+    # on a structured repair's final attempt. None = the model's choice —
+    # omitted from the wire, the hash, and the request blob, so pre-Phase-3
+    # request identities are unchanged.
+    tool_choice: dict | None = None
 
     @cached_property
     def prompt_hash(self) -> str:
-        return hash_obj(
-            {
-                "model": self.model,
-                "max_tokens": self.max_tokens,
-                "system": self.system,
-                "tools": self.tools,
-                "messages": self.messages,
-            }
-        )
+        body = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": self.system,
+            "tools": self.tools,
+            "messages": self.messages,
+        }
+        if self.tool_choice is not None:
+            body["tool_choice"] = self.tool_choice
+        return hash_obj(body)
 
 
 class ModelResponse(BaseModel):

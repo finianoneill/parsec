@@ -66,7 +66,7 @@ async def test_final_turn_nudge_injected_before_cap(tmp_path, db, blobs, event_l
 
     adapter = SpyAdapter(
         [
-            decompose_response(["q?"]),
+            decompose_response(["what is q?"]),
             # turn 1: still researching
             scripted_response(
                 [{"type": "tool_use", "id": "tu_1", "name": "missing_tool", "input": {}}],

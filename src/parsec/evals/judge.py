@@ -8,10 +8,10 @@ number in the eval result, never a gate on anything. Judge failures
 
 from __future__ import annotations
 
-import json
-import re
+from pydantic import BaseModel, ConfigDict, Field
 
 from parsec.gateway.base import ModelAdapter
+from parsec.loop.structured import judged_json, parse_prose_json
 from parsec.models.gateway import ModelRequest
 
 JUDGE_SYSTEM = """You are grading a research report for synthesis quality. You will see the question and the report (citation markers like [premise:...] and a mechanical appendix are part of the harness — ignore their syntax, judge the prose).
@@ -20,7 +20,19 @@ Score 1-5 for synthesis quality: does the report directly answer the question, i
 
 Reply with ONLY a JSON object: {"synthesis_score": <1-5>, "rationale": "<one sentence>"}"""
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_RETRY_INSTRUCTION = (
+    'Reply with ONLY the JSON object: {"synthesis_score": <1-5>, "rationale": "<one sentence>"}'
+)
+
+
+class SynthesisJudgeReply(BaseModel):
+    """Validated instead of regex-scraped (Phase 3); one corrective retry
+    before the advisory axis degrades to None."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    synthesis_score: float = Field(ge=1, le=5)
+    rationale: str = ""
 
 
 def judge_request(judge_model: str, query: str, answer: str) -> ModelRequest:
@@ -39,24 +51,14 @@ def judge_request(judge_model: str, query: str, answer: str) -> ModelRequest:
 
 def parse_judge_reply(text: str) -> float | None:
     """Extract a 1-5 score and normalize to [0,1]; None on any malformation."""
-    m = _JSON_RE.search(text)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-        score = obj["synthesis_score"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None
-    if not isinstance(score, (int, float)) or not 1 <= score <= 5:
-        return None
-    return (float(score) - 1.0) / 4.0
+    value, _ = parse_prose_json(text, SynthesisJudgeReply)
+    return None if value is None else (float(value.synthesis_score) - 1.0) / 4.0
 
 
 async def judge_synthesis(
     adapter: ModelAdapter, judge_model: str, query: str, answer: str
 ) -> float | None:
-    try:
-        resp = await adapter.complete(judge_request(judge_model, query, answer))
-    except Exception:
-        return None  # advisory axis: degrade, never fail the eval
-    return parse_judge_reply(resp.text)
+    reply = await judged_json(
+        adapter, judge_request(judge_model, query, answer), SynthesisJudgeReply, _RETRY_INSTRUCTION
+    )
+    return None if reply is None else (float(reply.synthesis_score) - 1.0) / 4.0

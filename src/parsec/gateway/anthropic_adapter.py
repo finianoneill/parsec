@@ -37,6 +37,8 @@ class AnthropicAdapter:
             kwargs["system"] = request.system
         if request.tools:
             kwargs["tools"] = request.tools
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = request.tool_choice
         msg = await self._client.messages.create(**kwargs)
         raw = msg.model_dump(mode="json")
         usage = raw.get("usage") or {}

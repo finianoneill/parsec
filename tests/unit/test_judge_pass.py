@@ -62,10 +62,23 @@ async def test_judge_pass_scores_deductions_only(graph, db, event_log):
 
 async def test_judge_failure_degrades_to_none(graph, db, event_log):
     dag, sid, f_ded, _ = graph
-    judge = ScriptedJudge(["not json at all"])
+    # bad reply, then the corrective retry (Phase 3) also fails -> None
+    judge = ScriptedJudge(["not json at all", "still not json"])
     judgments = await judge_pass(db, event_log, sid, judge, "fake-judge")
     assert judgments[0].score is None
+    assert len(judge.requests) == 2  # exactly one corrective retry
+    assert "invalid" in judge.requests[1].messages[-1]["content"]
     rows = db.execute(
         "SELECT payload_json FROM edges WHERE session_id=? AND src_node_id=?", (sid, f_ded)
     ).fetchall()
     assert all("judge_score" not in json.loads(r["payload_json"]) for r in rows)
+
+
+async def test_judge_retry_recovers_a_malformed_reply(graph, db, event_log):
+    dag, sid, f_ded, _ = graph
+    judge = ScriptedJudge(
+        ["oops, no json here", '{"validity_score": 3, "rationale": "assumes an unstated step"}']
+    )
+    judgments = await judge_pass(db, event_log, sid, judge, "fake-judge")
+    assert judgments[0].score == 0.5  # (3-1)/4 — the retry landed
+    assert judgments[0].rationale == "assumes an unstated step"

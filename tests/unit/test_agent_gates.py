@@ -88,6 +88,8 @@ async def test_invalid_decomposition_falls_back_to_whole_query(tmp_path, db, blo
     adapter = FakeAdapter(
         [
             scripted_response([{"type": "text", "text": "here are my thoughts..."}], stop_reason="end_turn"),
+            # the structured repair round (Phase 3) also fails to call the tool
+            scripted_response([{"type": "text", "text": "still just thoughts"}], stop_reason="end_turn", index=1),
             # subagent for sq-1 ends immediately without a report
             scripted_response([{"type": "text", "text": "cannot research"}], stop_reason="end_turn"),
             scripted_response([{"type": "text", "text": "No evidence found. [narrative]"}], stop_reason="end_turn"),
@@ -175,7 +177,7 @@ async def test_fair_share_turn_split_dispatches_every_subquestion(tmp_path, db, 
 
 async def test_subagent_turn_cap_marks_partial(tmp_path, db, blobs, event_log, ledger, sessions, clock):
     # Subagent keeps "researching" past its per-subagent cap.
-    endless = [decompose_response(["q?"])]
+    endless = [decompose_response(["what is q?"])]
     for i in range(3):
         endless.append(
             scripted_response(

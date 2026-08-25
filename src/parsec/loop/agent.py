@@ -47,6 +47,12 @@ from parsec.gateway.gateway import ModelGateway
 from parsec.loop import compaction, prompts
 from parsec.loop.citations import check_citations, write_claims
 from parsec.loop.states import AgentState, StateMachine
+from parsec.loop.structured import (
+    BriefSubmission,
+    format_validation_errors,
+    structured_call,
+    validate_tool_call,
+)
 from parsec.models.events import EventType
 from parsec.models.gateway import ModelResponse
 from parsec.models.report import SubagentSubmission
@@ -422,17 +428,17 @@ class OrchestratorLoop:
         scope, effort estimate, subquestions — persisted as a RESEARCH_BRIEF
         event. With --brief-gate, the brief waits for recorded steering:
         "approve" dispatches, anything else is an edit fed back to the
-        decomposer. On an invalid response the harness falls back to the
-        whole query as a single subquestion (never crashes)."""
+        decomposer. An invalid response gets one structured repair round
+        (Phase 3: per-field errors back to the model, tool_choice pinned);
+        only then does the harness fall back to the whole query as a single
+        subquestion (never crashes)."""
         cfg = self.config
         sid = cfg.session_id
         if self._gate():
             brief = Brief("", "deep", [cfg.query])
             note = "decomposition skipped (budget); whole query as sq-1"
         else:
-            resp = await self.gateway.complete(prompts.build_decomposer_request(cfg, cfg.query))
-            self.turns += 1
-            brief, note = self._parse_brief(resp)
+            brief, note, resp = await self._decompose()
             if cfg.brief_gate:
                 brief, note = await self._brief_gate(brief, note, resp)
 
@@ -474,23 +480,54 @@ class OrchestratorLoop:
         self.notebook.append(sid, "orchestrator", "\n".join(md))
         return subquestions
 
+    async def _decompose(self) -> tuple[Brief, str, ModelResponse]:
+        """The initial decomposition through the structured contract: one
+        bounded repair round with per-field errors before falling back."""
+        cfg = self.config
+
+        async def complete(messages: list[dict], tool_choice: dict | None) -> ModelResponse:
+            resp = await self.gateway.complete(
+                prompts.build_decomposer_request(
+                    cfg, cfg.query, messages=messages, tool_choice=tool_choice
+                )
+            )
+            self.turns += 1
+            return resp
+
+        outcome = await structured_call(
+            complete,
+            [{"role": "user", "content": cfg.query}],
+            BriefSubmission,
+            "submit_subquestions",
+            "Call submit_subquestions again with a corrected brief.",
+            max_repairs=MAX_REPAIR_ROUNDS,
+        )
+        if outcome.value is not None:
+            sub = outcome.value
+            note = (
+                f"brief repaired after {outcome.repairs} invalid attempt(s)"
+                if outcome.repairs
+                else ""
+            )
+            return Brief(sub.scope, sub.effort, sub.subquestions), note, outcome.resp
+        detail = "; ".join(outcome.problems)
+        return (
+            Brief("", "deep", [cfg.query]),
+            f"decomposition invalid ({detail}); whole query as sq-1",
+            outcome.resp,
+        )
+
     def _parse_brief(self, resp: ModelResponse) -> tuple[Brief, str]:
-        for block in resp.tool_uses:
-            if block.get("name") != "submit_subquestions":
-                continue
-            raw = block.get("input", {})
-            questions = raw.get("subquestions")
-            if (
-                isinstance(questions, list)
-                and questions
-                and all(isinstance(q, str) and len(q.strip()) >= 3 for q in questions)
-            ):
-                scope = raw.get("scope") if isinstance(raw.get("scope"), str) else ""
-                effort = raw.get("effort")
-                if effort not in ("quick", "standard", "deep"):
-                    effort = "deep"  # absent/invalid estimate never clamps (v1 behavior)
-                return Brief(scope.strip(), effort, [q.strip() for q in questions]), ""
-        return Brief("", "deep", [self.config.query]), "decomposition invalid; whole query as sq-1"
+        """Single-shot validation for brief-gate revision rounds: the user
+        is at the gate to steer again, so no automated repair is spent."""
+        sub, _, problems = validate_tool_call(resp, "submit_subquestions", BriefSubmission)
+        if sub is not None:
+            return Brief(sub.scope, sub.effort, sub.subquestions), ""
+        detail = "; ".join(problems)
+        return (
+            Brief("", "deep", [self.config.query]),
+            f"decomposition invalid ({detail}); whole query as sq-1",
+        )
 
     async def _brief_gate(
         self, brief: Brief, note: str, resp: ModelResponse
@@ -752,7 +789,7 @@ class OrchestratorLoop:
                 subagent_turns += 1
 
                 if resp.stop_reason == "tool_use":
-                    submission = self._extract_submission(resp, recorded_premises)
+                    submission, submit_problems = self._extract_submission(resp, recorded_premises)
                     if submission is not None:
                         # Report accepted — but first run the sibling tool
                         # calls: record_premises alongside submit_report must
@@ -761,7 +798,12 @@ class OrchestratorLoop:
                         break
                     messages.append({"role": "assistant", "content": resp.content})
                     messages.append(
-                        {"role": "user", "content": await self._run_tools(resp, recorded_premises)}
+                        {
+                            "role": "user",
+                            "content": await self._run_tools(
+                                resp, recorded_premises, submit_problems=submit_problems
+                            ),
+                        }
                     )
                     continue
                 if resp.stop_reason == "max_tokens":
@@ -945,46 +987,65 @@ class OrchestratorLoop:
 
     def _extract_submission(
         self, resp: ModelResponse, recorded_premises: list[str]
-    ) -> SubagentSubmission | None:
-        """Validate a submit_report call if present. Invalid submissions are
-        ignored here and surface as tool errors via the normal dispatch path
-        (submit_report is not in the registry, so the model gets a corrective
-        'unknown tool'-style error only if it never validates — instead we
-        return None and let the loop continue so it can retry)."""
+    ) -> tuple[SubagentSubmission | None, list[str]]:
+        """Validate a submit_report call if present. Returns (submission,
+        problems): an invalid submission comes back as None plus the
+        per-field schema errors and semantic problems (Phase 3), which
+        _run_tools feeds to the model as the corrective — the subagent's
+        turn loop is the bounded repair channel."""
         for block in resp.tool_uses:
             if block.get("name") != "submit_report":
                 continue
             try:
                 submission = SubagentSubmission.model_validate(block.get("input", {}))
-            except ValidationError:
-                return None
+            except ValidationError as exc:
+                return None, format_validation_errors(exc)
+            # Semantic checks past the schema: findings and conflicts must
+            # rest on premise IDs THIS subagent recorded (T6 ownership).
+            problems: list[str] = []
             allowed = set(recorded_premises)
-            for f in submission.findings:
-                if not set(f.premise_ids) <= allowed:
-                    return None  # findings must rest on this subagent's own premises
-            for c in submission.conflicts:
-                if c.a not in allowed or c.b not in allowed:
-                    return None
-            return submission
-        return None
+            for i, f in enumerate(submission.findings):
+                bad = sorted(set(f.premise_ids) - allowed)
+                if bad:
+                    problems.append(
+                        f"findings[{i}].premise_ids: {', '.join(bad)} were not recorded by you "
+                        "in this subquestion (use record_premises first, then cite its IDs)"
+                    )
+            for i, c in enumerate(submission.conflicts):
+                bad = sorted({c.a, c.b} - allowed)
+                if bad:
+                    problems.append(
+                        f"conflicts[{i}]: {', '.join(bad)} were not recorded by you in this subquestion"
+                    )
+            if problems:
+                return None, problems
+            return submission, []
+        return None, []
 
     async def _run_tools(
-        self, resp: ModelResponse, recorded_premises: list[str], skip_submit: bool = False
+        self,
+        resp: ModelResponse,
+        recorded_premises: list[str],
+        skip_submit: bool = False,
+        submit_problems: list[str] | None = None,
     ) -> list[dict]:
         blocks = []
         for tool_use in resp.tool_uses:
             if tool_use.get("name") == "submit_report":
                 if skip_submit:
                     continue  # the submission validated; nothing to correct
-                # reached only when validation failed above
+                # Reached only when validation failed above: the corrective
+                # names each problem (Phase 3) — the model can only fix what
+                # it can locate.
+                problem_text = "\n".join(f"- {p}" for p in submit_problems or [])
                 blocks.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_use["id"],
                         "content": (
-                            "invalid submit_report: check the schema, and ensure every finding "
-                            "and conflict references premise IDs YOU recorded via record_premises "
-                            "in this subquestion"
+                            "invalid submit_report:\n"
+                            + (problem_text or "- the submission did not match the schema")
+                            + "\nFix these problems and call submit_report again."
                         ),
                         "is_error": True,
                     }

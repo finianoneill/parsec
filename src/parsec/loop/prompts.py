@@ -107,17 +107,23 @@ def _system_block(text: str) -> list[dict]:
 
 
 def build_decomposer_request(
-    config: RunConfig, query: str, messages: list[dict] | None = None
+    config: RunConfig,
+    query: str,
+    messages: list[dict] | None = None,
+    tool_choice: dict | None = None,
 ) -> ModelRequest:
     """messages overrides the default single-query turn for brief-gate
-    revision rounds (M12) — the transcript stays append-only, so the
-    decomposer's system+tools prefix keeps its KV-cache hit (§7)."""
+    revision rounds (M12) and structured repair rounds (Phase 3) — the
+    transcript stays append-only, so the decomposer's system+tools prefix
+    keeps its KV-cache hit (§7). tool_choice pins submit_subquestions on a
+    repair's final attempt."""
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
         system=_system_block(DECOMPOSER_SYSTEM),
         tools=[SUBMIT_SUBQUESTIONS_SCHEMA],
         messages=messages if messages is not None else [{"role": "user", "content": query}],
+        tool_choice=tool_choice,
     )
 
 
