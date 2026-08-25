@@ -146,7 +146,9 @@ CREATE TABLE IF NOT EXISTS ledger (
   category     TEXT NOT NULL,                -- input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|usd|wall_ms
   amount       REAL NOT NULL,
   actor        TEXT NOT NULL,                -- gateway:<model> | tool:<name> | harness
+  stream_id    TEXT NOT NULL DEFAULT 'orchestrator',  -- which stream spent it: 'orchestrator' or the subagent's sq id
   ref_seq      INTEGER,
-  note         TEXT
+  note         TEXT                          -- usd rows: canonical JSON cost breakdown (input/output/cache_read/cache_write)
 );
 CREATE INDEX IF NOT EXISTS ix_ledger_session ON ledger(session_id, category);
+CREATE INDEX IF NOT EXISTS ix_ledger_stream ON ledger(session_id, stream_id);

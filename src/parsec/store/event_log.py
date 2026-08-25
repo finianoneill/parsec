@@ -168,6 +168,10 @@ def _strip_volatile(event_type: EventType, payload: dict) -> dict | None:
             config.pop("session_id", None)
             config.pop("adapter", None)  # replay swaps anthropic->replay
             config.pop("cache_mode", None)  # replay forces replay mode
+            # Transport/provenance fields no recorded trajectory depends on;
+            # stripping keeps pre-Phase-0 recordings replayable.
+            config.pop("model_max_retries", None)
+            config.pop("parsec_version", None)
             payload["config"] = config
     if event_type == EventType.FETCH_PERFORMED:
         payload.pop("from_cache", None)  # original may live-fetch; replay always hits cache

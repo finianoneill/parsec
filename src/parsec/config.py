@@ -11,6 +11,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from parsec import __version__ as _PARSEC_VERSION
 from parsec.canonical import sha256_hex
 
 DEFAULT_MODEL = "claude-opus-5"
@@ -138,6 +139,18 @@ class RunConfig(BaseModel):
     # diagnosable, never an indefinitely wedged call the wall-clock budget
     # cannot see.
     request_timeout_s: float | None = Field(default=None, gt=0)
+    # The Anthropic SDK's transparent retry count for live model calls.
+    # Interim knob: these retries are invisible to the journal (the activity
+    # view cannot tell a retry from a hang), so harness-owned journaled
+    # retries will replace them, and this then drops to 0 so the harness is
+    # the only retry owner. Stripped from projections like adapter above —
+    # a transport detail no recorded trajectory depends on.
+    model_max_retries: int = Field(default=4, ge=0)
+    # Provenance stamp: the parsec version that recorded this session.
+    # Replay/fork warn on mismatch — recordings only replay byte-identically
+    # against the code that produced them, so skew is the first thing to
+    # suspect on divergence. Stripped from projections.
+    parsec_version: str | None = Field(default_factory=lambda: _PARSEC_VERSION)
     # Pricing table pinned at session start so replay reproduces recorded costs.
     pricing_override: dict[str, dict[str, float]] | None = None
     # Credence model (§2.1, T3; 2.0 at M10). source_tiers merges over the

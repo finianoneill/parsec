@@ -8,6 +8,7 @@ import json
 import os
 import re
 import select
+import signal
 import sys
 import tempfile
 import threading
@@ -105,6 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--request-timeout", type=float, default=None, metavar="SECONDS",
         help="Per-request HTTP timeout for model calls (default: SDK's 10 minutes); "
         "a tripped timeout is journaled as a model-call failure, never a silent hang",
+    )
+    ask.add_argument(
+        "--model-max-retries", type=int, default=RunConfig.model_fields["model_max_retries"].default,
+        help="SDK-internal transparent retries per model call (interim knob; "
+        "harness-owned journaled retries will replace it)",
     )
     ask.add_argument(
         "--max-turns-per-subagent", type=int, default=Budgets().max_turns_per_subagent,
@@ -254,13 +260,16 @@ def make_adapter(config: RunConfig):
     if config.adapter == "anthropic":
         from parsec.gateway.anthropic_adapter import AnthropicAdapter
 
-        return AnthropicAdapter(timeout=config.request_timeout_s)
+        return AnthropicAdapter(
+            max_retries=config.model_max_retries, timeout=config.request_timeout_s
+        )
     if config.adapter == "bedrock":
         from parsec.gateway.bedrock_adapter import BedrockAdapter
 
         return BedrockAdapter(
             aws_region=config.aws_region or os.environ.get("AWS_REGION"),
             aws_profile=config.aws_profile,
+            max_retries=config.model_max_retries,
             timeout=config.request_timeout_s,
         )
     raise SystemExit(
@@ -388,6 +397,7 @@ def cmd_ask(args) -> int:
             parallel_subagents=args.parallel,
         ),
         request_timeout_s=args.request_timeout,
+        model_max_retries=args.model_max_retries,
         data_dir=args.data_dir,
         search_fixtures=args.search_fixtures,
         search_provider=args.search_provider,
@@ -429,12 +439,28 @@ def cmd_ask(args) -> int:
         steering = SteeringReader(lambda text: handle_steer_line(loop, text))
         steering.start()
 
+    # Graceful abort: the first Ctrl-C asks the loop to halt at its next
+    # gate, so the run journals USER_ABORT and finishes the session row as
+    # halted_user instead of leaving it 'running' forever. A second Ctrl-C
+    # forces the old hard abort.
+    def _on_sigint(signum, frame):
+        if loop.halt_requested:
+            raise KeyboardInterrupt
+        loop.request_halt()
+        console.print("\n[yellow]halting at the next gate — Ctrl-C again to force quit[/yellow]")
+
+    try:
+        prev_sigint = signal.signal(signal.SIGINT, _on_sigint)
+    except ValueError:  # not the main thread (embedded callers): keep default behavior
+        prev_sigint = None
     try:
         result = asyncio.run(loop.run())
     except KeyboardInterrupt:
         console.print("[red]aborted[/red]")
         return EXIT_ERROR
     finally:
+        if prev_sigint is not None:
+            signal.signal(signal.SIGINT, prev_sigint)
         if steering is not None:
             steering.stop()
         if live_view is not None:
@@ -542,11 +568,29 @@ def cmd_demo(args) -> int:
     return code
 
 
+def _warn_version_skew(row) -> None:
+    """Recordings only replay byte-identically against the code that produced
+    them — on a version mismatch, skew is the first thing to suspect."""
+    from parsec import __version__
+
+    recorded = json.loads(row["config_json"]).get("parsec_version")
+    if recorded != __version__:
+        console.print(
+            f"[yellow]session recorded by parsec {recorded or '(unstamped, pre-0.1.0)'}, "
+            f"current is {__version__} — a divergence may be version skew, not corruption[/yellow]"
+        )
+
+
 def cmd_replay(args) -> int:
     from parsec.replay import run_replay
 
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
+    row = SessionStore(conn, clock).get(args.session_id)
+    if row is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    _warn_version_skew(row)
     outcome = asyncio.run(run_replay(conn, blobs, clock, args.session_id))
     console.print(f"replayed as {outcome.result.session_id} · status {outcome.result.status}")
     if args.no_verify:
@@ -660,6 +704,21 @@ def cmd_sessions(args) -> int:
         return EXIT_USAGE
     console.print_json(row["config_json"])
     console.print(ledger.totals(args.session_id))
+    by_stream = ledger.totals_by_stream(args.session_id)
+    if by_stream:
+        stream_table = Table("stream", "usd", "in", "out", "cache", "wall_ms")
+        for stream_id in sorted(by_stream):
+            t = by_stream[stream_id]
+            cached = int(t.get("cache_read_tokens", 0) + t.get("cache_creation_tokens", 0))
+            stream_table.add_row(
+                stream_id,
+                f"{t.get('usd', 0.0):.4f}",
+                str(int(t.get("input_tokens", 0))),
+                str(int(t.get("output_tokens", 0))),
+                str(cached),
+                str(int(t.get("wall_ms", 0))),
+            )
+        console.print(stream_table)
     n_events = conn.execute(
         "SELECT COUNT(*) FROM events WHERE session_id=?", (args.session_id,)
     ).fetchone()[0]
@@ -680,9 +739,11 @@ def cmd_fork(args) -> int:
 
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
-    if SessionStore(conn, clock).get(args.session_id) is None:
+    row = SessionStore(conn, clock).get(args.session_id)
+    if row is None:
         console.print(f"[red]unknown session {args.session_id}[/red]")
         return EXIT_USAGE
+    _warn_version_skew(row)
     config = SessionStore(conn, clock).get_config(args.session_id)
     live_adapter = make_adapter(config)
     result = asyncio.run(

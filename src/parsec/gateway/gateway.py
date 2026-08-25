@@ -109,9 +109,16 @@ class ModelGateway:
             ("cache_creation_tokens", u.cache_creation_input_tokens),
             ("usd", round(cost.usd, 8)),
         ]
+        # The usd row keeps its input/output/cache split (previously computed
+        # and discarded). Ledger rows are not part of the replay projection,
+        # so the note is free to carry it.
+        usd_note = canonical_json({k: round(v, 8) for k, v in cost.breakdown.items()})
         for category, amount in debits:
             if amount:
-                self.ledger.debit(sid, category, amount, actor, ref_seq=resp_seq)
+                self.ledger.debit(
+                    sid, category, amount, actor, ref_seq=resp_seq,
+                    note=usd_note if category == "usd" else None,
+                )
                 self.event_log.append(
                     sid,
                     "harness",

@@ -41,6 +41,33 @@ async def test_gateway_records_events_blobs_and_debits(gateway, event_log, blobs
     assert "usd" not in totals  # fake-model is free; zero debits are skipped
 
 
+async def test_usd_debit_note_carries_cost_breakdown(event_log, blobs, ledger, sessions, tmp_path):
+    """The input/output/cache USD split was computed and discarded; it now
+    persists in the usd ledger row's note (Phase 0). Ledger rows are not in
+    the replay projection, so this is projection-neutral."""
+    from tests.conftest import make_config
+
+    config = make_config(
+        tmp_path, session_id="s-breakdown",
+        pricing_override={"fake-model": {"input": 5.0, "output": 25.0}},
+    )
+    sessions.create(config)
+    adapter = FakeAdapter(
+        [scripted_response([{"type": "text", "text": "hi"}], input_tokens=1_000_000, output_tokens=0)]
+    )
+    gw = ModelGateway(adapter, event_log, blobs, ledger, config)
+    req = ModelRequest(model="fake-model", max_tokens=10, messages=[{"role": "user", "content": "x"}])
+    await gw.complete(req)
+
+    row = ledger.conn.execute(
+        "SELECT note, stream_id FROM ledger WHERE session_id='s-breakdown' AND category='usd'"
+    ).fetchone()
+    breakdown = json.loads(row["note"])
+    assert breakdown["input"] == 5.0
+    assert breakdown["output"] == 0.0
+    assert row["stream_id"] == "orchestrator"
+
+
 async def test_call_index_increments_per_stream(gateway, config):
     """M11: call indices are per-stream — replay keys on (stream, index)."""
     from parsec.store.event_log import stream_scope
