@@ -151,4 +151,8 @@ CREATE TABLE IF NOT EXISTS ledger (
   note         TEXT                          -- usd rows: canonical JSON cost breakdown (input/output/cache_read/cache_write)
 );
 CREATE INDEX IF NOT EXISTS ix_ledger_session ON ledger(session_id, category);
-CREATE INDEX IF NOT EXISTS ix_ledger_stream ON ledger(session_id, stream_id);
+-- ix_ledger_stream is created in connection._migrate(), NOT here: on a
+-- pre-Phase-0 database this script runs before the stream_id column
+-- migration, and an index referencing the missing column would fail the
+-- whole executescript. Indexes on migrated columns belong in _migrate()
+-- (same pattern as ix_events_stream).
