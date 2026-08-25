@@ -11,12 +11,14 @@ defense — §10.6).
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from dataclasses import dataclass
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from parsec.canonical import canonical_json
 from parsec.gateway.base import ModelAdapter
+from parsec.loop.structured import judged_json
 from parsec.models.events import EventType
 from parsec.models.gateway import ModelRequest
 from parsec.store.event_log import EventLog
@@ -27,7 +29,19 @@ Score 1-5: does the derived statement actually follow from these premises alone?
 
 Reply with ONLY a JSON object: {"validity_score": <1-5>, "rationale": "<one sentence>"}"""
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_RETRY_INSTRUCTION = (
+    'Reply with ONLY the JSON object: {"validity_score": <1-5>, "rationale": "<one sentence>"}'
+)
+
+
+class EdgeJudgeReply(BaseModel):
+    """The judge's contract, validated instead of regex-scraped (Phase 3);
+    one corrective retry before the advisory score degrades to None."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    validity_score: float = Field(ge=1, le=5)
+    rationale: str = ""
 
 
 @dataclass
@@ -36,20 +50,6 @@ class EdgeJudgment:
     edge_type: str
     score: float | None  # normalized to [0,1]; None on judge failure
     rationale: str = ""
-
-
-def _parse(text: str) -> tuple[float | None, str]:
-    m = _JSON_RE.search(text)
-    if not m:
-        return None, ""
-    try:
-        obj = json.loads(m.group(0))
-        score = obj["validity_score"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None, ""
-    if not isinstance(score, (int, float)) or not 1 <= score <= 5:
-        return None, ""
-    return (float(score) - 1.0) / 4.0, str(obj.get("rationale", ""))
 
 
 async def judge_pass(
@@ -82,11 +82,11 @@ async def judge_pass(
             system=[{"type": "text", "text": JUDGE_EDGE_SYSTEM}],
             messages=[{"role": "user", "content": "\n".join(prompt_lines)}],
         )
-        try:
-            resp = await adapter.complete(request)
-            score, rationale = _parse(resp.text)
-        except Exception:
+        reply = await judged_json(adapter, request, EdgeJudgeReply, _RETRY_INSTRUCTION)
+        if reply is None:
             score, rationale = None, ""  # advisory: degrade, never fail
+        else:
+            score, rationale = (float(reply.validity_score) - 1.0) / 4.0, reply.rationale
 
         judgment = EdgeJudgment(finding_id, payload["edge_type"], score, rationale)
         judgments.append(judgment)
