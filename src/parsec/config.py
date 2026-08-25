@@ -194,13 +194,23 @@ class RunConfig(BaseModel):
     # deterministic checker, "hhem" escalates to HHEM-2.1-Open (needs the
     # `nli` extra), "none" disables. Advisory only — it never gates.
     nli_checker: Literal["lexical", "hhem", "none"] = "lexical"
-    # Compaction ladder (§7), applied to subagent contexts. Decisions are a
-    # pure function of the transcript (char counts), so compaction replays
-    # deterministically. Rung 1 evicts old tool results down to markers;
-    # rung 3 resets the context seeded from recorded evidence. Rung 2
-    # (model-written squeeze) is deferred — it would spend model calls.
-    max_context_chars: int = 60_000
+    # Compaction ladder (§7): applied proactively when the token estimate
+    # (system + tools + transcript, floored by the previous response's
+    # journaled usage) crosses max_context_tokens, and reactively when the
+    # API rejects a call as context_overflow (escalate one rung, retry).
+    # Decisions are a pure function of the transcript and recorded data, so
+    # compaction replays deterministically. Rung 1 evicts old tool results
+    # down to markers; rung 2 reconstructs the workspace from the DAG +
+    # notebook; rung 3 resets to the assignment + recorded premise texts.
+    # The writer phase degrades separately: evidence lines are clipped
+    # (300 then 120 chars) instead of laddered — IDs and the citation
+    # universe are never dropped.
+    max_context_tokens: int = 18_000
     evict_keep_last: int = 2
+    # DEPRECATED (Phase 2): superseded by max_context_tokens (the char
+    # trigger ignored system + tool schemas and could not react to a real
+    # overflow). Unread; retained so pre-Phase-2 session configs still load.
+    max_context_chars: int = 60_000
 
     def to_json_dict(self) -> dict:
         return self.model_dump(mode="json")

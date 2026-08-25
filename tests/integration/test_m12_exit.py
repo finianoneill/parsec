@@ -60,6 +60,19 @@ class SpyAdapter(FakeAdapter):
         return await super().complete(request)
 
 
+def _subagent_token_cap(loop, msgs_chars_budget: int) -> int:
+    """Convert an old messages-only char budget into the equivalent Phase 2
+    token cap: the token estimate adds the static prefix (system + tool
+    schemas) and divides by ~4, so the trigger points are unchanged."""
+    from parsec.loop import compaction, prompts
+
+    static = compaction.static_prefix_chars(
+        prompts.SUBAGENT_SYSTEM,
+        loop.registry.export_schemas() + [prompts.submit_report_schema()],
+    )
+    return (static + msgs_chars_budget) // compaction.CHARS_PER_TOKEN
+
+
 @pytest.fixture
 def env(db, blobs, event_log, ledger, sessions, clock):
     """Two cached documents and a loop builder matching the registry replay
@@ -169,7 +182,8 @@ async def test_exit_1_reconstruction_preserves_evidence_and_replays(
     adapter = SpyAdapter(_long_script(_answer()))
     tight = env(
         tmp_path / "b", adapter, "s-reconstruct",
-        max_context_chars=1600, evict_keep_last=1, budgets=Budgets(max_gap_rounds=0),
+        max_context_tokens=_subagent_token_cap(control, 1600), evict_keep_last=1,
+        budgets=Budgets(max_gap_rounds=0),
     )
     result = await tight.run()
     assert result.status == "done"
@@ -272,8 +286,10 @@ async def test_exit_3_kv_cache_prefix_audit(env, db, blobs, event_log, clock, tm
     """The §7 audit as a regression test: per stream and per phase (same
     system+tools), request messages are append-only — the only allowed
     prefix break is a recorded compaction."""
+    probe = env(tmp_path, FakeAdapter([]), "s-audit-probe")
     adapter = FakeAdapter(_long_script(_answer()))
-    loop = env(tmp_path, adapter, "s-audit", max_context_chars=1600, evict_keep_last=1,
+    loop = env(tmp_path, adapter, "s-audit",
+               max_context_tokens=_subagent_token_cap(probe, 1600), evict_keep_last=1,
                budgets=Budgets(max_gap_rounds=0))
     await loop.run()
 

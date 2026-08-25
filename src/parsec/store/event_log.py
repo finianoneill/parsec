@@ -171,9 +171,12 @@ def _strip_volatile(event_type: EventType, payload: dict) -> dict | None:
             # Transport/provenance fields no recorded trajectory depends on;
             # stripping keeps pre-Phase-0 recordings replayable. model_retry's
             # effects ARE the journaled LLM_RETRY events (which are compared),
-            # so the knob itself is likewise volatile.
+            # so the knob itself is likewise volatile; same argument for
+            # max_context_tokens (its effects are the CONTEXT_COMPACTED
+            # events and the prompt hashes).
             config.pop("model_max_retries", None)
             config.pop("model_retry", None)
+            config.pop("max_context_tokens", None)
             config.pop("parsec_version", None)
             payload["config"] = config
     if event_type == EventType.FETCH_PERFORMED:

@@ -158,11 +158,18 @@ def writer_user_prompt(
     sources: dict[str, str],
     unresolved: list[tuple[str, str, str]],  # (sq_id, question, "status: reason")
     confidence: dict[str, str] | None = None,  # node_id -> annotation, e.g. "high" / "low (single source)"
+    max_text_chars: int | None = None,  # Phase 2 degradation: clip evidence TEXT, never ids/sources
 ) -> str:
     """The writer's entire view of the world: query + distilled evidence + gaps.
     Confidence annotations are computed by the credence model (§6.5) — the
     writer applies the register, it never invents the tier."""
     confidence = confidence or {}
+
+    def clip(text: str) -> str:
+        if max_text_chars is None or len(text) <= max_text_chars:
+            return text
+        return text[:max_text_chars] + "…[clipped to fit context]"
+
     lines = [f"Question: {query}", "", "Premises:"]
     if not premises:
         lines.append(
@@ -175,14 +182,14 @@ def writer_user_prompt(
         if row["node_id"] in confidence:
             notes.append(f"confidence: {confidence[row['node_id']]}")
         suffix = f" ({'; '.join(notes)})" if notes else ""
-        lines.append(f"[{row['node_id']}] {payload['text']}{suffix}")
+        lines.append(f"[{row['node_id']}] {clip(payload['text'])}{suffix}")
     if findings:
         lines += ["", "Findings (derived from premises):"]
         for row in findings:
             payload = json.loads(row["payload_json"])
             deps = ", ".join(payload["premise_ids"])
             conf = f"; confidence: {confidence[row['node_id']]}" if row["node_id"] in confidence else ""
-            lines.append(f"[{row['node_id']}] {payload['text']} (from: {deps}{conf})")
+            lines.append(f"[{row['node_id']}] {clip(payload['text'])} (from: {deps}{conf})")
     if unresolved:
         lines += ["", "Unresolved subquestions (acknowledge these gaps in [narrative]):"]
         for sq_id, question, why in unresolved:
