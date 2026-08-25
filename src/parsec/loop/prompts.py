@@ -106,6 +106,56 @@ def _system_block(text: str) -> list[dict]:
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
+# -- cache_strategy="full" placement (Phase 4) -------------------------------
+#
+# Three breakpoints per request (limit is 4): system (both strategies),
+# the last tool schema (caching the whole tools array), and a ROLLING one
+# on the final block of the final message — each request writes cache over
+# its whole prompt, and the next append-only request reads that prefix at
+# 0.1x. Markers are applied to COPIES at request-build time: the loop's
+# stored transcript stays unmarked, and placement is a pure function of
+# (config, transcript), so recorded runs rebuild identical bytes (T4).
+
+_EPHEMERAL = {"type": "ephemeral"}
+CACHEABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "tool_use", "image", "document"})
+
+
+def _cache_tools(tools: list[dict]) -> list[dict]:
+    if not tools:
+        return tools
+    return [*tools[:-1], {**tools[-1], "cache_control": _EPHEMERAL}]
+
+
+def _block_content(content) -> list[dict]:
+    """Full mode sends every message in block form: a rolling marker turns a
+    string into blocks, and the SAME bytes must appear when that message is
+    an unmarked prefix of a later request — so normalize all of them."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return content
+
+
+def _mark_messages(messages: list[dict]) -> list[dict]:
+    out = [{**m, "content": _block_content(m["content"])} for m in messages]
+    if not out:
+        return out
+    blocks = out[-1]["content"]
+    if blocks and blocks[-1].get("type") in CACHEABLE_BLOCK_TYPES:
+        out[-1] = {
+            **out[-1],
+            "content": [*blocks[:-1], {**blocks[-1], "cache_control": _EPHEMERAL}],
+        }
+    return out
+
+
+def apply_cache_strategy(
+    config: RunConfig, tools: list[dict], messages: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    if config.cache_strategy != "full":
+        return tools, messages
+    return _cache_tools(tools), _mark_messages(messages)
+
+
 def build_decomposer_request(
     config: RunConfig,
     query: str,
@@ -117,12 +167,17 @@ def build_decomposer_request(
     transcript stays append-only, so the decomposer's system+tools prefix
     keeps its KV-cache hit (§7). tool_choice pins submit_subquestions on a
     repair's final attempt."""
+    tools, messages = apply_cache_strategy(
+        config,
+        [SUBMIT_SUBQUESTIONS_SCHEMA],
+        messages if messages is not None else [{"role": "user", "content": query}],
+    )
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
         system=_system_block(DECOMPOSER_SYSTEM),
-        tools=[SUBMIT_SUBQUESTIONS_SCHEMA],
-        messages=messages if messages is not None else [{"role": "user", "content": query}],
+        tools=tools,
+        messages=messages,
         tool_choice=tool_choice,
     )
 
@@ -130,21 +185,23 @@ def build_decomposer_request(
 def build_subagent_request(
     config: RunConfig, tools: list[dict], messages: list[dict]
 ) -> ModelRequest:
+    tools, messages = apply_cache_strategy(config, tools + [submit_report_schema()], messages)
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
         system=_system_block(SUBAGENT_SYSTEM),
-        tools=tools + [submit_report_schema()],
+        tools=tools,
         messages=messages,
     )
 
 
 def build_writer_request(config: RunConfig, messages: list[dict]) -> ModelRequest:
+    tools, messages = apply_cache_strategy(config, [], messages)
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
         system=_system_block(WRITER_SYSTEM),
-        tools=[],
+        tools=tools,
         messages=messages,
     )
 

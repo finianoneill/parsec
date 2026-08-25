@@ -24,6 +24,7 @@ _ALLOWED = _PATH_KEYS | {
     "aws_profile",
     "model",
     "cache_mode",
+    "cache_strategy",
     "search_provider",
     "searxng_url",
     "contact",

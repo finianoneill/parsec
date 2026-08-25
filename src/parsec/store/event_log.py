@@ -177,6 +177,7 @@ def _strip_volatile(event_type: EventType, payload: dict) -> dict | None:
             config.pop("model_max_retries", None)
             config.pop("model_retry", None)
             config.pop("max_context_tokens", None)
+            config.pop("cache_strategy", None)  # its effects are the prompt bytes themselves
             config.pop("parsec_version", None)
             payload["config"] = config
     if event_type == EventType.FETCH_PERFORMED:
