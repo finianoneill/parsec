@@ -38,6 +38,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS ix_events_stream ON events(session_id, stream_id, stream_idx)"
     )
+    ledger_cols = {row[1] for row in conn.execute("PRAGMA table_info(ledger)")}
+    if "stream_id" not in ledger_cols:
+        # Pre-Phase-0 debits were only attributable by actor; per-subagent
+        # spend lived in memory and evaporated at process exit.
+        conn.execute("ALTER TABLE ledger ADD COLUMN stream_id TEXT NOT NULL DEFAULT 'orchestrator'")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_ledger_stream ON ledger(session_id, stream_id)")
 
 
 @contextmanager

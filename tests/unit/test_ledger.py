@@ -63,3 +63,20 @@ def test_attribution_by_actor(ledger, sid):
     by_actor = ledger.totals_by_actor(sid)
     assert by_actor[("gateway:a", "input_tokens")] == 10
     assert by_actor[("gateway:b", "input_tokens")] == 20
+
+
+def test_attribution_by_stream(ledger, sid):
+    """Debits ride the CURRENT_STREAM contextvar, so per-subquestion spend is
+    durable — not just gateway.stream_spend in memory (Phase 0)."""
+    from parsec.store.event_log import stream_scope
+
+    ledger.debit(sid, "input_tokens", 10, "gateway:m")
+    with stream_scope("sq-1"):
+        ledger.debit(sid, "input_tokens", 30, "gateway:m")
+        ledger.debit(sid, "usd", 0.02, "gateway:m")
+    by_stream = ledger.totals_by_stream(sid)
+    assert by_stream["orchestrator"]["input_tokens"] == 10
+    assert by_stream["sq-1"]["input_tokens"] == 30
+    assert abs(by_stream["sq-1"]["usd"] - 0.02) < 1e-9
+    # session totals are unaffected by the split
+    assert ledger.totals(sid)["input_tokens"] == 40

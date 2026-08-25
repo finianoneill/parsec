@@ -218,6 +218,13 @@ class OrchestratorLoop:
         """Thread-safe enough for a stdin reader thread: deque.append is atomic."""
         self._steer_queue.append(text)
 
+    def request_halt(self) -> None:
+        """Graceful abort (the CLI's SIGINT handler, or any embedding caller).
+        Thread-safe (a bool store): the next gate or gate-wait raises
+        HaltRequested, which run() turns into a journaled USER_ABORT and a
+        session row finished as halted_user — never a row stuck 'running'."""
+        self.halt_requested = True
+
     async def run(self) -> RunResult:
         cfg = self.config
         sid = cfg.session_id
@@ -379,13 +386,16 @@ class OrchestratorLoop:
             sm.transition(AgentState.HALTED, f"budget: {exc.category}")
             self._finish(sid, "halted_budget", answer_blob)
             return RunResult(
-                sid, "halted_budget", answer, 0, [str(exc)], [], self.coverage.summary(sid), self.turns
+                sid, "halted_budget", answer, 0, [str(exc)], [],
+                self.coverage.summary(sid), turns=self.turns,
             )
         except HaltRequested:
             self.event_log.append(sid, "user", EventType.USER_ABORT, {})
             sm.transition(AgentState.HALTED, "user abort")
             self._finish(sid, "halted_user", None)
-            return RunResult(sid, "halted_user", "", 0, [], [], self.coverage.summary(sid), self.turns)
+            return RunResult(
+                sid, "halted_user", "", 0, [], [], self.coverage.summary(sid), turns=self.turns
+            )
         except Exception as exc:
             self.event_log.append(
                 sid, "harness", EventType.ERROR, {"kind": type(exc).__name__, "detail": str(exc)}

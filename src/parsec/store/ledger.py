@@ -7,6 +7,7 @@ import sqlite3
 from parsec.config import Budgets, Clock
 from parsec.errors import BudgetExceeded
 from parsec.gateway.pricing import CACHE_READ_MULT, CACHE_WRITE_MULT
+from parsec.store.event_log import CURRENT_STREAM
 
 # max_total_tokens is a spend proxy, so each category counts at its price
 # relative to a plain input token (cache reads bill at a tenth) — counting
@@ -34,10 +35,17 @@ class Ledger:
         ref_seq: int | None = None,
         note: str | None = None,
     ) -> None:
+        # Stream attribution rides the same contextvar as events: a debit
+        # issued inside a subagent's task lands in that subagent's stream
+        # with no parameter threading, so per-subquestion spend survives the
+        # process (gateway.stream_spend is in-memory only).
         self.conn.execute(
-            "INSERT INTO ledger (session_id, ts, category, amount, actor, ref_seq, note)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (session_id, self.clock.now_iso(), category, amount, actor, ref_seq, note),
+            "INSERT INTO ledger (session_id, ts, category, amount, actor, stream_id, ref_seq, note)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                session_id, self.clock.now_iso(), category, amount, actor,
+                CURRENT_STREAM.get(), ref_seq, note,
+            ),
         )
 
     def totals(self, session_id: str) -> dict[str, float]:
@@ -54,6 +62,18 @@ class Ledger:
             (session_id,),
         ).fetchall()
         return {(r["actor"], r["category"]): r["total"] for r in rows}
+
+    def totals_by_stream(self, session_id: str) -> dict[str, dict[str, float]]:
+        """Per-stream category totals: which subquestion spent the budget."""
+        rows = self.conn.execute(
+            "SELECT stream_id, category, SUM(amount) AS total FROM ledger"
+            " WHERE session_id=? GROUP BY stream_id, category",
+            (session_id,),
+        ).fetchall()
+        out: dict[str, dict[str, float]] = {}
+        for r in rows:
+            out.setdefault(r["stream_id"], {})[r["category"]] = r["total"]
+        return out
 
     def spent_tokens(self, session_id: str) -> int:
         totals = self.totals(session_id)
