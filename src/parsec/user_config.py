@@ -38,6 +38,7 @@ _ALLOWED = _PATH_KEYS | {
     "max_coverage_gap_rounds",
     "max_turns_per_subagent",
     "model_max_retries",
+    "retry_attempts",
     "request_timeout",
     "parallel",
     "brief_gate",

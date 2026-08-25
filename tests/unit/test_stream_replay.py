@@ -49,7 +49,9 @@ async def test_gateway_journals_failures(recorded, event_log, config):
     failed = [ev for ev in event_log.read(config.session_id) if ev.event_type == EventType.LLM_FAILED]
     assert len(failed) == 1
     assert failed[0].stream_id == "sq-2"
-    assert failed[0].payload == {"call_index": 0, "kind": "RuntimeError", "detail": "boom"}
+    assert failed[0].payload == {
+        "call_index": 0, "kind": "RuntimeError", "detail": "boom", "error_kind": "fatal",
+    }
 
 
 async def test_replay_serves_per_stream_in_any_arrival_order(recorded, event_log, blobs, config):

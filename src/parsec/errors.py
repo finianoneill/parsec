@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
+
+class ModelErrorKind(StrEnum):
+    """Actionable classification of a failed model call. The gateway's retry
+    policy keys off this — not the provider's exception zoo — so the loop
+    reacts the same way whichever adapter raised."""
+
+    THROTTLED = "throttled"                # rate limited (429): back off and retry
+    OVERLOADED = "overloaded"              # provider overloaded (529): back off and retry
+    CONTEXT_OVERFLOW = "context_overflow"  # prompt too long: retrying verbatim cannot help
+    TRANSIENT = "transient"                # network/timeout/5xx: retry
+    FATAL = "fatal"                        # auth, bad request, unknown: do not retry
+
 
 class ParsecError(Exception):
     """Base class for all parsec errors."""
@@ -38,11 +52,16 @@ class ModelCallFailed(ParsecError):
     """An adapter raised mid-call. The gateway journals the failure as an
     LLM_FAILED event and raises this typed wrapper, so a replayed run can
     reproduce the SAME failure at the same per-stream call — a subagent
-    dying mid-wave leaves a replayable stream (M11 failure semantics)."""
+    dying mid-wave leaves a replayable stream (M11 failure semantics).
 
-    def __init__(self, kind: str, detail: str):
+    error_kind is the retry-policy classification; None means unclassified
+    (a pre-taxonomy recording replaying), which the policy treats as fatal.
+    """
+
+    def __init__(self, kind: str, detail: str, error_kind: ModelErrorKind | None = None):
         self.kind = kind
         self.detail = detail
+        self.error_kind = error_kind
         super().__init__(f"{kind}: {detail}")
 
 

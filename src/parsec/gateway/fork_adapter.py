@@ -22,11 +22,12 @@ class ForkAdapter:
         self._replay = replay
         self._live = live
         self._fork_at = fork_at_call
-        self._i = 0
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        i = self._i
-        self._i += 1
-        if i < self._fork_at:
+        # Branch on FINALIZED calls, not adapter invocations: a retried call
+        # is several invocations but one call index, and --at-call counts
+        # call indices. The replay adapter advances only on a final outcome,
+        # so a call's recorded retry attempts keep routing to the recording.
+        if self._replay.served_calls < self._fork_at:
             return await self._replay.complete(request)
         return await self._live.complete(request)
