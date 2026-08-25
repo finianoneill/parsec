@@ -135,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--brief-gate", action="store_true",
         help="Pause after the research brief for approval/edits via stdin steering (type 'approve' to dispatch)",
     )
+    ask.add_argument(
+        "--cost-gate", type=float, default=None, metavar="FRACTION", dest="cost_gate",
+        help="Pause once for approval when spend crosses this fraction of --max-usd "
+        "(e.g. 0.5); 'approve' continues, any other reply wraps up with what was gathered",
+    )
     ask.add_argument("--data-dir", type=Path, default=Path("data"))
     ask.add_argument("--search-fixtures", type=Path, default=None)
     ask.add_argument(
@@ -418,6 +423,7 @@ def cmd_ask(args) -> int:
         respect_robots=not args.no_robots,
         contact=args.contact,
         brief_gate=args.brief_gate,
+        cost_gate_threshold=args.cost_gate,
         nli_checker=args.nli_checker,
         learned_reliability=args.learned_reliability,
         calibration=(
@@ -449,8 +455,18 @@ def cmd_ask(args) -> int:
                 "[dim]brief gate: type 'approve' to dispatch, 'edit' to open the "
                 "proposed brief in $EDITOR, or any other text to request changes[/dim]"
             )
+        if config.cost_gate_threshold is not None:
+            console.print(
+                "[dim]cost gate: at the threshold, type 'approve' to continue or "
+                "any other text to wrap up with what was gathered[/dim]"
+            )
         steering = SteeringReader(lambda text: handle_steer_line(loop, text))
         steering.start()
+    elif config.brief_gate or config.cost_gate_threshold is not None:
+        console.print(
+            "[yellow]a gate is configured but stdin is not interactive — an unanswered "
+            "gate waits until the wall-clock budget[/yellow]"
+        )
 
     # Graceful abort: the first Ctrl-C asks the loop to halt at its next
     # gate, so the run journals USER_ABORT and finishes the session row as

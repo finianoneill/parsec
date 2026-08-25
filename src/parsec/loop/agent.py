@@ -205,9 +205,13 @@ class OrchestratorLoop:
         # steering at the recorded turn indices via scripted_steering.
         self._steer_queue: deque[str] = deque()
         self.scripted_steering: dict[int, list[str]] = {}
-        # M12 brief gate: recorded approvals/edits, keyed by turn index like
-        # steering (they ARE steering events, payload-tagged gate="brief").
-        self.scripted_brief_gate: dict[int, list[str]] = {}
+        # The gate primitive's scripted replies (Phase 5, generalized from
+        # the M12 brief gate): recorded approvals/edits keyed by (gate tag,
+        # turn index) — they ARE steering events, payload-tagged with their
+        # gate, so every gate that uses the primitive replays byte-identically.
+        self.scripted_gates: dict[tuple[str, int], list[str]] = {}
+        # The cost gate fires at most once per run.
+        self._cost_gate_passed = False
         # The proposal currently waiting at the gate — read by the CLI's
         # stdin thread to seed $EDITOR; never consulted by loop logic.
         self.current_brief: Brief | None = None
@@ -265,7 +269,7 @@ class OrchestratorLoop:
                 for i, sq in enumerate(subquestions):
                     sm.transition(AgentState.DISPATCHING, sq.sq_id)
                     self._notify(sm)
-                    if self._gate():
+                    if self._gate() or await self._cost_gate():
                         partial = True
                         break
                     sm.transition(AgentState.COLLECTING, sq.sq_id)
@@ -555,7 +559,7 @@ class OrchestratorLoop:
             )
             self.current_brief = brief
             try:
-                text = await self._await_gate_message()
+                text = await self._await_gate_message("brief")
             finally:
                 self.current_brief = None
             if text.strip().lower() in _APPROVALS:
@@ -586,13 +590,15 @@ class OrchestratorLoop:
             brief, note = self._parse_brief(resp)
         return brief, (note + "; " if note else "") + "brief edit rounds exhausted; proceeding"
 
-    async def _await_gate_message(self) -> str:
-        """Block until one steering message arrives (live) or take the next
-        scripted gate message at this turn index (replay). Wall-clock budget
-        still applies — an unattended gate degrades to the best-effort path."""
+    async def _await_gate_message(self, gate: str) -> str:
+        """The gate primitive's reply channel (Phase 5): block until one
+        steering message arrives (live) or take the recorded reply at this
+        (gate, turn index) key (replay), then journal it gate-tagged so
+        replay re-injects it through the same gate. Wall-clock budget still
+        applies — an unattended gate degrades to the best-effort path."""
         sid = self.config.session_id
         while True:
-            scripted = self.scripted_brief_gate.get(self.turns)
+            scripted = self.scripted_gates.get((gate, self.turns))
             if scripted:
                 text = scripted.pop(0)
                 break
@@ -609,9 +615,42 @@ class OrchestratorLoop:
             sid,
             "user",
             EventType.STEERING_INJECTED,
-            {"turn_index": self.turns, "text": text, "gate": "brief"},
+            {"turn_index": self.turns, "text": text, "gate": gate},
         )
         return text
+
+    async def _cost_gate(self) -> bool:
+        """The gate primitive's second consumer (Phase 5): once spend
+        crosses the configured fraction of the USD cap at a dispatch
+        boundary — a deterministic point — journal a proposal and block for
+        one reply. Approval continues; anything else stops dispatching, so
+        remaining subquestions resolve as declined and the writer wraps up
+        what was gathered. Fires at most once per run."""
+        threshold = self.config.cost_gate_threshold
+        if threshold is None or self._cost_gate_passed:
+            return False
+        sid = self.config.session_id
+        spent = self.ledger.spent_usd(sid)
+        cap = self.config.budgets.max_usd
+        if spent < threshold * cap:
+            return False
+        self._cost_gate_passed = True
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.GATE_PROPOSED,
+            {
+                "gate": "cost",
+                "spent_usd": round(spent, 8),
+                "cap_usd": cap,
+                "threshold": threshold,
+            },
+        )
+        text = await self._await_gate_message("cost")
+        if text.strip().lower() in _APPROVALS:
+            return False
+        self.gate_reason = "declined at cost gate"
+        return True
 
     # -- subagents -----------------------------------------------------------
 
@@ -632,7 +671,7 @@ class OrchestratorLoop:
         wave_index = 0
         partial = False
         while queue:
-            if self._gate():
+            if self._gate() or await self._cost_gate():
                 partial = True  # leftover sqs stay open; run() closes them as blocked
                 break
             n = min(self.config.budgets.parallel_subagents, len(queue))

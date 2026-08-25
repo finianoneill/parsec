@@ -113,13 +113,18 @@ async def run_fork(
     # happened before the fork point (brief-gate messages via their own
     # channel). A new steer message lands AT the fork.
     scripted: dict[int, list[str]] = {}
-    scripted_gate: dict[int, list[str]] = {}
+    scripted_gates: dict[tuple[str, int], list[str]] = {}
     for ev in event_log.read(original_session_id):
         if ev.event_type == EventType.STEERING_INJECTED and ev.payload["turn_index"] < at_call:
-            target = scripted_gate if ev.payload.get("gate") == "brief" else scripted
-            target.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
+            gate = ev.payload.get("gate")
+            if gate:
+                scripted_gates.setdefault((gate, ev.payload["turn_index"]), []).append(
+                    ev.payload["text"]
+                )
+            else:
+                scripted.setdefault(ev.payload["turn_index"], []).append(ev.payload["text"])
     if steer:
         scripted.setdefault(at_call, []).append(steer)
     loop.scripted_steering = scripted
-    loop.scripted_brief_gate = scripted_gate
+    loop.scripted_gates = scripted_gates
     return await loop.run()

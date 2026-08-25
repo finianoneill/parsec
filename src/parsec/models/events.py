@@ -30,6 +30,7 @@ class EventType(StrEnum):
     NOTEBOOK_APPENDED = "notebook_appended"
     CONTEXT_COMPACTED = "context_compacted"
     STEERING_INJECTED = "steering_injected"
+    GATE_PROPOSED = "gate_proposed"      # Phase 5: a gate is waiting for a steering reply
     GAP_FILL_STARTED = "gap_fill_started"
     JUDGE_SCORED = "judge_scored"
     CREDENCE_COMPUTED = "credence_computed"
