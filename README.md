@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="402 tests" src="https://img.shields.io/badge/tests-402%20passing-16a34a?style=flat-square">
+  <img alt="415 tests" src="https://img.shields.io/badge/tests-415%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -117,6 +117,7 @@ parsec ❯ /sessions           # list recorded sessions
 parsec ❯ /show <id>          # one session's spend and coverage
 parsec ❯ /replay <id>        # re-run against the frozen corpus, verify byte-identical
 parsec ❯ /verify <id>        # mechanical verification + credence report
+parsec ❯ /diff <a> <b>       # what changed between two runs of one question
 parsec ❯ /notebook <id>      # the session's append-only notebook
 parsec ❯ how tall is Olympus Mons        # bare text runs a live query (needs a key)
 parsec ❯ /edit               # compose a long/multi-line query in $EDITOR
@@ -217,6 +218,7 @@ Two decision points can pause a live run for your input, both built on the same 
 | `parsec ask "…"` | Run a research query. In a terminal, a live activity view narrates the run — thinking, searches, fetches with typed outcomes, subagent dispatch/joins, retries with their backoff, phase changes, spend — straight from the event stream (`--live` forces it, `--json` disables). Ctrl-C halts gracefully at the next gate (journaled `USER_ABORT`, session finished as `halted_user`; Ctrl-C again force-quits). (`--parallel N` for concurrent subagents (≤5), `--brief-gate` to approve/edit the research brief before dispatch, `--cost-gate 0.5` to pause once for approval when spend crosses that fraction of the USD cap, `--max-usd`/`--max-tokens`/`--max-turns`/`--max-gap-rounds`/`--max-coverage-gap-rounds` for budgets, `--retry-attempts` for the harness's journaled model-call retries, `--request-timeout` to bound a wedged model call (default: the SDK's 10 minutes), `--cache-mode record\|replay\|live-prefer-cache`, `--cache-strategy full\|system` for prompt-cache breakpoint placement) |
 | `parsec replay <session>` | Re-execute against the frozen corpus; verifies projections and answer bytes are identical |
 | `parsec verify <session>` | Mechanical verification (structural, temporal ordering, grounded-NLI advisories) + credence + omission report over the stored evidence graph |
+| `parsec diff <a> <b>` | Claim-level diff of two sessions of the same question: held / strengthened / weakened / superseded / retracted / new, each change with the premise-level evidence delta behind it, plus source deltas (same URL, changed content). Exits 3 on material change |
 | `parsec fork <session> --at-call N` | Rewind to model-call N and branch live (`--steer "…"` to redirect the branch) |
 | `parsec judge <session>` | Advisory judge pass (different model family) over `deduces`/`induces` derivations |
 | `parsec eval make-case <session>` | Snapshot a recorded session into a frozen eval case |
@@ -302,7 +304,7 @@ All seven milestones of the original architecture brief are complete — **M0–
 ## Development
 
 ```sh
-uv run pytest                                        # 402 tests, no network/keys
+uv run pytest                                        # 415 tests, no network/keys
 uv run pytest -m live tests/integration/test_live_smoke.py   # one real query + replay (needs ANTHROPIC_API_KEY)
 ```
 
@@ -324,6 +326,14 @@ Changes should keep the whole suite green and — for anything touching the loop
 A source-level review of AWS's [Strands Agents SDK](https://github.com/strands-agents/sdk-python) produced a borrow list of production mechanisms, adopted parsec-style — ideas, never the framework (T7) — in six phases, each shipped with the old recordings still replaying byte-identically:
 
 - [x] **M13 — Harness hardening (the Strands review)**: **graceful abort** — Ctrl-C halts at the next gate, journals `USER_ABORT`, and finishes the session row as `halted_user` (a second Ctrl-C force-quits); rows can no longer rot as `running`. **Durable per-stream costs** — ledger debits carry their event stream, so per-subquestion spend survives the process (`sessions show` renders it) and usd rows keep their input/output/cache breakdown. **Version stamping** — sessions record the parsec that produced them; `replay`/`fork` warn on mismatch. **Harness-owned retries** — a model-error taxonomy (throttled / overloaded / context_overflow / transient / fatal) with bounded jitter-free backoff journaled per attempt as `LLM_RETRY` events (the SDK's invisible retries drop to 0); the replay adapter serves recorded failed attempts before a call's final outcome, so a throttled-and-recovered run replays its exact retry sequence — and a transient 429 on the writer no longer kills a finished run. **Token-aware, reactive compaction** — the ladder triggers on an estimate that counts system + tool schemas and is floored by the previous response's recorded usage; a real API overflow escalates one rung per occurrence and retries the turn; the writer degrades by clipping evidence text (IDs and provenance never dropped) instead of dying. **One structured-output contract** — pydantic-validated per-field repair for the brief (one journaled repair round with pinned `tool_choice` before any fallback), `submit_report` (correctives name the offending field or premise), and both judges (validated prose-JSON, one corrective retry). **Full-prefix prompt caching** — `--cache-strategy full` (the new-run default) adds breakpoints on the tool-schema array and a rolling marker on the final message block; placement is recorded per session, so pre-change recordings keep their wire shape. **The gate primitive** — the brief gate's replay-safe pattern generalized to any approval point; first new consumer is `--cost-gate`, a mid-run spend checkpoint that wraps up gracefully when declined. *Exit tests green throughout: every phase verified against all prior-era recordings replaying byte-identically.*
+
+## Diachronic research (M14, in progress)
+
+A recorded session is one frozen observation of a moving world, and almost no research question worth a deep run is static. M14 makes claims durable across *time*, exploiting two properties the substrate already had: node IDs are content-derived (the same premise recorded twice hashes to the same ID across sessions), and the archive keeps every byte version of every URL. Phase 1 is shipped:
+
+- [x] **M14.1 — `parsec diff <a> <b>`**: mechanical claim-level diff of two recorded sessions of the same question — no model, no network: a pure function of the two stored evidence graphs and each session's recorded config (T4), read-only over both. Claim identity is a ladder (T9: exact tiers are the floor, the fuzzy tier is advisory): content-derived node ID (same sentence *and* same evidence — cross-session identity by construction), then normalized text (same sentence, evidence may have moved), then hashed-n-gram cosine for a lightly reworded claim — always labeled `fuzzy` with its similarity, never silently treated as exact. Matched claims classify as held / strengthened / weakened / **superseded** (its support in the later run rests on a premise newer evidence replaced — the M10 supersession machinery finally fed genuinely time-separated data); unmatched remainders as retracted / new. Every change carries drivers naming the premise-level evidence delta that caused it (premises gained, lost, moved tier, or superseded), and document deltas ride along free off the content-addressed archive: same URL serving different bytes reads as *changed*, by hash. Credence deltas are recomputed per side under each session's own recorded config, with a loud flag when credence-relevant config differs (so a delta is never silently config skew). Exits 3 when material claim-level changes exist, so it scripts like `eval compare`. *Exit tests green: the same recorded demo run diffs against itself as all-held with exit 0; the same claim re-sourced from a blog instead of census.gov reads weakened with the responsible premise named tier-to-tier; newer contradicting evidence on a volatile premise reads superseded at claim level; a reworded claim matches fuzzy with its similarity reported; diffing writes nothing.*
+- [ ] **M14.2 — `parsec refresh <session>`**: re-run a persisted query as a new session seeded by the prior brief and coverage ledger, mutability classes governing what gets re-researched; ends by emitting the diff.
+- [ ] **M14.3 — `parsec watch`**: scheduled refresh that reports only material diffs — and mechanically labels the prior run's claims (held/overturned) as `(credence, outcome)` pairs, turning `parsec calibrate` into a flywheel: time is the oracle research otherwise lacks (T2).
 
 ## License
 

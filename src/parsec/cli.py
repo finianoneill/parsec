@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import select
@@ -15,6 +16,7 @@ import threading
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -56,6 +58,19 @@ EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_PARTIAL = 3
 EXIT_ERROR = 4
+
+
+def _positive_float(value: str) -> float:
+    """argparse type for thresholds that must be a finite value > 0 — the
+    diff status comparisons use >=, so 0/negative/nan would misclassify
+    every unchanged claim rather than error somewhere visible."""
+    try:
+        x = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not math.isfinite(x) or x <= 0:
+        raise argparse.ArgumentTypeError(f"must be a finite value > 0, got {value}")
+    return x
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -193,6 +208,21 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("session_id")
     verify.add_argument("--data-dir", type=Path, default=Path("data"))
     verify.add_argument("--json", action="store_true", dest="as_json")
+
+    diff = sub.add_parser(
+        "diff",
+        help="Claim-level diff of two recorded sessions of the same question (M14): "
+        "held/strengthened/weakened/superseded/retracted/new, with the premise-level "
+        "evidence delta behind each change. Exits 3 when material changes exist.",
+    )
+    diff.add_argument("session_a", help="The earlier session")
+    diff.add_argument("session_b", help="The later session")
+    diff.add_argument(
+        "--epsilon", type=_positive_float, default=0.05,
+        help="Credence movement below this reads as held (default 0.05)",
+    )
+    diff.add_argument("--data-dir", type=Path, default=Path("data"))
+    diff.add_argument("--json", action="store_true", dest="as_json")
 
     sessions = sub.add_parser("sessions", help="Inspect sessions")
     sessions_sub = sessions.add_subparsers(dest="sessions_command", required=True)
@@ -707,6 +737,67 @@ def cmd_verify(args) -> int:
     return EXIT_OK if report.ok else EXIT_PARTIAL
 
 
+def cmd_diff(args) -> int:
+    from parsec.verify.diff import diff_sessions
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    store = SessionStore(conn, clock)
+    for sid in (args.session_a, args.session_b):
+        if store.get(sid) is None:
+            console.print(f"[red]unknown session {sid}[/red]")
+            return EXIT_USAGE
+    report = diff_sessions(conn, args.session_a, args.session_b, epsilon=args.epsilon)
+    if args.as_json:
+        print(json.dumps(report.to_payload()))
+        return EXIT_OK if report.unchanged else EXIT_PARTIAL
+
+    # Session ids, queries, claim/premise text, and URLs are session-controlled
+    # — escape them so brackets can't restyle or break the render (same reason
+    # display_answer returns Text).
+    console.print(f"[bold]{escape(report.session_a)}[/bold] → [bold]{escape(report.session_b)}[/bold]")
+    if report.query_a != report.query_b:
+        console.print(
+            f"[yellow]queries differ — comparing anyway[/yellow]\n"
+            f"[dim]A: {escape(report.query_a)}\nB: {escape(report.query_b)}[/dim]"
+        )
+    if report.config_skew:
+        console.print(
+            "[yellow]credence-relevant config differs between the sessions — part of "
+            "any credence delta may be config, not evidence[/yellow]"
+        )
+    counts = report.counts
+    console.print(
+        "[dim]"
+        + " · ".join(f"{counts[s]} {s}" for s in ("held", "strengthened", "weakened", "superseded", "new", "retracted"))
+        + "[/dim]"
+    )
+    changed = [c for c in report.claims if c.status != "held"]
+    if changed:
+        table = Table("status", "claim", "confidence", "why")
+        for c in changed:
+            color = {
+                "superseded": "red", "weakened": "red", "retracted": "yellow",
+                "strengthened": "green", "new": "green",
+            }[c.status]
+            match_note = f" [dim](fuzzy {c.similarity:.2f})[/dim]" if c.match == "fuzzy" else ""
+            table.add_row(
+                f"[{color}]{c.status}[/{color}]",
+                escape(c.text[:70]) + match_note,
+                escape(f"{c.provenance_a or '—'} → {c.provenance_b or '—'}"),
+                escape("; ".join(c.drivers[:3])),
+            )
+        console.print(table)
+    else:
+        console.print("[green]every claim held — no material changes[/green]")
+    if report.documents:
+        doc_table = Table("source", "change")
+        for d in report.documents:
+            doc_table.add_row(escape(d.url), d.status + (" (content differs at the same URL)" if d.status == "changed" else ""))
+        console.print(doc_table)
+    return EXIT_OK if report.unchanged else EXIT_PARTIAL
+
+
 def cmd_sessions(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -1072,6 +1163,7 @@ def main(argv: list[str] | None = None) -> int:
         "demo": cmd_demo,
         "replay": cmd_replay,
         "verify": cmd_verify,
+        "diff": cmd_diff,
         "fork": cmd_fork,
         "judge": cmd_judge,
         "eval": cmd_eval,
