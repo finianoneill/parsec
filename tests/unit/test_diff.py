@@ -247,6 +247,28 @@ def test_cli_diff_json_and_exit_codes(tmp_path, capsys):
     assert cli.main(["diff", "s-a", "s-nope", "--data-dir", str(tmp_path)]) == cli.EXIT_USAGE
 
 
+def test_cli_diff_human_render_survives_markup_in_session_text(tmp_path, capsys):
+    """Claim text, queries, and URLs are session-controlled; a stray closing
+    tag like [/red] would raise MarkupError from Rich if rendered unescaped."""
+    db = open_db(tmp_path / "parsec.db")
+    store = SessionStore(db, FrozenClock())
+    store.create(make_config(tmp_path, session_id="s-a", query="what about [/red] rates?"))
+    store.create(make_config(tmp_path, session_id="s-b"))
+    dag = DagStore(db, EventLog(db, FrozenClock()))
+    s_a = _span(dag, "s-a", "a", "https://a.example/[/red]page", "The rate [/red] rose.")
+    p_a = _premise(dag, "s-a", "The rate [/red] rose.", [s_a])
+    _claim(dag, "s-a", "The [/red] rate rose sharply.", [p_a])
+    s_b = _span(dag, "s-b", "b", "https://b.example/other", "Rainfall doubled last decade.")
+    p_b = _premise(dag, "s-b", "Rainfall doubled last decade.", [s_b])
+    _claim(dag, "s-b", "Annual rainfall doubled over the last decade.", [p_b])
+    db.close()
+
+    code = cli.main(["diff", "s-a", "s-b", "--data-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_PARTIAL
+    assert "retracted" in out and "new" in out
+
+
 @pytest.mark.parametrize("bad", ["0", "-0.01", "nan", "inf", "x"])
 def test_cli_diff_rejects_degenerate_epsilon(tmp_path, capsys, bad):
     """The status comparisons use >=, so epsilon <= 0 (or nan/inf) would

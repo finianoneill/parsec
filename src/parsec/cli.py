@@ -16,6 +16,7 @@ import threading
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -751,11 +752,14 @@ def cmd_diff(args) -> int:
         print(json.dumps(report.to_payload()))
         return EXIT_OK if report.unchanged else EXIT_PARTIAL
 
-    console.print(f"[bold]{report.session_a}[/bold] → [bold]{report.session_b}[/bold]")
+    # Session ids, queries, claim/premise text, and URLs are session-controlled
+    # — escape them so brackets can't restyle or break the render (same reason
+    # display_answer returns Text).
+    console.print(f"[bold]{escape(report.session_a)}[/bold] → [bold]{escape(report.session_b)}[/bold]")
     if report.query_a != report.query_b:
         console.print(
             f"[yellow]queries differ — comparing anyway[/yellow]\n"
-            f"[dim]A: {report.query_a}\nB: {report.query_b}[/dim]"
+            f"[dim]A: {escape(report.query_a)}\nB: {escape(report.query_b)}[/dim]"
         )
     if report.config_skew:
         console.print(
@@ -779,9 +783,9 @@ def cmd_diff(args) -> int:
             match_note = f" [dim](fuzzy {c.similarity:.2f})[/dim]" if c.match == "fuzzy" else ""
             table.add_row(
                 f"[{color}]{c.status}[/{color}]",
-                c.text[:70] + match_note,
-                f"{c.provenance_a or '—'} → {c.provenance_b or '—'}",
-                "; ".join(c.drivers[:3]),
+                escape(c.text[:70]) + match_note,
+                escape(f"{c.provenance_a or '—'} → {c.provenance_b or '—'}"),
+                escape("; ".join(c.drivers[:3])),
             )
         console.print(table)
     else:
@@ -789,7 +793,7 @@ def cmd_diff(args) -> int:
     if report.documents:
         doc_table = Table("source", "change")
         for d in report.documents:
-            doc_table.add_row(d.url, d.status + (" (content differs at the same URL)" if d.status == "changed" else ""))
+            doc_table.add_row(escape(d.url), d.status + (" (content differs at the same URL)" if d.status == "changed" else ""))
         console.print(doc_table)
     return EXIT_OK if report.unchanged else EXIT_PARTIAL
 
