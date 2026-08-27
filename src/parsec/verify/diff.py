@@ -4,8 +4,12 @@ Two recorded sessions of the same question, taken at different times, are
 two frozen observations of a moving world. This module compares them
 mechanically — no model, no network: the diff is a pure function of the
 two stored evidence graphs and each session's recorded config, so the
-same pair of sessions always yields the same report (T4). Nothing is
-written; credence is recomputed per side with persist=False.
+same pair of sessions always yields the same report (T4). No session
+state is written; credence is recomputed per side with persist=False.
+(One deliberate exception: the default embedder is the shared
+content-addressed embedding memo, so the `embeddings` table may gain
+rows — a pure-function cache that can't affect any outcome, and the
+same behavior `parsec verify` already has.)
 
 Claim identity is a ladder (T9: the exact tiers are the floor, the fuzzy
 tier is advisory and always labeled with its similarity):
@@ -350,7 +354,9 @@ def diff_sessions(
     embed: Embed | None = None,
 ) -> DiffReport:
     """Mechanical claim-level diff of two recorded sessions (A = earlier,
-    B = later). Read-only: recomputes credence per side without persisting."""
+    B = later). Writes no session state: credence is recomputed per side
+    without persisting (the default embedder's pure-function memo table is
+    the one sanctioned write — see the module docstring)."""
     if embed is None:
         from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
 

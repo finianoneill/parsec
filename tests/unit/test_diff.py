@@ -204,12 +204,26 @@ def test_config_skew_is_flagged(db, event_log, clock, tmp_path):
     assert not diff_sessions(db, "s-a", "s-a").config_skew
 
 
-def test_diff_is_read_only(two_sessions, db):
+def test_diff_writes_no_session_state(two_sessions, db):
+    """Diffing writes nothing except the shared pure-function embedding memo
+    (the same sanctioned write `parsec verify` performs): row counts of every
+    other table are unchanged, and no credence is persisted onto nodes."""
     dag = two_sessions
     s = _span(dag, "s-a", "a", "https://a.example/x", "A fact.")
     p = _premise(dag, "s-a", "A fact.", [s])
     _claim(dag, "s-a", "The fact holds.", [p])
+
+    tables = [
+        r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    before = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
     diff_sessions(db, "s-a", "s-b")
+    after = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+
+    grew = {t for t in tables if after[t] != before[t]}
+    assert grew <= {"embeddings"}, f"diff wrote to session state: {grew - {'embeddings'}}"
     stored = db.execute("SELECT credence FROM nodes WHERE session_id='s-a'").fetchall()
     assert all(row["credence"] is None for row in stored)
 
