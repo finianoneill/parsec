@@ -194,6 +194,21 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--data-dir", type=Path, default=Path("data"))
     verify.add_argument("--json", action="store_true", dest="as_json")
 
+    diff = sub.add_parser(
+        "diff",
+        help="Claim-level diff of two recorded sessions of the same question (M14): "
+        "held/strengthened/weakened/superseded/retracted/new, with the premise-level "
+        "evidence delta behind each change. Exits 3 when material changes exist.",
+    )
+    diff.add_argument("session_a", help="The earlier session")
+    diff.add_argument("session_b", help="The later session")
+    diff.add_argument(
+        "--epsilon", type=float, default=0.05,
+        help="Credence movement below this reads as held (default 0.05)",
+    )
+    diff.add_argument("--data-dir", type=Path, default=Path("data"))
+    diff.add_argument("--json", action="store_true", dest="as_json")
+
     sessions = sub.add_parser("sessions", help="Inspect sessions")
     sessions_sub = sessions.add_subparsers(dest="sessions_command", required=True)
     s_list = sessions_sub.add_parser("list")
@@ -707,6 +722,64 @@ def cmd_verify(args) -> int:
     return EXIT_OK if report.ok else EXIT_PARTIAL
 
 
+def cmd_diff(args) -> int:
+    from parsec.verify.diff import diff_sessions
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    store = SessionStore(conn, clock)
+    for sid in (args.session_a, args.session_b):
+        if store.get(sid) is None:
+            console.print(f"[red]unknown session {sid}[/red]")
+            return EXIT_USAGE
+    report = diff_sessions(conn, args.session_a, args.session_b, epsilon=args.epsilon)
+    if args.as_json:
+        print(json.dumps(report.to_payload()))
+        return EXIT_OK if report.unchanged else EXIT_PARTIAL
+
+    console.print(f"[bold]{report.session_a}[/bold] → [bold]{report.session_b}[/bold]")
+    if report.query_a != report.query_b:
+        console.print(
+            f"[yellow]queries differ — comparing anyway[/yellow]\n"
+            f"[dim]A: {report.query_a}\nB: {report.query_b}[/dim]"
+        )
+    if report.config_skew:
+        console.print(
+            "[yellow]credence-relevant config differs between the sessions — part of "
+            "any credence delta may be config, not evidence[/yellow]"
+        )
+    counts = report.counts
+    console.print(
+        "[dim]"
+        + " · ".join(f"{counts[s]} {s}" for s in ("held", "strengthened", "weakened", "superseded", "new", "retracted"))
+        + "[/dim]"
+    )
+    changed = [c for c in report.claims if c.status != "held"]
+    if changed:
+        table = Table("status", "claim", "confidence", "why")
+        for c in changed:
+            color = {
+                "superseded": "red", "weakened": "red", "retracted": "yellow",
+                "strengthened": "green", "new": "green",
+            }[c.status]
+            match_note = f" [dim](fuzzy {c.similarity:.2f})[/dim]" if c.match == "fuzzy" else ""
+            table.add_row(
+                f"[{color}]{c.status}[/{color}]",
+                c.text[:70] + match_note,
+                f"{c.provenance_a or '—'} → {c.provenance_b or '—'}",
+                "; ".join(c.drivers[:3]),
+            )
+        console.print(table)
+    else:
+        console.print("[green]every claim held — no material changes[/green]")
+    if report.documents:
+        doc_table = Table("source", "change")
+        for d in report.documents:
+            doc_table.add_row(d.url, d.status + (" (content differs at the same URL)" if d.status == "changed" else ""))
+        console.print(doc_table)
+    return EXIT_OK if report.unchanged else EXIT_PARTIAL
+
+
 def cmd_sessions(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -1072,6 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
         "demo": cmd_demo,
         "replay": cmd_replay,
         "verify": cmd_verify,
+        "diff": cmd_diff,
         "fork": cmd_fork,
         "judge": cmd_judge,
         "eval": cmd_eval,

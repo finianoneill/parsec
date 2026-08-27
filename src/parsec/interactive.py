@@ -27,6 +27,7 @@ HELP = """\
   /show <id>          show one session
   /replay <id>        re-run a recorded session against its frozen corpus
   /verify <id>        verification report for a session
+  /diff <a> <b>       claim-level diff of two sessions of the same question
   /notebook <id>      print a session's notebook
   /help               this help
   /exit               leave (also ctrl-d)"""
@@ -167,6 +168,8 @@ def _slash_to_argv(cmd: str, rest: list[str], data_dir: Path) -> list[str] | Non
             return ["replay", rest[0], *d]
         case "verify" if rest:
             return ["verify", rest[0], *d]
+        case "diff" if len(rest) >= 2:
+            return ["diff", rest[0], rest[1], *d]
         case "notebook" if rest:
             return ["notebook", rest[0], *d]
         case _:
