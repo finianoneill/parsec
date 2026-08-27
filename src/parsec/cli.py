@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import select
@@ -56,6 +57,19 @@ EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_PARTIAL = 3
 EXIT_ERROR = 4
+
+
+def _positive_float(value: str) -> float:
+    """argparse type for thresholds that must be a finite value > 0 — the
+    diff status comparisons use >=, so 0/negative/nan would misclassify
+    every unchanged claim rather than error somewhere visible."""
+    try:
+        x = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not math.isfinite(x) or x <= 0:
+        raise argparse.ArgumentTypeError(f"must be a finite value > 0, got {value}")
+    return x
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("session_a", help="The earlier session")
     diff.add_argument("session_b", help="The later session")
     diff.add_argument(
-        "--epsilon", type=float, default=0.05,
+        "--epsilon", type=_positive_float, default=0.05,
         help="Credence movement below this reads as held (default 0.05)",
     )
     diff.add_argument("--data-dir", type=Path, default=Path("data"))

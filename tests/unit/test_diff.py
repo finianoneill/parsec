@@ -245,3 +245,13 @@ def test_cli_diff_json_and_exit_codes(tmp_path, capsys):
     assert code == cli.EXIT_OK and payload["unchanged"]
 
     assert cli.main(["diff", "s-a", "s-nope", "--data-dir", str(tmp_path)]) == cli.EXIT_USAGE
+
+
+@pytest.mark.parametrize("bad", ["0", "-0.01", "nan", "inf", "x"])
+def test_cli_diff_rejects_degenerate_epsilon(tmp_path, capsys, bad):
+    """The status comparisons use >=, so epsilon <= 0 (or nan/inf) would
+    misclassify every unchanged claim — reject at parse time instead."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["diff", "s-a", "s-b", "--data-dir", str(tmp_path), "--epsilon", bad])
+    assert exc.value.code == 2  # argparse usage error
+    assert "epsilon" in capsys.readouterr().err
