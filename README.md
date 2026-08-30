@@ -11,7 +11,7 @@ Claims triangulated across independent sources · confidence computed, never ass
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-4338ca?style=flat-square">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0e7490?style=flat-square">
-  <img alt="415 tests" src="https://img.shields.io/badge/tests-415%20passing-16a34a?style=flat-square">
+  <img alt="426 tests" src="https://img.shields.io/badge/tests-426%20passing-16a34a?style=flat-square">
   <img alt="No agent framework" src="https://img.shields.io/badge/agent%20framework-none-64748b?style=flat-square">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-64748b?style=flat-square">
 </p>
@@ -118,6 +118,7 @@ parsec ❯ /show <id>          # one session's spend and coverage
 parsec ❯ /replay <id>        # re-run against the frozen corpus, verify byte-identical
 parsec ❯ /verify <id>        # mechanical verification + credence report
 parsec ❯ /diff <a> <b>       # what changed between two runs of one question
+parsec ❯ /refresh <id>       # re-run a session's question now, diff against it
 parsec ❯ /notebook <id>      # the session's append-only notebook
 parsec ❯ how tall is Olympus Mons        # bare text runs a live query (needs a key)
 parsec ❯ /edit               # compose a long/multi-line query in $EDITOR
@@ -219,6 +220,7 @@ Two decision points can pause a live run for your input, both built on the same 
 | `parsec replay <session>` | Re-execute against the frozen corpus; verifies projections and answer bytes are identical |
 | `parsec verify <session>` | Mechanical verification (structural, temporal ordering, grounded-NLI advisories) + credence + omission report over the stored evidence graph |
 | `parsec diff <a> <b>` | Claim-level diff of two sessions of the same question: held / strengthened / weakened / superseded / retracted / new, each change with the premise-level evidence delta behind it, plus source deltas (same URL, changed content). Exits 3 on material change |
+| `parsec refresh <session>` | Re-run a recorded session's query as a new session seeded by its brief and coverage ledger: stable-evidence subquestions carry forward (identical node IDs, no dispatch), volatile/slow or unresolved ones re-research live, then the claim-level diff against the original is emitted. `--all` re-researches everything. Exits 3 on material change |
 | `parsec fork <session> --at-call N` | Rewind to model-call N and branch live (`--steer "…"` to redirect the branch) |
 | `parsec judge <session>` | Advisory judge pass (different model family) over `deduces`/`induces` derivations |
 | `parsec eval make-case <session>` | Snapshot a recorded session into a frozen eval case |
@@ -304,7 +306,7 @@ All seven milestones of the original architecture brief are complete — **M0–
 ## Development
 
 ```sh
-uv run pytest                                        # 415 tests, no network/keys
+uv run pytest                                        # 426 tests, no network/keys
 uv run pytest -m live tests/integration/test_live_smoke.py   # one real query + replay (needs ANTHROPIC_API_KEY)
 ```
 
@@ -329,10 +331,10 @@ A source-level review of AWS's [Strands Agents SDK](https://github.com/strands-a
 
 ## Diachronic research (M14, in progress)
 
-A recorded session is one frozen observation of a moving world, and almost no research question worth a deep run is static. M14 makes claims durable across *time*, exploiting two properties the substrate already had: node IDs are content-derived (the same premise recorded twice hashes to the same ID across sessions), and the archive keeps every byte version of every URL. Phase 1 is shipped:
+A recorded session is one frozen observation of a moving world, and almost no research question worth a deep run is static. M14 makes claims durable across *time*, exploiting two properties the substrate already had: node IDs are content-derived (the same premise recorded twice hashes to the same ID across sessions), and the archive keeps every byte version of every URL. Phases 1 and 2 are shipped:
 
 - [x] **M14.1 — `parsec diff <a> <b>`**: mechanical claim-level diff of two recorded sessions of the same question — no model, no network: a pure function of the two stored evidence graphs and each session's recorded config (T4), read-only over both. Claim identity is a ladder (T9: exact tiers are the floor, the fuzzy tier is advisory): content-derived node ID (same sentence *and* same evidence — cross-session identity by construction), then normalized text (same sentence, evidence may have moved), then hashed-n-gram cosine for a lightly reworded claim — always labeled `fuzzy` with its similarity, never silently treated as exact. Matched claims classify as held / strengthened / weakened / **superseded** (its support in the later run rests on a premise newer evidence replaced — the M10 supersession machinery finally fed genuinely time-separated data); unmatched remainders as retracted / new. Every change carries drivers naming the premise-level evidence delta that caused it (premises gained, lost, moved tier, or superseded), and document deltas ride along free off the content-addressed archive: same URL serving different bytes reads as *changed*, by hash. Credence deltas are recomputed per side under each session's own recorded config, with a loud flag when credence-relevant config differs (so a delta is never silently config skew). Exits 3 when material claim-level changes exist, so it scripts like `eval compare`. *Exit tests green: the same recorded demo run diffs against itself as all-held with exit 0; the same claim re-sourced from a blog instead of census.gov reads weakened with the responsible premise named tier-to-tier; newer contradicting evidence on a volatile premise reads superseded at claim level; a reworded claim matches fuzzy with its similarity reported; diffing writes nothing.*
-- [ ] **M14.2 — `parsec refresh <session>`**: re-run a persisted query as a new session seeded by the prior brief and coverage ledger, mutability classes governing what gets re-researched; ends by emitting the diff.
+- [x] **M14.2 — `parsec refresh <session>`**: re-run a persisted query as a new session seeded by the prior brief and coverage ledger — no re-planning: the parent's recorded scope, effort, and subquestions are reused verbatim (zero decomposition calls), and mutability classes govern what gets re-researched. An answered subquestion whose evidence is all `stable` **carries forward**: its premises, findings, and source spans are re-recorded into the new session, where content-derived node IDs preserve cross-session identity — the closing diff matches them by id. Anything volatile or slow (the world may have moved), anything left partial/blocked/dropped, or everything under `--all`, re-researches **live**: the refresh fetches in record mode, so cached bytes never stand in for the web it exists to re-observe. The parent's replay survives that on purpose — replay and fork now *pin* fetches to the doc hashes the session's own events recorded, instead of the shared per-URL cache row the refresh advances. The refreshed session is itself a first-class recording: `refresh_of`/`--all` freeze into its config, the seed is a pure function of the immutable parent, and it replays byte-identically (T4). The run ends by emitting `parsec diff parent refreshed` — exit 3 on material change, so it scripts. Gates are stripped (the brief was approved in the parent; refresh runs headless — what M14.3's scheduler needs). *Exit tests green: a stable subquestion carries forward with identical node IDs and no dispatch while a volatile one re-researches against changed bytes, the run's only orchestrator model call is the writer, and both the refreshed session AND the parent still replay byte-identically after the re-fetch; `--all` provably re-dispatches everything.*
 - [ ] **M14.3 — `parsec watch`**: scheduled refresh that reports only material diffs — and mechanically labels the prior run's claims (held/overturned) as `(credence, outcome)` pairs, turning `parsec calibrate` into a flywheel: time is the oracle research otherwise lacks (T2).
 
 ## License

@@ -109,8 +109,17 @@ async def run_replay(
     scripted: dict[int, list[str]] = {}
     scripted_gates: dict[tuple[str, int], list[str]] = {}
     joins: dict[int, list[tuple[int, str]]] = {}
+    pinned: dict[str, str] = {}
     for ev in event_log.read(original_session_id):
-        if ev.event_type == EventType.STEERING_INJECTED:
+        if ev.event_type == EventType.FETCH_PERFORMED:
+            # Pin each URL to the byte version THIS session recorded: the
+            # shared cache_index row advances whenever a later session
+            # re-fetches the URL (`parsec refresh` does, on purpose), and an
+            # unpinned replay would read bytes the recording never saw (T4).
+            key, doc_hash = ev.payload.get("cache_key"), ev.payload.get("doc_hash")
+            if key and doc_hash:
+                pinned.setdefault(key, doc_hash)
+        elif ev.event_type == EventType.STEERING_INJECTED:
             # Gate replies (brief approvals/edits, cost-gate answers) are
             # consumed by their gate, not drained into model context — keep
             # the channels separate (Phase 5 generalized the M12 pattern).
@@ -130,6 +139,15 @@ async def run_replay(
     loop.scripted_join_order = [
         [sq_id for _, sq_id in sorted(joins[wave])] for wave in sorted(joins)
     ]
+    fetcher.pinned_docs = pinned
+    if replay_config.refresh_of:
+        # A refreshed session planned from a seed, not a decomposer call —
+        # re-derive the identical seed from the same immutable parent (M14.2).
+        from parsec.refresh import derive_seed
+
+        loop.refresh_seed = derive_seed(
+            conn, replay_config.refresh_of, replay_config.refresh_all
+        )
     result = await loop.run()
 
     proj_orig = event_log.projection(original_session_id)

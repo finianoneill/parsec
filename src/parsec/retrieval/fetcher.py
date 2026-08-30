@@ -84,33 +84,50 @@ class Fetcher:
         self.robots = robots
         self.user_agent = user_agent
         self._last_fetch_by_domain: dict[str, float] = {}
+        # Replay/fork pinning (T4, M14.2): cache_key -> doc_hash the session
+        # being re-executed recorded in its FETCH_PERFORMED events. The shared
+        # cache_index row for a URL advances every time a LATER session
+        # re-fetches it (`parsec refresh` does so on purpose), so a replay
+        # that consulted the index would read bytes the recording never saw.
+        # Pinned keys resolve to the recorded byte version straight off the
+        # content-addressed documents table; missing keys fall through to the
+        # index/live path (fork's diverged tail fetches new URLs live).
+        self.pinned_docs: dict[str, str] = {}
 
     async def fetch(self, url: str) -> FetchedDoc:
         canonical_url = canonicalize_url(url)
         cache_key = ids.cache_key(canonical_url)
 
         if self.mode in (CacheMode.REPLAY, CacheMode.LIVE_PREFER_CACHE):
+            pinned_hash = self.pinned_docs.get(cache_key)
+            if pinned_hash is not None:
+                pinned = self.documents.get_document(pinned_hash)
+                if pinned is not None:
+                    return self._doc_from_row(pinned, pinned_hash, canonical_url)
             cached = self.documents.cache_lookup(cache_key)
             if cached is not None:
-                import json
-
-                meta = json.loads(cached["meta_json"])
-                return FetchedDoc(
-                    doc_hash=cached["doc_hash"],
-                    canonical_url=canonical_url,
-                    status_code=cached["status_code"],
-                    content_type=cached["content_type"],
-                    text=self.blobs.get_text(cached["text_blob"]),
-                    title=meta.get("title"),
-                    from_cache=True,
-                    outcome=meta.get("outcome", "ok"),
-                    license_url=meta.get("license_url"),
-                    note=meta.get("note"),
-                )
+                return self._doc_from_row(cached, cached["doc_hash"], canonical_url)
             if self.mode == CacheMode.REPLAY:
                 raise CacheMiss(canonical_url)
 
         return await self._live_fetch(canonical_url, cache_key)
+
+    def _doc_from_row(self, row, doc_hash: str, canonical_url: str) -> FetchedDoc:
+        import json
+
+        meta = json.loads(row["meta_json"])
+        return FetchedDoc(
+            doc_hash=doc_hash,
+            canonical_url=canonical_url,
+            status_code=row["status_code"],
+            content_type=row["content_type"],
+            text=self.blobs.get_text(row["text_blob"]),
+            title=meta.get("title"),
+            from_cache=True,
+            outcome=meta.get("outcome", "ok"),
+            license_url=meta.get("license_url"),
+            note=meta.get("note"),
+        )
 
     async def _live_fetch(self, canonical_url: str, cache_key: str) -> FetchedDoc:
         from parsec.retrieval.extract import EXTRACTOR_VERSION, extract_text

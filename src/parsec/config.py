@@ -182,6 +182,13 @@ class RunConfig(BaseModel):
     # LLM_RETRY events, so comparing the knob too would only break replay
     # of pre-taxonomy recordings.
     model_retry: ModelRetry = Field(default_factory=ModelRetry)
+    # M14.2 refresh provenance: the recorded session this run was seeded
+    # from, and whether stable-evidence carry-forward was disabled. The seed
+    # (brief + carry/re-research split) is a pure function of that immutable
+    # parent recording plus refresh_all, so replay re-derives it identically
+    # from these two fields (T4) — no seed data is duplicated into config.
+    refresh_of: str | None = None
+    refresh_all: bool = False
     # Provenance stamp: the parsec version that recorded this session.
     # Replay/fork warn on mismatch — recordings only replay byte-identically
     # against the code that produced them, so skew is the first thing to

@@ -114,8 +114,17 @@ async def run_fork(
     # channel). A new steer message lands AT the fork.
     scripted: dict[int, list[str]] = {}
     scripted_gates: dict[tuple[str, int], list[str]] = {}
+    pinned: dict[str, str] = {}
     for ev in event_log.read(original_session_id):
-        if ev.event_type == EventType.STEERING_INJECTED and ev.payload["turn_index"] < at_call:
+        if ev.event_type == EventType.FETCH_PERFORMED:
+            # Head fetches must serve the byte versions the recording saw,
+            # even after a later session (a refresh) advanced the shared URL
+            # cache row; the diverged tail's new URLs miss the pin and fetch
+            # live (M14.2, T4).
+            key, doc_hash = ev.payload.get("cache_key"), ev.payload.get("doc_hash")
+            if key and doc_hash:
+                pinned.setdefault(key, doc_hash)
+        elif ev.event_type == EventType.STEERING_INJECTED and ev.payload["turn_index"] < at_call:
             gate = ev.payload.get("gate")
             if gate:
                 scripted_gates.setdefault((gate, ev.payload["turn_index"]), []).append(
@@ -127,4 +136,11 @@ async def run_fork(
         scripted.setdefault(at_call, []).append(steer)
     loop.scripted_steering = scripted
     loop.scripted_gates = scripted_gates
+    fetcher.pinned_docs = pinned
+    if fork_config.refresh_of:
+        # Forking a refreshed session: the head planned from a seed, not a
+        # decomposer call — re-derive it from the same immutable parent.
+        from parsec.refresh import derive_seed
+
+        loop.refresh_seed = derive_seed(conn, fork_config.refresh_of, fork_config.refresh_all)
     return await loop.run()

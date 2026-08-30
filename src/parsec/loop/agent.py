@@ -219,6 +219,13 @@ class OrchestratorLoop:
         # harness-enforced dispatch caps. Defaults = full configured caps.
         self.brief_scope = ""
         self.effort_limits: EffortLimits = effort_limits("deep", config.budgets)
+        # M14.2 refresh seed: when set, the plan is seeded from a prior
+        # session's recorded brief (no decomposition call) and its
+        # stable-evidence subquestions carry forward instead of
+        # re-dispatching. Set by refresh.run_refresh — and by replay/fork
+        # for sessions whose config records refresh_of, re-derived from the
+        # same immutable parent, so seeded sessions replay byte-identically.
+        self.refresh_seed = None  # parsec.refresh.RefreshSeed | None
         # M11 replay scheduler: recorded join order per wave. Empty on live
         # runs (observed completion order is used and journaled); set by the
         # replay runner from the recorded SUBAGENT_JOINED events.
@@ -261,6 +268,8 @@ class OrchestratorLoop:
 
         try:
             subquestions = await self._plan()
+            if self.refresh_seed is not None:
+                subquestions = self._apply_refresh_seed(subquestions)
             partial = False
 
             if self.config.budgets.parallel_subagents > 1 and len(subquestions) > 1:
@@ -438,7 +447,13 @@ class OrchestratorLoop:
         subquestion (never crashes)."""
         cfg = self.config
         sid = cfg.session_id
-        if self._gate():
+        if self.refresh_seed is not None:
+            # M14.2: the parent already scoped this question — reuse its
+            # recorded brief verbatim, spending zero model calls on planning.
+            seed = self.refresh_seed
+            brief = Brief(seed.scope, seed.effort, list(seed.questions))
+            note = f"refresh: brief seeded from {seed.parent_session_id}"
+        elif self._gate():
             brief = Brief("", "deep", [cfg.query])
             note = "decomposition skipped (budget); whole query as sq-1"
         else:
@@ -452,18 +467,16 @@ class OrchestratorLoop:
         questions = brief.questions[: self.effort_limits.max_subquestions]
         subquestions = [Subquestion(f"sq-{i + 1}", q) for i, q in enumerate(questions)]
 
-        self.event_log.append(
-            sid,
-            "harness",
-            EventType.RESEARCH_BRIEF,
-            {
-                "scope": brief.scope,
-                "effort": brief.effort,
-                "subquestions": questions,
-                "limits": self.effort_limits.model_dump(),
-                "gated": cfg.brief_gate,
-            },
-        )
+        brief_payload = {
+            "scope": brief.scope,
+            "effort": brief.effort,
+            "subquestions": questions,
+            "limits": self.effort_limits.model_dump(),
+            "gated": cfg.brief_gate,
+        }
+        if self.refresh_seed is not None:
+            brief_payload["seeded_from"] = self.refresh_seed.parent_session_id
+        self.event_log.append(sid, "harness", EventType.RESEARCH_BRIEF, brief_payload)
         self.event_log.append(
             sid,
             "harness",
@@ -651,6 +664,64 @@ class OrchestratorLoop:
             return False
         self.gate_reason = "declined at cost gate"
         return True
+
+    def _apply_refresh_seed(self, subquestions: list[Subquestion]) -> list[Subquestion]:
+        """M14.2: split the seeded plan into carried vs re-researched. Carried
+        subquestions get their parent evidence re-recorded under this session
+        (content-derived node IDs keep cross-session identity) and resolve as
+        answered without a dispatch; only the remainder goes to research.
+        Deterministic — the seed is a pure function of the immutable parent
+        recording, so a refreshed session replays byte-identically (T4)."""
+        from parsec.refresh import copy_carried_evidence  # lazy: refresh imports this module
+
+        seed = self.refresh_seed
+        sid = self.config.session_id
+        carried = [sq for sq in subquestions if sq.sq_id in seed.carried]
+        remaining = [sq for sq in subquestions if sq.sq_id not in seed.carried]
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.REFRESH_SEEDED,
+            {
+                "parent": seed.parent_session_id,
+                "refresh_all": self.config.refresh_all,
+                "carried": [
+                    {"sq_id": sq.sq_id, "reason": seed.carried[sq.sq_id].reason}
+                    for sq in carried
+                ],
+                "researched": [
+                    {"sq_id": sq.sq_id, "reason": seed.research_reasons.get(sq.sq_id, "")}
+                    for sq in remaining
+                ],
+            },
+        )
+        if not carried:
+            return remaining
+        copied = copy_carried_evidence(
+            self.ctx.conn, self.dag, seed.parent_session_id, sid,
+            [seed.carried[sq.sq_id] for sq in carried],
+        )
+        # The parent id is stable across replay (it rides in refresh_of), so
+        # naming it here keeps notebook entries byte-identical.
+        md = [f"## Carried forward from {seed.parent_session_id}"]
+        for sq in carried:
+            premise_ids, finding_ids = copied[sq.sq_id]
+            for pid in premise_ids:
+                if pid not in self._writer_premises:
+                    self._writer_premises.append(pid)
+            for fid in finding_ids:
+                if fid not in self._writer_findings:
+                    self._writer_findings.append(fid)
+            reason = seed.carried[sq.sq_id].reason
+            self.coverage.set_status(
+                sid, sq.sq_id, "answered", f"{reason} from {seed.parent_session_id}"
+            )
+            md.append(
+                f"- {sq.sq_id}: {reason} "
+                f"({len(premise_ids)} premises, {len(finding_ids)} findings)"
+            )
+        self.notebook.append(sid, "harness", "\n".join(md))
+        return remaining
 
     # -- subagents -----------------------------------------------------------
 
