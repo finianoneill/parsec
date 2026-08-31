@@ -266,6 +266,41 @@ async def test_wall_clock_cuts_a_wedged_call_and_still_writes(env, db, event_log
     assert adapter.calls == 3  # decompose, the wedged call, the writer — no retry
 
 
+class _CapSpyAdapter(FakeAdapter):
+    """Records the wall cap the gateway would apply to each call."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.loop = None
+        self.caps: list[float] = []
+
+    async def complete(self, request):
+        self.caps.append(self.loop._wall_budget()[1])
+        return await super().complete(request)
+
+
+async def test_writer_wall_grace_is_scoped_to_writer_calls(env, tmp_path):
+    """Gap-fill research dispatched AFTER a writer pass must run under the
+    plain wall cap, not the writer's 1.25x grace; the rewrite re-arms it."""
+    make_loop, span_ref = env
+    p_id = _premise_id(span_ref)
+    answer = f"One source says water boils at 99 degrees Celsius. [{p_id}]"
+    script = _base_script(span_ref, answer) + [
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_gap", "name": "submit_report",
+              "input": {"status": "blocked", "dead_ends": ["no corroborating sources found"]}}],
+            stop_reason="tool_use", index=4),
+        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=5),
+    ]
+    adapter = _CapSpyAdapter(script)
+    loop = make_loop(tmp_path, adapter, "s-grace", budgets=Budgets(max_wall_seconds=100))
+    adapter.loop = loop
+    result = await loop.run()
+    assert result.coverage["sq-gap-1"] == "blocked"
+    # decompose, record, submit | writer | gap subagent | rewrite
+    assert adapter.caps == [100, 100, 100, 125, 100, 125]
+
+
 async def test_wall_clock_past_writer_grace_halts_with_best_effort(env, event_log, clock, tmp_path):
     make_loop, span_ref = env
     script = [

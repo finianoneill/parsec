@@ -845,6 +845,10 @@ class OrchestratorLoop:
         sid = cfg.session_id
         sequential = allowance is None
         actor = f"subagent:{sq.sq_id}"
+        # Research calls get the plain wall cap: the writer's 1.25x grace must
+        # not leak into gap-fill or coverage-retry subagents dispatched after
+        # a writer pass (the next writer/repair call re-arms it).
+        self._wall_grace = False
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
         tool_schemas = self.registry.export_schemas()
         # The per-phase immutable prefix, counted by the compaction trigger
