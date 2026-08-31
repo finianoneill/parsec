@@ -117,6 +117,37 @@ def test_concurrent_watches_never_lose_labels(tmp_path):
     assert sorted(q.name for q in tmp_path.iterdir()) == ["shared.json", "shared.json.lock"]
 
 
+def test_lock_backend_covers_windows_and_refuses_unlocked_writes(tmp_path, monkeypatch):
+    """Without fcntl the lock comes from msvcrt (non-blocking poll, then
+    unlock); with neither, append_labels refuses rather than racing."""
+    import sys
+
+    calls: list[int] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK, LK_UNLCK = 2, 0
+        busy = [OSError("locked by another process")]
+
+        @staticmethod
+        def locking(fd, mode, nbytes):
+            calls.append(mode)
+            if mode == FakeMsvcrt.LK_NBLCK and FakeMsvcrt.busy:
+                raise FakeMsvcrt.busy.pop()
+
+    monkeypatch.setitem(sys.modules, "fcntl", None)  # `import fcntl` -> ImportError
+    monkeypatch.setitem(sys.modules, "msvcrt", FakeMsvcrt)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    path = tmp_path / "labels.json"
+    assert append_labels(path, [{"credence": 0.5, "label": 1}]) == 1
+    assert calls == [2, 2, 0]  # busy once, acquired, released
+    assert read_labels(path) == [{"credence": 0.5, "label": 1}]
+
+    monkeypatch.setitem(sys.modules, "msvcrt", None)
+    with pytest.raises(RuntimeError, match="process lock"):
+        append_labels(path, [{"credence": 0.5, "label": 1}])
+    assert read_labels(path) == [{"credence": 0.5, "label": 1}]  # nothing written unlocked
+
+
 def test_labels_file_round_trips_in_calibrate_shape(tmp_path):
     path = tmp_path / "labels.json"
     assert read_labels(path) == []

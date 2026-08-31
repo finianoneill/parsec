@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,25 +107,55 @@ def read_labels(path: Path) -> list[dict]:
     return list(data.get("labels", []) if isinstance(data, dict) else data)
 
 
-@contextlib.contextmanager
-def _locked(path: Path) -> Iterator[None]:
-    """Process-wide exclusive lock on `<path>.lock` (fcntl.flock, POSIX):
-    concurrent watches sharing one labels file — two cron entries for two
-    questions — serialize their read-modify-write here. On a platform
-    without fcntl the append proceeds unlocked (single-watch use is fine)."""
+def _lock_backend() -> tuple[Callable, Callable]:
+    """(acquire, release) over an open lock file: fcntl.flock on POSIX,
+    msvcrt.locking on Windows — one of the two ships with every CPython.
+    Never falls back to running unlocked: that would reintroduce the
+    lost-labels race on exactly the platform that can't see it."""
     try:
         import fcntl
-    except ImportError:  # pragma: no cover — non-POSIX
-        yield
-        return
+    except ImportError:
+        fcntl = None
+    if fcntl is not None:
+        return (
+            lambda f: fcntl.flock(f, fcntl.LOCK_EX),
+            lambda f: fcntl.flock(f, fcntl.LOCK_UN),
+        )
+    try:
+        import msvcrt
+    except ImportError:
+        raise RuntimeError(
+            "parsec watch needs a process lock for the labels file (fcntl or msvcrt) "
+            "and neither is available on this platform"
+        ) from None
+
+    def acquire(f) -> None:
+        # LK_NBLCK fails immediately when another process holds the byte;
+        # poll rather than LK_LOCK, whose built-in retry gives up after ~10s.
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+
+    return acquire, lambda f: msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Process-wide exclusive lock on `<path>.lock`: concurrent watches
+    sharing one labels file — two cron entries for two questions —
+    serialize their read-modify-write here."""
+    acquire, release = _lock_backend()
     lock_path = path.with_name(path.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        acquire(lock)
         try:
             yield
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            release(lock)
 
 
 def append_labels(path: Path, labels: list[dict]) -> int:
