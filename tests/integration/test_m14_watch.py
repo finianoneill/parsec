@@ -208,6 +208,33 @@ async def test_cli_watch_json_lines_and_exit_codes(
     assert cli.build_parser().parse_args(["watch", "s", "--every", "6h"]).every == 21600
 
 
+async def test_cli_watch_halted_refresh_keeps_json_stdout_parseable(
+    parent, db, tmp_path, capsys, monkeypatch
+):
+    """A refresh that halts stops the watch with exit 4; in --json mode the
+    error rides in the summary line and nothing else touches stdout."""
+    import parsec.watch as watch_mod
+    from parsec.watch import WatchSummary
+
+    async def halted(conn, blobs, clock, session_id, make_adapter, **kw):
+        return WatchSummary(session_id, [], kw.get("labels_path"), 0,
+                            error=f"refresh {session_id}-refresh-1 ended halted_budget")
+
+    monkeypatch.setattr(watch_mod, "run_watch", halted)
+    db.close()
+    code = await asyncio.to_thread(
+        cli.main, ["watch", parent, "--data-dir", str(tmp_path), "--json"]
+    )
+    lines = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    assert code == cli.EXIT_ERROR
+    assert [line["type"] for line in lines] == ["summary"]
+    assert lines[0]["error"].endswith("ended halted_budget") and lines[0]["rounds"] == 0
+
+    code = await asyncio.to_thread(cli.main, ["watch", parent, "--data-dir", str(tmp_path)])
+    assert code == cli.EXIT_ERROR
+    assert "ended halted_budget — watch stopped" in capsys.readouterr().out
+
+
 async def test_watch_rounds_are_recordings(parent, db, blobs, clock, pages, transport, tmp_path):
     pages[URL_B] = SENT_B2
     summary = await run_watch(

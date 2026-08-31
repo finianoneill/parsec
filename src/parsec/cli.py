@@ -989,7 +989,10 @@ def cmd_watch(args) -> int:
             f"(`parsec calibrate {escape(str(labels_path))}`)[/dim]"
         )
     if summary.error:
-        console.print(f"[red]{escape(summary.error)} — watch stopped[/red]")
+        # --json stdout stays one JSON document per line: the summary line
+        # already carries `error`, so the human message is human-mode only.
+        if not args.as_json:
+            console.print(f"[red]{escape(summary.error)} — watch stopped[/red]")
         return EXIT_ERROR
     return EXIT_PARTIAL if summary.material else EXIT_OK
 
