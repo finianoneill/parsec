@@ -38,3 +38,12 @@ def test_interactive_slash_demo_runs_offline(tmp_path, monkeypatch, capsys):
     assert cli.main(["--data-dir", str(tmp_path / "data")]) == cli.EXIT_OK
     out = capsys.readouterr().out
     assert "3.26 light-years" in out
+
+
+def test_slash_watch_maps_to_cli_argv(tmp_path):
+    from parsec.interactive import _slash_to_argv
+
+    d = ["--data-dir", str(tmp_path)]
+    assert _slash_to_argv("watch", ["s-1"], tmp_path) == ["watch", "s-1", *d]
+    assert _slash_to_argv("watch", ["s-1", "6h"], tmp_path) == ["watch", "s-1", "--every", "6h", *d]
+    assert _slash_to_argv("watch", [], tmp_path) is None

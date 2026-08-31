@@ -29,6 +29,8 @@ HELP = """\
   /verify <id>        verification report for a session
   /diff <a> <b>       claim-level diff of two sessions of the same question
   /refresh <id>       re-run a session's question now and diff against it (needs a key)
+  /watch <id> [every] refresh on a schedule (e.g. /watch s-1 6h), report only material
+                      diffs, label the prior claims for calibrate; one round without every
   /notebook <id>      print a session's notebook
   /help               this help
   /exit               leave (also ctrl-d)"""
@@ -173,6 +175,9 @@ def _slash_to_argv(cmd: str, rest: list[str], data_dir: Path) -> list[str] | Non
             return ["diff", rest[0], rest[1], *d]
         case "refresh" if rest:
             return ["refresh", rest[0], *d]
+        case "watch" if rest:
+            every = ["--every", rest[1]] if len(rest) > 1 else []
+            return ["watch", rest[0], *every, *d]
         case "notebook" if rest:
             return ["notebook", rest[0], *d]
         case _:

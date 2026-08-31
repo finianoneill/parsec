@@ -29,7 +29,6 @@ from parsec.refresh import derive_seed, run_refresh
 from parsec.replay import run_replay
 from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder
 from parsec.retrieval.fetcher import Fetcher
-from parsec.retrieval.span_indexer import index_spans
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
@@ -42,154 +41,15 @@ from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_within import SearchWithinTool
 from parsec.verify.diff import diff_sessions
 from tests.conftest import make_config
-
-URL_A = "https://geo.example/mountain"
-URL_B = "https://market.example/price"
-SENT_A = "Olympus Mons is 21.9 kilometers tall."
-SENT_B1 = "The listed price is 10 dollars."
-SENT_B2 = "The listed price is 12 dollars."
-
-
-def _span(text: str) -> str:
-    start, end = index_spans(text)[0]
-    return ids.span_id(ids.doc_hash(text.encode()), start, end)
-
-
-def _premise_id(sentence: str, claim_class: str = "stable") -> str:
-    return ids.node_id(
-        "Premise",
-        {"text": sentence, "span_refs": [_span(sentence)], "claim_class": claim_class},
-    )
-
-
-def _parent_script() -> list:
-    """decompose -> sq-1 (stable evidence) -> sq-2 (volatile evidence) -> write."""
-    return [
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",
-              "input": {"scope": "Cover the mountain's height and the current listed price.",
-                        "effort": "standard",
-                        "subquestions": ["how tall is the mountain", "what is the listed price"]}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_f1", "name": "fetch", "input": {"url": URL_A}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_r1", "name": "record_premises",
-              "input": {"premises": [{"text": SENT_A, "span_refs": [_span(SENT_A)],
-                                      "claim_class": "stable"}]}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_s1", "name": "submit_report",
-              "input": {"status": "answered"}}], stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_f2", "name": "fetch", "input": {"url": URL_B}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_r2", "name": "record_premises",
-              "input": {"premises": [{"text": SENT_B1, "span_refs": [_span(SENT_B1)],
-                                      "claim_class": "volatile"}]}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_s2", "name": "submit_report",
-              "input": {"status": "answered"}}], stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "text", "text": _answer(SENT_B1)}], stop_reason="end_turn"),
-    ]
-
-
-def _refresh_script(price_sentence: str = SENT_B2, include_sq1: bool = False) -> list:
-    """No decomposer call: the brief is seeded. sq-2 re-fetches the (changed)
-    price page; sq-1 appears only under --all."""
-    script: list = []
-    if include_sq1:
-        script += [
-            scripted_response(
-                [{"type": "tool_use", "id": "tu_rf0", "name": "fetch", "input": {"url": URL_A}}],
-                stop_reason="tool_use"),
-            scripted_response(
-                [{"type": "tool_use", "id": "tu_rr0", "name": "record_premises",
-                  "input": {"premises": [{"text": SENT_A, "span_refs": [_span(SENT_A)],
-                                          "claim_class": "stable"}]}}],
-                stop_reason="tool_use"),
-            scripted_response(
-                [{"type": "tool_use", "id": "tu_rs0", "name": "submit_report",
-                  "input": {"status": "answered"}}], stop_reason="tool_use"),
-        ]
-    script += [
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_rf1", "name": "fetch", "input": {"url": URL_B}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_rr1", "name": "record_premises",
-              "input": {"premises": [{"text": price_sentence,
-                                      "span_refs": [_span(price_sentence)],
-                                      "claim_class": "volatile"}]}}],
-            stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_rs1", "name": "submit_report",
-              "input": {"status": "answered"}}], stop_reason="tool_use"),
-        scripted_response(
-            [{"type": "text", "text": _answer(price_sentence)}], stop_reason="end_turn"),
-    ]
-    return script
-
-
-def _answer(price_sentence: str) -> str:
-    p_a = _premise_id(SENT_A)
-    p_b = _premise_id(price_sentence, "volatile")
-    return f"Height and price are settled. [narrative]\n{SENT_A} [{p_a}]\n{price_sentence} [{p_b}]"
-
-
-@pytest.fixture
-def pages() -> dict[str, str]:
-    """Mutable fake web: the price page changes between parent and refresh."""
-    return {URL_A: SENT_A, URL_B: SENT_B1}
-
-
-@pytest.fixture
-def transport(pages) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if url in pages:
-            return httpx.Response(
-                200, text=pages[url], headers={"content-type": "text/plain"}
-            )
-        return httpx.Response(404, text="not found")
-
-    return httpx.MockTransport(handler)
-
-
-@pytest.fixture
-async def parent(db, blobs, event_log, ledger, sessions, clock, transport, tmp_path):
-    """One completed recorded run: sq-1 answered on stable evidence, sq-2 on
-    volatile evidence. Gap-fill disabled to keep the script linear."""
-    config = make_config(
-        tmp_path, session_id="s-parent", query="mountain height and price",
-        respect_robots=False,
-        budgets=Budgets(max_gap_rounds=0, max_coverage_gap_rounds=0),
-    )
-    documents = DocumentStore(db, clock)
-    spans = SpanStore(db)
-    dag = DagStore(db, event_log)
-    fetcher = Fetcher(documents, blobs, clock, CacheMode.RECORD, transport=transport)
-    registry = ToolRegistry(
-        [
-            FetchTool(fetcher, spans),
-            RecordPremisesTool(dag, spans, documents),
-            SearchWithinTool(spans, EmbeddingCache(db, HashedNgramEmbedder())),
-        ]
-    )
-    ctx = ToolContext(db, blobs, event_log, ledger, config, clock)
-    loop = OrchestratorLoop(
-        config, ModelGateway(FakeAdapter(_parent_script()), event_log, blobs, ledger, config),
-        registry, ctx, sessions, dag, spans, documents,
-        CoverageLedger(db, event_log), Notebook(db, event_log, clock),
-    )
-    result = await loop.run()
-    assert result.status == "done"
-    return "s-parent"
-
+from tests.integration.m14_corpus import (
+    SENT_A,
+    SENT_B1,
+    SENT_B2,
+    URL_B,
+    _premise_id,
+    _refresh_script,
+    _span,
+)
 
 async def test_refresh_carries_stable_and_reresearches_volatile(
     parent, db, blobs, event_log, clock, pages, transport
