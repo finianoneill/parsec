@@ -29,10 +29,13 @@ schedule only decides WHEN each observation is taken.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import sqlite3
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -103,12 +106,44 @@ def read_labels(path: Path) -> list[dict]:
     return list(data.get("labels", []) if isinstance(data, dict) else data)
 
 
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Process-wide exclusive lock on `<path>.lock` (fcntl.flock, POSIX):
+    concurrent watches sharing one labels file — two cron entries for two
+    questions — serialize their read-modify-write here. On a platform
+    without fcntl the append proceeds unlocked (single-watch use is fine)."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — non-POSIX
+        yield
+        return
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def append_labels(path: Path, labels: list[dict]) -> int:
     """Append to the labels file (created on first use) in the
-    {"labels": [...]} shape `parsec calibrate` accepts; returns the total."""
-    existing = read_labels(path) + labels
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"labels": existing}, indent=2) + "\n", encoding="utf-8")
+    {"labels": [...]} shape `parsec calibrate` accepts; returns the total.
+    The whole read-modify-write runs under the file lock, and the new
+    content lands by atomic rename, so a concurrent reader never sees a
+    torn file and a concurrent appender never loses labels."""
+    with _locked(path):
+        existing = read_labels(path) + labels
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"labels": existing}, indent=2) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     return len(existing)
 
 

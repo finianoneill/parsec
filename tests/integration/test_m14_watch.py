@@ -90,6 +90,33 @@ def test_duration_parsing():
     assert format_duration(21600) == "6h" and format_duration(90) == "90s"
 
 
+def test_concurrent_watches_never_lose_labels(tmp_path):
+    """Separate processes appending to one labels file serialize on the
+    file lock and land by atomic rename: nothing is lost, nothing is torn."""
+    import subprocess
+    import sys
+
+    path = tmp_path / "shared.json"
+    per_proc, procs = 25, 4
+    code = (
+        "import sys; from pathlib import Path; from parsec.watch import append_labels\n"
+        "p, who = Path(sys.argv[1]), sys.argv[2]\n"
+        f"for i in range({per_proc}): append_labels(p, [{{'credence': 0.5, 'label': 1, 'who': who, 'i': i}}])\n"
+    )
+    workers = [
+        subprocess.Popen([sys.executable, "-c", code, str(path), f"w{n}"])
+        for n in range(procs)
+    ]
+    assert [w.wait(timeout=120) for w in workers] == [0] * procs
+    labels = read_labels(path)
+    assert len(labels) == per_proc * procs
+    assert sorted((lb["who"], lb["i"]) for lb in labels) == sorted(
+        (f"w{n}", i) for n in range(procs) for i in range(per_proc)
+    )
+    # No stray temp files; the lock sidecar is the only companion.
+    assert sorted(q.name for q in tmp_path.iterdir()) == ["shared.json", "shared.json.lock"]
+
+
 def test_labels_file_round_trips_in_calibrate_shape(tmp_path):
     path = tmp_path / "labels.json"
     assert read_labels(path) == []
