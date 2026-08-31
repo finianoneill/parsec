@@ -60,6 +60,22 @@ EXIT_PARTIAL = 3
 EXIT_ERROR = 4
 
 
+def _duration(value: str) -> float:
+    from parsec.watch import parse_duration
+
+    try:
+        return parse_duration(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return n
+
+
 def _positive_float(value: str) -> float:
     """argparse type for thresholds that must be a finite value > 0 — the
     diff status comparisons use >=, so 0/negative/nan would misclassify
@@ -243,6 +259,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh.add_argument("--data-dir", type=Path, default=Path("data"))
     refresh.add_argument("--json", action="store_true", dest="as_json")
+
+    watch = sub.add_parser(
+        "watch",
+        help="Scheduled refresh (M14.3): re-check a recorded session's query on an "
+        "interval, refreshing the newest session in the chain each round, report only "
+        "material diffs, and label the prior run's claims held/overturned as "
+        "(credence, outcome) pairs for `parsec calibrate`. Without --every, one round "
+        "runs and exits (cron-friendly). Exits 3 when any round was material.",
+    )
+    watch.add_argument("session_id", help="The recorded session to watch (the chain's root)")
+    watch.add_argument(
+        "--every", type=_duration, default=None, metavar="DURATION",
+        help="Re-check interval: 30m, 6h, 1d, or seconds. Loops until --rounds or Ctrl-C",
+    )
+    watch.add_argument(
+        "--rounds", type=_positive_int, default=None,
+        help="Stop after N rounds (default: 1 without --every, unbounded with it)",
+    )
+    watch.add_argument(
+        "--all", action="store_true", dest="refresh_all",
+        help="Re-research every subquestion each round, including stable-evidence ones",
+    )
+    watch.add_argument(
+        "--epsilon", type=_positive_float, default=0.05,
+        help="Credence movement below this reads as held (default 0.05)",
+    )
+    watch.add_argument(
+        "--labels", type=Path, default=None, metavar="PATH",
+        help="Labels file to append (credence, outcome) pairs to "
+        "(default <data-dir>/watch-labels.json); pass it to `parsec calibrate`",
+    )
+    watch.add_argument("--data-dir", type=Path, default=Path("data"))
+    watch.add_argument("--json", action="store_true", dest="as_json")
 
     sessions = sub.add_parser("sessions", help="Inspect sessions")
     sessions_sub = sessions.add_subparsers(dest="sessions_command", required=True)
@@ -876,6 +925,75 @@ def cmd_refresh(args) -> int:
     return EXIT_PARTIAL if material else EXIT_OK
 
 
+def cmd_watch(args) -> int:
+    from parsec.watch import WatchRound, format_duration, run_watch
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    store = SessionStore(conn, clock)
+    row = store.get(args.session_id)
+    if row is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    _warn_version_skew(row)
+    labels_path = args.labels or (args.data_dir / "watch-labels.json")
+    unbounded = args.every is not None and args.rounds is None
+    seen: list[WatchRound] = []  # survives a Ctrl-C mid-sleep
+
+    def on_round(rnd: WatchRound) -> None:
+        seen.append(rnd)
+        if args.as_json:
+            print(json.dumps(rnd.to_payload()), flush=True)
+            return
+        head = f"round {rnd.index}: {escape(rnd.parent_session_id)} → {escape(rnd.session_id)}"
+        if rnd.material:
+            console.print(f"\n[bold]{head}[/bold] · {rnd.status} · [yellow]material change[/yellow]")
+            _render_diff(rnd.report)
+            if rnd.status != "done":
+                console.print(
+                    f"[yellow]refresh finished {rnd.status} — the diff may be missing evidence[/yellow]"
+                )
+        else:
+            console.print(f"[dim]{head} · unchanged ({rnd.report.counts['held']} held)[/dim]")
+        if rnd.labels:
+            held = sum(1 for lb in rnd.labels if lb["label"] == 1)
+            console.print(
+                f"[dim]labels: +{len(rnd.labels)} ({held} held, {len(rnd.labels) - held} overturned)"
+                f" → {escape(str(labels_path))}[/dim]"
+            )
+        if args.every is not None and (unbounded or rnd.index < args.rounds):
+            console.print(f"[dim]next check in {format_duration(args.every)} (Ctrl-C to stop)[/dim]")
+
+    try:
+        summary = asyncio.run(
+            run_watch(
+                conn, blobs, clock, args.session_id,
+                make_adapter, fetch_transport=fetch_transport,
+                refresh_all=args.refresh_all, epsilon=args.epsilon,
+                every_s=args.every, rounds=args.rounds,
+                labels_path=labels_path, on_round=on_round,
+            )
+        )
+    except KeyboardInterrupt:
+        if not args.as_json:
+            console.print(f"\n[dim]watch stopped after {len(seen)} round(s)[/dim]")
+        return EXIT_PARTIAL if any(r.material for r in seen) else EXIT_OK
+
+    if args.as_json:
+        print(json.dumps(summary.to_payload()), flush=True)
+    else:
+        console.print(
+            f"\n[dim]{len(summary.rounds)} round(s) · "
+            f"{sum(1 for r in summary.rounds if r.material)} material · "
+            f"{summary.labels_total} labels in {escape(str(labels_path))} "
+            f"(`parsec calibrate {escape(str(labels_path))}`)[/dim]"
+        )
+    if summary.error:
+        console.print(f"[red]{escape(summary.error)} — watch stopped[/red]")
+        return EXIT_ERROR
+    return EXIT_PARTIAL if summary.material else EXIT_OK
+
+
 def cmd_sessions(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -1243,6 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
         "verify": cmd_verify,
         "diff": cmd_diff,
         "refresh": cmd_refresh,
+        "watch": cmd_watch,
         "fork": cmd_fork,
         "judge": cmd_judge,
         "eval": cmd_eval,
