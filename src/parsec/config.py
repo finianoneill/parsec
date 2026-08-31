@@ -164,12 +164,14 @@ class RunConfig(BaseModel):
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600
     contact: str | None = None
-    # Per-request HTTP timeout for live model calls, in seconds. None keeps
-    # the SDK default (10 minutes per attempt). A tripped timeout surfaces
-    # through the gateway as a journaled model-call failure — bounded and
-    # diagnosable, never an indefinitely wedged call the wall-clock budget
-    # cannot see.
-    request_timeout_s: float | None = Field(default=None, gt=0)
+    # Per-request HTTP timeout for live model calls, in seconds. A tripped
+    # timeout surfaces through the gateway as a journaled TRANSIENT failure
+    # and a visible retry — bounded and diagnosable, never a silently wedged
+    # call. Default 180s: a full 8192-token response at Opus speeds takes
+    # ~2 minutes, so anything past three is a stall, not a long answer (the
+    # SDK's own default is 10 minutes per attempt, which in practice let one
+    # stalled call eat a whole wall-clock budget). None = the SDK default.
+    request_timeout_s: float | None = Field(default=180.0, gt=0)
     # The Anthropic SDK's transparent retry count for live model calls.
     # Default 0: the harness owns retries (model_retry below) and journals
     # each one — SDK-internal retries are invisible to the journal and were

@@ -43,7 +43,7 @@ from parsec.errors import (
     ModelErrorKind,
     ReplayDivergence,
 )
-from parsec.gateway.gateway import ModelGateway
+from parsec.gateway.gateway import WALL_CLOCK_KIND, ModelGateway
 from parsec.loop import compaction, prompts
 from parsec.loop.citations import check_citations, write_claims
 from parsec.loop.states import AgentState, StateMachine
@@ -234,6 +234,10 @@ class OrchestratorLoop:
         # global created_seq would vary with cross-stream interleaving.
         self._writer_premises: list[str] = []
         self._writer_findings: list[str] = []
+        # Set by run(): the state machine (so mid-subagent progress snapshots
+        # can name the phase) and the writer's wall-clock grace flag.
+        self._sm: StateMachine | None = None
+        self._wall_grace = False
         # Writer degradation level (Phase 2): 0 = full evidence text, 1/2 =
         # clipped lines. Monotonic across writer rounds — once reduced, stay
         # reduced (deterministic under gap-fill rewrites).
@@ -264,7 +268,9 @@ class OrchestratorLoop:
             {"session_id": sid, "query": cfg.query, "config": cfg.to_json_dict()},
         )
         sm = StateMachine(self.event_log, sid)
+        self._sm = sm
         self._start_mono = self.clock.monotonic()
+        self.gateway.wall_budget = self._wall_budget
 
         try:
             subquestions = await self._plan()
@@ -914,6 +920,7 @@ class OrchestratorLoop:
                 if sequential:
                     self.turns += 1
                 subagent_turns += 1
+                self._notify_progress()
 
                 if resp.stop_reason == "tool_use":
                     submission, submit_problems = self._extract_submission(resp, recorded_premises)
@@ -932,6 +939,7 @@ class OrchestratorLoop:
                             ),
                         }
                     )
+                    self._notify_progress()
                     continue
                 if resp.stop_reason == "max_tokens":
                     messages.append({"role": "assistant", "content": resp.content})
@@ -1355,6 +1363,11 @@ class OrchestratorLoop:
                 )
                 return resp, messages
             except ModelCallFailed as exc:
+                if exc.kind == WALL_CLOCK_KIND:
+                    # Out of time even inside the grace: the wall-clock analogue
+                    # of a hard usd breach — halt with the best-effort answer.
+                    cap = self.config.budgets.max_wall_seconds
+                    raise BudgetExceeded("wall_seconds", cap * 1.25, cap) from exc
                 if exc.error_kind != ModelErrorKind.CONTEXT_OVERFLOW or self._writer_level >= 2:
                     raise
                 before = self._writer_estimate(messages)
@@ -1541,6 +1554,14 @@ class OrchestratorLoop:
             messages.append({"role": "user", "content": f"[user steering] {text}"})
         return messages
 
+    def _notify_progress(self) -> None:
+        """Mid-subagent refresh for the live view. _notify fires only on
+        orchestrator state transitions, so for the length of a subagent the
+        footer froze at the dispatch-time counts ("0 premises" while premises
+        were landing). Display-only: never touches the journal."""
+        if self._sm is not None:
+            self._notify(self._sm)
+
     def _notify(self, sm: StateMachine) -> None:
         if self.reporter is None:
             return
@@ -1717,11 +1738,19 @@ class OrchestratorLoop:
         self.gate_reason = None
         return False
 
+    def _wall_budget(self) -> tuple[float, float]:
+        """(elapsed_s, cap_s) for the gateway's in-call deadline. Research
+        calls get the budget itself; once the writer gate has run, writer and
+        repair calls get the same 1.25x grace the usd cap gives them."""
+        cap = self.config.budgets.max_wall_seconds * (1.25 if self._wall_grace else 1.0)
+        return self.clock.monotonic() - self._start_mono, cap
+
     def _writer_gate(self) -> None:
         """The writer/repair calls run inside the 1.25x usd grace; only a hard
         breach halts them (the forced answer must be writable, §3 rule 1)."""
         if self.halt_requested:
             raise HaltRequested()
+        self._wall_grace = True
         usd = self.ledger.spent_usd(self.config.session_id)
         if usd >= self.config.budgets.max_usd * 1.25:
             raise BudgetExceeded("usd", usd, self.config.budgets.max_usd)

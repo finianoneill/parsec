@@ -7,6 +7,9 @@ the codebase may call a model.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+
 from parsec.canonical import canonical_json
 from parsec.config import RunConfig
 from parsec.errors import HaltRequested, ModelCallFailed, ModelErrorKind, ReplayDivergence
@@ -18,6 +21,18 @@ from parsec.models.gateway import ModelRequest, ModelResponse
 from parsec.store.blobs import BlobStore
 from parsec.store.event_log import CURRENT_STREAM, EventLog
 from parsec.store.ledger import Ledger
+
+# LLM_FAILED kind journaled when the wall-clock budget runs out during a live
+# call. Classified FATAL (the run is out of time — retrying cannot help), and
+# the ReplayAdapter reproduces it through the ordinary failure path, so a
+# wall-cut subagent replays like any other dead stream (M11).
+WALL_CLOCK_KIND = "WallClockExceeded"
+
+
+def wall_clock_detail(cap_s: float) -> str:
+    """The limit, not the live elapsed time, so the journaled detail is
+    stable (mirrors _cap_reason in the loop)."""
+    return f"wall-clock budget ({int(cap_s)}s) exhausted mid-call"
 
 
 class ModelGateway:
@@ -47,6 +62,40 @@ class ModelGateway:
         # subagent's budget decisions must depend only on ITS OWN stream, or
         # gating would vary with interleaving and break replay.
         self.stream_spend: dict[str, dict[str, float]] = {}
+        # In-call wall-clock deadline, provided by the loop as a callable
+        # returning (elapsed_s, cap_s). max_wall_seconds used to be checked
+        # only between turns, so one wedged call could overrun it by the whole
+        # request timeout; with the hook set, a live call is bounded by the
+        # remaining budget and a breach journals LLM_FAILED/WallClockExceeded.
+        # Unset (or replay, which serves recorded outcomes instantly and must
+        # not depend on the replaying machine's clock) = no in-call bound.
+        self.wall_budget: Callable[[], tuple[float, float]] | None = None
+
+    async def _attempt(self, request: ModelRequest) -> ModelResponse:
+        """One adapter call, cut at the remaining wall budget when the loop
+        provided one."""
+        if self.wall_budget is None or self.config.adapter == "replay":
+            return await self.adapter.complete(request)
+        elapsed, cap = self.wall_budget()
+        remaining = cap - elapsed
+        if remaining <= 0:
+            raise ModelCallFailed(WALL_CLOCK_KIND, wall_clock_detail(cap), ModelErrorKind.FATAL)
+        # asyncio.wait rather than wait_for: an adapter's OWN timeout error
+        # must keep surfacing as the adapter's (TRANSIENT, retryable); only
+        # this deadline reads as a wall-clock breach.
+        task = asyncio.ensure_future(self.adapter.complete(request))
+        done, _ = await asyncio.wait({task}, timeout=remaining)
+        if task in done:
+            return task.result()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise  # our own cancellation (halt), not the child's
+        except Exception:  # noqa: BLE001 — the abandoned call's error is moot
+            pass
+        raise ModelCallFailed(WALL_CLOCK_KIND, wall_clock_detail(cap), ModelErrorKind.FATAL)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         sid = self.config.session_id
@@ -85,7 +134,7 @@ class ModelGateway:
         attempt = 1
         while True:
             try:
-                response = await self.adapter.complete(request)
+                response = await self._attempt(request)
                 break
             except (ReplayDivergence, HaltRequested):
                 raise  # harness-level: never journaled as a model failure

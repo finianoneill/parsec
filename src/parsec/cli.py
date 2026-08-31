@@ -124,9 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Retries for subquestions still PARTIAL while budget headroom remains (0 disables)",
     )
     ask.add_argument(
-        "--request-timeout", type=float, default=None, metavar="SECONDS",
-        help="Per-request HTTP timeout for model calls (default: SDK's 10 minutes); "
-        "a tripped timeout is journaled as a model-call failure, never a silent hang",
+        "--request-timeout", type=float,
+        default=RunConfig.model_fields["request_timeout_s"].default, metavar="SECONDS",
+        help="Per-request HTTP timeout for model calls (default 180); a tripped "
+        "timeout is journaled as a transient failure and retried, never a silent hang",
     )
     ask.add_argument(
         "--retry-attempts", type=int, default=ModelRetry().max_attempts,

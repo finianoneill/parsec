@@ -34,4 +34,7 @@ def test_make_adapter_passes_config_timeout(monkeypatch):
 def test_cli_flag_parses_into_config():
     args = cli.build_parser().parse_args(["ask", "q", "--request-timeout", "45"])
     assert args.request_timeout == 45.0
-    assert cli.build_parser().parse_args(["ask", "q"]).request_timeout is None
+    # Unset, the flag carries RunConfig's default (180s), so the config the
+    # CLI builds does not silently fall back to the SDK's 10 minutes.
+    assert cli.build_parser().parse_args(["ask", "q"]).request_timeout == 180.0
+    assert RunConfig(session_id="s", query="q").request_timeout_s == 180.0
