@@ -716,6 +716,23 @@ class OrchestratorLoop:
             self.coverage.set_status(
                 sid, sq.sq_id, "answered", f"{reason} from {seed.parent_session_id}"
             )
+            # Journal the carried evidence as this session's own completion
+            # record: derive_seed reads per-subquestion premises/findings only
+            # from SUBAGENT_COMPLETED, so without this a refresh of a refresh
+            # would see "answered without premises" and re-research the row.
+            self.event_log.append(
+                sid,
+                "harness",
+                EventType.SUBAGENT_COMPLETED,
+                {
+                    "sq_id": sq.sq_id,
+                    "status": "answered",
+                    "premises": premise_ids,
+                    "findings": finding_ids,
+                    "dead_ends": [],
+                    "carried_from": seed.parent_session_id,
+                },
+            )
             md.append(
                 f"- {sq.sq_id}: {reason} "
                 f"({len(premise_ids)} premises, {len(finding_ids)} findings)"

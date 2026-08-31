@@ -247,6 +247,33 @@ async def test_refresh_carries_stable_and_reresearches_volatile(
     assert docs == {URL_B: "changed"}
 
 
+async def test_carried_rows_stay_carried_on_a_refresh_of_a_refresh(
+    parent, db, blobs, event_log, clock, pages, transport
+):
+    pages[URL_B] = SENT_B2
+    result = await run_refresh(
+        db, blobs, clock, parent, FakeAdapter(_refresh_script()), fetch_transport=transport
+    )
+    assert result.status == "done"
+    refreshed = result.session_id
+
+    # The carry-forward journals a completion record of its own, so the
+    # refreshed session is a valid parent in turn: seeding from it carries
+    # sq-1 again with the same evidence, instead of reading "answered
+    # without premises of its own" and re-researching it.
+    completed = {
+        ev.payload["sq_id"]: ev.payload
+        for ev in event_log.read(refreshed)
+        if ev.event_type == EventType.SUBAGENT_COMPLETED
+    }
+    assert completed["sq-1"]["premises"] == [_premise_id(SENT_A)]
+    assert completed["sq-1"]["carried_from"] == parent
+    seed = derive_seed(db, refreshed)
+    assert set(seed.carried) == {"sq-1"}
+    assert seed.carried["sq-1"] == derive_seed(db, parent).carried["sq-1"]
+    assert seed.research_reasons == {"sq-2": "volatile evidence must be re-observed"}
+
+
 async def test_refreshed_and_parent_sessions_both_replay(
     parent, db, blobs, event_log, clock, pages, transport
 ):
