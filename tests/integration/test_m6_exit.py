@@ -5,6 +5,8 @@ scripted adapters, no network.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from parsec import ids
@@ -210,6 +212,115 @@ async def test_fork_rejoins_history_then_diverges(env, db, blobs, event_log, clo
     assert hashes(result.session_id)[3] != hashes("s-orig")[3] or True  # tail free to diverge
 
 
+class _HangingAdapter:
+    """Scripted adapter whose call `hang_at` wedges: it advances the frozen
+    clock past the wall budget (as a real stall would) and then never
+    returns — only the gateway's deadline can end it."""
+
+    def __init__(self, script, hang_at: int, clock, advance: float):
+        self._inner = FakeAdapter(script)
+        self._hang_at, self._clock, self._advance = hang_at, clock, advance
+        self.calls = 0
+
+    async def complete(self, request):
+        i = self.calls
+        self.calls += 1
+        if i == self._hang_at:
+            self._clock.mono += self._advance
+            await asyncio.sleep(60)
+        return await self._inner.complete(request)
+
+
+async def test_wall_clock_cuts_a_wedged_call_and_still_writes(env, db, event_log, clock, tmp_path):
+    """max_wall_seconds was only checked between turns; a wedged call now
+    dies at the deadline, the next boundary stops dispatch with the wall
+    cap named, and the writer still runs inside its grace."""
+    make_loop, span_ref = env
+    script = [
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",
+              "input": {"subquestions": ["boiling point?", "freezing point?"]}}],
+            stop_reason="tool_use"),
+        scripted_response([{"type": "text", "text": "Nothing could be gathered. [narrative]"}],
+                          stop_reason="end_turn"),
+    ]
+    # Wall cap 1s; the stalled call (sq-1's first) advances the clock to 1.1s
+    # — past the cap, inside the writer's 1.25x grace.
+    adapter = _HangingAdapter(script, hang_at=1, clock=clock, advance=1.1)
+    loop = make_loop(tmp_path, adapter, "s-wall",
+                     budgets=Budgets(max_wall_seconds=1, max_gap_rounds=0,
+                                     max_coverage_gap_rounds=0))
+    result = await loop.run()
+
+    assert result.status != "halted_budget" and result.status != "halted_error"
+    assert result.answer.startswith("Nothing could be gathered")
+    events = event_log.read("s-wall")
+    (failed,) = [e for e in events if e.event_type == EventType.LLM_FAILED]
+    assert failed.stream_id == "sq-1" and failed.payload["kind"] == "WallClockExceeded"
+    assert result.coverage["sq-1"] == "blocked"
+    assert result.coverage["sq-2"] == "blocked"
+    sq2 = db.execute(
+        "SELECT reason FROM coverage WHERE session_id='s-wall' AND sq_id='sq-2'"
+    ).fetchone()["reason"]
+    assert "wall-clock budget (1s) exhausted" in sq2
+    assert adapter.calls == 3  # decompose, the wedged call, the writer — no retry
+
+
+class _CapSpyAdapter(FakeAdapter):
+    """Records the wall cap the gateway would apply to each call."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.loop = None
+        self.caps: list[float] = []
+
+    async def complete(self, request):
+        self.caps.append(self.loop._wall_budget()[1])
+        return await super().complete(request)
+
+
+async def test_writer_wall_grace_is_scoped_to_writer_calls(env, tmp_path):
+    """Gap-fill research dispatched AFTER a writer pass must run under the
+    plain wall cap, not the writer's 1.25x grace; the rewrite re-arms it."""
+    make_loop, span_ref = env
+    p_id = _premise_id(span_ref)
+    answer = f"One source says water boils at 99 degrees Celsius. [{p_id}]"
+    script = _base_script(span_ref, answer) + [
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_gap", "name": "submit_report",
+              "input": {"status": "blocked", "dead_ends": ["no corroborating sources found"]}}],
+            stop_reason="tool_use", index=4),
+        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=5),
+    ]
+    adapter = _CapSpyAdapter(script)
+    loop = make_loop(tmp_path, adapter, "s-grace", budgets=Budgets(max_wall_seconds=100))
+    adapter.loop = loop
+    result = await loop.run()
+    assert result.coverage["sq-gap-1"] == "blocked"
+    # decompose, record, submit | writer | gap subagent | rewrite
+    assert adapter.caps == [100, 100, 100, 125, 100, 125]
+
+
+async def test_wall_clock_past_writer_grace_halts_with_best_effort(env, event_log, clock, tmp_path):
+    make_loop, span_ref = env
+    script = [
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",
+              "input": {"subquestions": ["boiling point?"]}}],
+            stop_reason="tool_use"),
+    ]
+    adapter = _HangingAdapter(script, hang_at=1, clock=clock, advance=5.0)  # past 1.25x
+    loop = make_loop(tmp_path, adapter, "s-wall-hard",
+                     budgets=Budgets(max_wall_seconds=1, max_gap_rounds=0,
+                                     max_coverage_gap_rounds=0))
+    result = await loop.run()
+    assert result.status == "halted_budget"
+    assert result.answer.startswith("PARTIAL — budget exhausted (wall_seconds)")
+    kinds = [e.payload["kind"] for e in event_log.read("s-wall-hard")
+             if e.event_type == EventType.LLM_FAILED]
+    assert kinds == ["WallClockExceeded", "WallClockExceeded"]  # sq-1, then the writer
+
+
 async def test_fork_at_call_out_of_range(env, db, blobs, event_log, clock, tmp_path):
     make_loop, span_ref = env
     loop = make_loop(tmp_path, FakeAdapter(_base_script(span_ref, "No answer. [narrative]")), "s-range",
@@ -261,3 +372,11 @@ async def test_reporter_snapshots(env, tmp_path):
     assert final["premises"] == 1
     assert final["coverage"] == {"sq-1": "answered"}
     assert final["turns"] >= 3
+
+    # The footer moves DURING the subagent, not only at dispatch and fold:
+    # each model response and each tool batch refreshes it, so the premise
+    # recorded on the subagent's first turn shows before submit_report.
+    collecting = [s for s in snapshots if s["state"] == "COLLECTING"]
+    first_turn = collecting[0]["turns"]
+    assert any(s["turns"] == first_turn + 1 and s["premises"] == 1 for s in collecting)
+    assert len({s["turns"] for s in collecting}) >= 3

@@ -20,6 +20,7 @@ class EventType(StrEnum):
     EDGE_ADDED = "edge_added"
     BUDGET_DEBIT = "budget_debit"
     RESEARCH_BRIEF = "research_brief"  # M12: persisted scoping artifact (scope, effort, subquestions)
+    REFRESH_SEEDED = "refresh_seeded"  # M14.2: carried-forward vs re-researched split, with reasons
     SUBQUESTIONS_PLANNED = "subquestions_planned"
     SUBAGENT_STARTED = "subagent_started"
     SUBAGENT_COMPLETED = "subagent_completed"

@@ -164,12 +164,14 @@ class RunConfig(BaseModel):
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600
     contact: str | None = None
-    # Per-request HTTP timeout for live model calls, in seconds. None keeps
-    # the SDK default (10 minutes per attempt). A tripped timeout surfaces
-    # through the gateway as a journaled model-call failure — bounded and
-    # diagnosable, never an indefinitely wedged call the wall-clock budget
-    # cannot see.
-    request_timeout_s: float | None = Field(default=None, gt=0)
+    # Per-request HTTP timeout for live model calls, in seconds. A tripped
+    # timeout surfaces through the gateway as a journaled TRANSIENT failure
+    # and a visible retry — bounded and diagnosable, never a silently wedged
+    # call. Default 180s: a full 8192-token response at Opus speeds takes
+    # ~2 minutes, so anything past three is a stall, not a long answer (the
+    # SDK's own default is 10 minutes per attempt, which in practice let one
+    # stalled call eat a whole wall-clock budget). None = the SDK default.
+    request_timeout_s: float | None = Field(default=180.0, gt=0)
     # The Anthropic SDK's transparent retry count for live model calls.
     # Default 0: the harness owns retries (model_retry below) and journals
     # each one — SDK-internal retries are invisible to the journal and were
@@ -182,6 +184,13 @@ class RunConfig(BaseModel):
     # LLM_RETRY events, so comparing the knob too would only break replay
     # of pre-taxonomy recordings.
     model_retry: ModelRetry = Field(default_factory=ModelRetry)
+    # M14.2 refresh provenance: the recorded session this run was seeded
+    # from, and whether stable-evidence carry-forward was disabled. The seed
+    # (brief + carry/re-research split) is a pure function of that immutable
+    # parent recording plus refresh_all, so replay re-derives it identically
+    # from these two fields (T4) — no seed data is duplicated into config.
+    refresh_of: str | None = None
+    refresh_all: bool = False
     # Provenance stamp: the parsec version that recorded this session.
     # Replay/fork warn on mismatch — recordings only replay byte-identically
     # against the code that produced them, so skew is the first thing to

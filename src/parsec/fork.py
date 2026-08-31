@@ -114,8 +114,25 @@ async def run_fork(
     # channel). A new steer message lands AT the fork.
     scripted: dict[int, list[str]] = {}
     scripted_gates: dict[tuple[str, int], list[str]] = {}
+    finalized_calls = 0  # sequential recording: event order is call order
     for ev in event_log.read(original_session_id):
-        if ev.event_type == EventType.STEERING_INJECTED and ev.payload["turn_index"] < at_call:
+        if ev.event_type in (EventType.LLM_RESPONSE, EventType.LLM_FAILED):
+            finalized_calls += 1
+        elif ev.event_type == EventType.FETCH_PERFORMED:
+            # Head fetches must serve the byte versions the recording saw, in
+            # order, even after a later session (a refresh) advanced the
+            # shared URL cache row. The head is calls [0, at_call); a fetch
+            # runs a tool_use from the response before it, so fetches seen
+            # while at most at_call calls have finalized replay call
+            # at_call-1's tools and belong to the head. Everything after is
+            # the abandoned tail: unpinned, so the fork's own tail uses its
+            # normal live-prefer-cache behavior (M14.2, T4).
+            if finalized_calls > at_call:
+                continue
+            key, doc_hash = ev.payload.get("cache_key"), ev.payload.get("doc_hash")
+            if key and doc_hash:
+                fetcher.pin(ev.stream_id, key, doc_hash)
+        elif ev.event_type == EventType.STEERING_INJECTED and ev.payload["turn_index"] < at_call:
             gate = ev.payload.get("gate")
             if gate:
                 scripted_gates.setdefault((gate, ev.payload["turn_index"]), []).append(
@@ -127,4 +144,10 @@ async def run_fork(
         scripted.setdefault(at_call, []).append(steer)
     loop.scripted_steering = scripted
     loop.scripted_gates = scripted_gates
+    if fork_config.refresh_of:
+        # Forking a refreshed session: the head planned from a seed, not a
+        # decomposer call — re-derive it from the same immutable parent.
+        from parsec.refresh import derive_seed
+
+        loop.refresh_seed = derive_seed(conn, fork_config.refresh_of, fork_config.refresh_all)
     return await loop.run()

@@ -8,6 +8,7 @@ Modes:
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -18,6 +19,7 @@ from parsec.config import CacheMode, Clock
 from parsec.errors import CacheMiss
 from parsec.store.blobs import BlobStore
 from parsec.store.documents import DocumentStore
+from parsec.store.event_log import CURRENT_STREAM
 
 _TRACKING_PARAMS_PREFIXES = ("utm_",)
 _TRACKING_PARAMS = {"fbclid", "gclid", "ref"}
@@ -84,33 +86,61 @@ class Fetcher:
         self.robots = robots
         self.user_agent = user_agent
         self._last_fetch_by_domain: dict[str, float] = {}
+        # Replay/fork pinning (T4, M14.2): (stream_id, cache_key) -> the
+        # doc_hashes the session being re-executed recorded for that URL in
+        # that stream, in fetch order. The shared cache_index row for a URL
+        # advances every time a LATER session re-fetches it (`parsec refresh`
+        # does so on purpose), so a replay that consulted the index would
+        # read bytes the recording never saw. A RECORD session never consults
+        # the index either, so it can fetch one URL twice and see different
+        # bytes — hence a queue, not a scalar: each replayed fetch consumes
+        # the next recorded version, and streams are sequential actors, so
+        # per-stream order is stable however concurrent streams interleave.
+        # Pinned fetches resolve straight off the content-addressed documents
+        # table; exhausted or missing keys fall through to the index/live
+        # path (fork's diverged tail fetches with normal cache behavior).
+        self.pinned_docs: dict[tuple[str, str], deque[str]] = {}
+
+    def pin(self, stream_id: str, cache_key: str, doc_hash: str) -> None:
+        """Queue one recorded byte version for the next fetch of cache_key
+        in stream_id. Call in recorded event order."""
+        self.pinned_docs.setdefault((stream_id, cache_key), deque()).append(doc_hash)
 
     async def fetch(self, url: str) -> FetchedDoc:
         canonical_url = canonicalize_url(url)
         cache_key = ids.cache_key(canonical_url)
 
         if self.mode in (CacheMode.REPLAY, CacheMode.LIVE_PREFER_CACHE):
+            pins = self.pinned_docs.get((CURRENT_STREAM.get(), cache_key))
+            if pins:
+                pinned_hash = pins.popleft()
+                pinned = self.documents.get_document(pinned_hash)
+                if pinned is not None:
+                    return self._doc_from_row(pinned, pinned_hash, canonical_url)
             cached = self.documents.cache_lookup(cache_key)
             if cached is not None:
-                import json
-
-                meta = json.loads(cached["meta_json"])
-                return FetchedDoc(
-                    doc_hash=cached["doc_hash"],
-                    canonical_url=canonical_url,
-                    status_code=cached["status_code"],
-                    content_type=cached["content_type"],
-                    text=self.blobs.get_text(cached["text_blob"]),
-                    title=meta.get("title"),
-                    from_cache=True,
-                    outcome=meta.get("outcome", "ok"),
-                    license_url=meta.get("license_url"),
-                    note=meta.get("note"),
-                )
+                return self._doc_from_row(cached, cached["doc_hash"], canonical_url)
             if self.mode == CacheMode.REPLAY:
                 raise CacheMiss(canonical_url)
 
         return await self._live_fetch(canonical_url, cache_key)
+
+    def _doc_from_row(self, row, doc_hash: str, canonical_url: str) -> FetchedDoc:
+        import json
+
+        meta = json.loads(row["meta_json"])
+        return FetchedDoc(
+            doc_hash=doc_hash,
+            canonical_url=canonical_url,
+            status_code=row["status_code"],
+            content_type=row["content_type"],
+            text=self.blobs.get_text(row["text_blob"]),
+            title=meta.get("title"),
+            from_cache=True,
+            outcome=meta.get("outcome", "ok"),
+            license_url=meta.get("license_url"),
+            note=meta.get("note"),
+        )
 
     async def _live_fetch(self, canonical_url: str, cache_key: str) -> FetchedDoc:
         from parsec.retrieval.extract import EXTRACTOR_VERSION, extract_text

@@ -124,9 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Retries for subquestions still PARTIAL while budget headroom remains (0 disables)",
     )
     ask.add_argument(
-        "--request-timeout", type=float, default=None, metavar="SECONDS",
-        help="Per-request HTTP timeout for model calls (default: SDK's 10 minutes); "
-        "a tripped timeout is journaled as a model-call failure, never a silent hang",
+        "--request-timeout", type=float,
+        default=RunConfig.model_fields["request_timeout_s"].default, metavar="SECONDS",
+        help="Per-request HTTP timeout for model calls (default 180); a tripped "
+        "timeout is journaled as a transient failure and retried, never a silent hang",
     )
     ask.add_argument(
         "--retry-attempts", type=int, default=ModelRetry().max_attempts,
@@ -223,6 +224,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diff.add_argument("--data-dir", type=Path, default=Path("data"))
     diff.add_argument("--json", action="store_true", dest="as_json")
+
+    refresh = sub.add_parser(
+        "refresh",
+        help="Re-run a recorded session's query as a new session seeded by its brief and "
+        "coverage ledger (M14.2): stable-evidence subquestions carry forward, mutable ones "
+        "re-research live, and the run ends by emitting the claim-level diff against the "
+        "original. Exits 3 when material changes exist.",
+    )
+    refresh.add_argument("session_id", help="The recorded session to refresh")
+    refresh.add_argument(
+        "--all", action="store_true", dest="refresh_all",
+        help="Re-research every subquestion, including stable-evidence ones",
+    )
+    refresh.add_argument(
+        "--epsilon", type=_positive_float, default=0.05,
+        help="Credence movement below this reads as held in the final diff (default 0.05)",
+    )
+    refresh.add_argument("--data-dir", type=Path, default=Path("data"))
+    refresh.add_argument("--json", action="store_true", dest="as_json")
 
     sessions = sub.add_parser("sessions", help="Inspect sessions")
     sessions_sub = sessions.add_subparsers(dest="sessions_command", required=True)
@@ -751,10 +771,17 @@ def cmd_diff(args) -> int:
     if args.as_json:
         print(json.dumps(report.to_payload()))
         return EXIT_OK if report.unchanged else EXIT_PARTIAL
+    _render_diff(report)
+    return EXIT_OK if report.unchanged else EXIT_PARTIAL
 
-    # Session ids, queries, claim/premise text, and URLs are session-controlled
-    # — escape them so brackets can't restyle or break the render (same reason
-    # display_answer returns Text).
+
+def _render_diff(report) -> None:
+    """Human render of a DiffReport — shared by `parsec diff` and the diff
+    `parsec refresh` emits at the end of its run.
+
+    Session ids, queries, claim/premise text, and URLs are session-controlled
+    — escape them so brackets can't restyle or break the render (same reason
+    display_answer returns Text)."""
     console.print(f"[bold]{escape(report.session_a)}[/bold] → [bold]{escape(report.session_b)}[/bold]")
     if report.query_a != report.query_b:
         console.print(
@@ -795,7 +822,58 @@ def cmd_diff(args) -> int:
         for d in report.documents:
             doc_table.add_row(escape(d.url), d.status + (" (content differs at the same URL)" if d.status == "changed" else ""))
         console.print(doc_table)
-    return EXIT_OK if report.unchanged else EXIT_PARTIAL
+
+
+def cmd_refresh(args) -> int:
+    from parsec.refresh import run_refresh
+    from parsec.verify.diff import diff_sessions
+
+    clock = RealClock()
+    conn, blobs = _open(args.data_dir)
+    store = SessionStore(conn, clock)
+    row = store.get(args.session_id)
+    if row is None:
+        console.print(f"[red]unknown session {args.session_id}[/red]")
+        return EXIT_USAGE
+    _warn_version_skew(row)
+    config = store.get_config(args.session_id)
+    live_adapter = make_adapter(config)
+    result = asyncio.run(
+        run_refresh(
+            conn, blobs, clock, args.session_id, live_adapter,
+            fetch_transport=fetch_transport, refresh_all=args.refresh_all,
+        )
+    )
+    if result.status not in ("done", "partial"):
+        console.print(
+            f"[red]refresh run {result.session_id} ended {result.status} — no diff emitted[/red]"
+        )
+        return EXIT_ERROR
+
+    report = diff_sessions(conn, args.session_id, result.session_id, epsilon=args.epsilon)
+    material = not report.unchanged or result.status != "done"
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "session_id": result.session_id,
+                    "status": result.status,
+                    "answer": result.answer,
+                    "coverage": result.coverage,
+                    "diff": report.to_payload(),
+                }
+            )
+        )
+        return EXIT_PARTIAL if material else EXIT_OK
+    console.print(
+        f"[dim]refreshed as {result.session_id} · {result.status} · {result.turns} turns[/dim]\n"
+    )
+    _render_diff(report)
+    if result.status != "done":
+        console.print(
+            f"[yellow]refresh run finished {result.status} — the diff may be missing evidence[/yellow]"
+        )
+    return EXIT_PARTIAL if material else EXIT_OK
 
 
 def cmd_sessions(args) -> int:
@@ -1164,6 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
         "replay": cmd_replay,
         "verify": cmd_verify,
         "diff": cmd_diff,
+        "refresh": cmd_refresh,
         "fork": cmd_fork,
         "judge": cmd_judge,
         "eval": cmd_eval,

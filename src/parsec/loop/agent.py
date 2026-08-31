@@ -43,7 +43,7 @@ from parsec.errors import (
     ModelErrorKind,
     ReplayDivergence,
 )
-from parsec.gateway.gateway import ModelGateway
+from parsec.gateway.gateway import WALL_CLOCK_KIND, ModelGateway
 from parsec.loop import compaction, prompts
 from parsec.loop.citations import check_citations, write_claims
 from parsec.loop.states import AgentState, StateMachine
@@ -219,6 +219,13 @@ class OrchestratorLoop:
         # harness-enforced dispatch caps. Defaults = full configured caps.
         self.brief_scope = ""
         self.effort_limits: EffortLimits = effort_limits("deep", config.budgets)
+        # M14.2 refresh seed: when set, the plan is seeded from a prior
+        # session's recorded brief (no decomposition call) and its
+        # stable-evidence subquestions carry forward instead of
+        # re-dispatching. Set by refresh.run_refresh — and by replay/fork
+        # for sessions whose config records refresh_of, re-derived from the
+        # same immutable parent, so seeded sessions replay byte-identically.
+        self.refresh_seed = None  # parsec.refresh.RefreshSeed | None
         # M11 replay scheduler: recorded join order per wave. Empty on live
         # runs (observed completion order is used and journaled); set by the
         # replay runner from the recorded SUBAGENT_JOINED events.
@@ -227,6 +234,10 @@ class OrchestratorLoop:
         # global created_seq would vary with cross-stream interleaving.
         self._writer_premises: list[str] = []
         self._writer_findings: list[str] = []
+        # Set by run(): the state machine (so mid-subagent progress snapshots
+        # can name the phase) and the writer's wall-clock grace flag.
+        self._sm: StateMachine | None = None
+        self._wall_grace = False
         # Writer degradation level (Phase 2): 0 = full evidence text, 1/2 =
         # clipped lines. Monotonic across writer rounds — once reduced, stay
         # reduced (deterministic under gap-fill rewrites).
@@ -257,10 +268,14 @@ class OrchestratorLoop:
             {"session_id": sid, "query": cfg.query, "config": cfg.to_json_dict()},
         )
         sm = StateMachine(self.event_log, sid)
+        self._sm = sm
         self._start_mono = self.clock.monotonic()
+        self.gateway.wall_budget = self._wall_budget
 
         try:
             subquestions = await self._plan()
+            if self.refresh_seed is not None:
+                subquestions = self._apply_refresh_seed(subquestions)
             partial = False
 
             if self.config.budgets.parallel_subagents > 1 and len(subquestions) > 1:
@@ -438,7 +453,13 @@ class OrchestratorLoop:
         subquestion (never crashes)."""
         cfg = self.config
         sid = cfg.session_id
-        if self._gate():
+        if self.refresh_seed is not None:
+            # M14.2: the parent already scoped this question — reuse its
+            # recorded brief verbatim, spending zero model calls on planning.
+            seed = self.refresh_seed
+            brief = Brief(seed.scope, seed.effort, list(seed.questions))
+            note = f"refresh: brief seeded from {seed.parent_session_id}"
+        elif self._gate():
             brief = Brief("", "deep", [cfg.query])
             note = "decomposition skipped (budget); whole query as sq-1"
         else:
@@ -452,18 +473,16 @@ class OrchestratorLoop:
         questions = brief.questions[: self.effort_limits.max_subquestions]
         subquestions = [Subquestion(f"sq-{i + 1}", q) for i, q in enumerate(questions)]
 
-        self.event_log.append(
-            sid,
-            "harness",
-            EventType.RESEARCH_BRIEF,
-            {
-                "scope": brief.scope,
-                "effort": brief.effort,
-                "subquestions": questions,
-                "limits": self.effort_limits.model_dump(),
-                "gated": cfg.brief_gate,
-            },
-        )
+        brief_payload = {
+            "scope": brief.scope,
+            "effort": brief.effort,
+            "subquestions": questions,
+            "limits": self.effort_limits.model_dump(),
+            "gated": cfg.brief_gate,
+        }
+        if self.refresh_seed is not None:
+            brief_payload["seeded_from"] = self.refresh_seed.parent_session_id
+        self.event_log.append(sid, "harness", EventType.RESEARCH_BRIEF, brief_payload)
         self.event_log.append(
             sid,
             "harness",
@@ -652,6 +671,81 @@ class OrchestratorLoop:
         self.gate_reason = "declined at cost gate"
         return True
 
+    def _apply_refresh_seed(self, subquestions: list[Subquestion]) -> list[Subquestion]:
+        """M14.2: split the seeded plan into carried vs re-researched. Carried
+        subquestions get their parent evidence re-recorded under this session
+        (content-derived node IDs keep cross-session identity) and resolve as
+        answered without a dispatch; only the remainder goes to research.
+        Deterministic — the seed is a pure function of the immutable parent
+        recording, so a refreshed session replays byte-identically (T4)."""
+        from parsec.refresh import copy_carried_evidence  # lazy: refresh imports this module
+
+        seed = self.refresh_seed
+        sid = self.config.session_id
+        carried = [sq for sq in subquestions if sq.sq_id in seed.carried]
+        remaining = [sq for sq in subquestions if sq.sq_id not in seed.carried]
+        self.event_log.append(
+            sid,
+            "harness",
+            EventType.REFRESH_SEEDED,
+            {
+                "parent": seed.parent_session_id,
+                "refresh_all": self.config.refresh_all,
+                "carried": [
+                    {"sq_id": sq.sq_id, "reason": seed.carried[sq.sq_id].reason}
+                    for sq in carried
+                ],
+                "researched": [
+                    {"sq_id": sq.sq_id, "reason": seed.research_reasons.get(sq.sq_id, "")}
+                    for sq in remaining
+                ],
+            },
+        )
+        if not carried:
+            return remaining
+        copied = copy_carried_evidence(
+            self.ctx.conn, self.dag, seed.parent_session_id, sid,
+            [seed.carried[sq.sq_id] for sq in carried],
+        )
+        # The parent id is stable across replay (it rides in refresh_of), so
+        # naming it here keeps notebook entries byte-identical.
+        md = [f"## Carried forward from {seed.parent_session_id}"]
+        for sq in carried:
+            premise_ids, finding_ids = copied[sq.sq_id]
+            for pid in premise_ids:
+                if pid not in self._writer_premises:
+                    self._writer_premises.append(pid)
+            for fid in finding_ids:
+                if fid not in self._writer_findings:
+                    self._writer_findings.append(fid)
+            reason = seed.carried[sq.sq_id].reason
+            self.coverage.set_status(
+                sid, sq.sq_id, "answered", f"{reason} from {seed.parent_session_id}"
+            )
+            # Journal the carried evidence as this session's own completion
+            # record: derive_seed reads per-subquestion premises/findings only
+            # from SUBAGENT_COMPLETED, so without this a refresh of a refresh
+            # would see "answered without premises" and re-research the row.
+            self.event_log.append(
+                sid,
+                "harness",
+                EventType.SUBAGENT_COMPLETED,
+                {
+                    "sq_id": sq.sq_id,
+                    "status": "answered",
+                    "premises": premise_ids,
+                    "findings": finding_ids,
+                    "dead_ends": [],
+                    "carried_from": seed.parent_session_id,
+                },
+            )
+            md.append(
+                f"- {sq.sq_id}: {reason} "
+                f"({len(premise_ids)} premises, {len(finding_ids)} findings)"
+            )
+        self.notebook.append(sid, "harness", "\n".join(md))
+        return remaining
+
     # -- subagents -----------------------------------------------------------
 
     async def _run_subagent(self, sq: Subquestion, remaining_sqs: int = 1) -> None:
@@ -751,6 +845,10 @@ class OrchestratorLoop:
         sid = cfg.session_id
         sequential = allowance is None
         actor = f"subagent:{sq.sq_id}"
+        # Research calls get the plain wall cap: the writer's 1.25x grace must
+        # not leak into gap-fill or coverage-retry subagents dispatched after
+        # a writer pass (the next writer/repair call re-arms it).
+        self._wall_grace = False
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
         tool_schemas = self.registry.export_schemas()
         # The per-phase immutable prefix, counted by the compaction trigger
@@ -826,6 +924,7 @@ class OrchestratorLoop:
                 if sequential:
                     self.turns += 1
                 subagent_turns += 1
+                self._notify_progress()
 
                 if resp.stop_reason == "tool_use":
                     submission, submit_problems = self._extract_submission(resp, recorded_premises)
@@ -844,6 +943,7 @@ class OrchestratorLoop:
                             ),
                         }
                     )
+                    self._notify_progress()
                     continue
                 if resp.stop_reason == "max_tokens":
                     messages.append({"role": "assistant", "content": resp.content})
@@ -1267,6 +1367,11 @@ class OrchestratorLoop:
                 )
                 return resp, messages
             except ModelCallFailed as exc:
+                if exc.kind == WALL_CLOCK_KIND:
+                    # Out of time even inside the grace: the wall-clock analogue
+                    # of a hard usd breach — halt with the best-effort answer.
+                    cap = self.config.budgets.max_wall_seconds
+                    raise BudgetExceeded("wall_seconds", cap * 1.25, cap) from exc
                 if exc.error_kind != ModelErrorKind.CONTEXT_OVERFLOW or self._writer_level >= 2:
                     raise
                 before = self._writer_estimate(messages)
@@ -1453,6 +1558,14 @@ class OrchestratorLoop:
             messages.append({"role": "user", "content": f"[user steering] {text}"})
         return messages
 
+    def _notify_progress(self) -> None:
+        """Mid-subagent refresh for the live view. _notify fires only on
+        orchestrator state transitions, so for the length of a subagent the
+        footer froze at the dispatch-time counts ("0 premises" while premises
+        were landing). Display-only: never touches the journal."""
+        if self._sm is not None:
+            self._notify(self._sm)
+
     def _notify(self, sm: StateMachine) -> None:
         if self.reporter is None:
             return
@@ -1629,11 +1742,19 @@ class OrchestratorLoop:
         self.gate_reason = None
         return False
 
+    def _wall_budget(self) -> tuple[float, float]:
+        """(elapsed_s, cap_s) for the gateway's in-call deadline. Research
+        calls get the budget itself; once the writer gate has run, writer and
+        repair calls get the same 1.25x grace the usd cap gives them."""
+        cap = self.config.budgets.max_wall_seconds * (1.25 if self._wall_grace else 1.0)
+        return self.clock.monotonic() - self._start_mono, cap
+
     def _writer_gate(self) -> None:
         """The writer/repair calls run inside the 1.25x usd grace; only a hard
         breach halts them (the forced answer must be writable, §3 rule 1)."""
         if self.halt_requested:
             raise HaltRequested()
+        self._wall_grace = True
         usd = self.ledger.spent_usd(self.config.session_id)
         if usd >= self.config.budgets.max_usd * 1.25:
             raise BudgetExceeded("usd", usd, self.config.budgets.max_usd)
