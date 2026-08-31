@@ -297,6 +297,117 @@ async def test_refreshed_and_parent_sessions_both_replay(
     assert outcome.answers_match
 
 
+async def test_replay_and_fork_serve_each_recorded_version_of_a_refetched_url(
+    db, blobs, event_log, ledger, sessions, clock, tmp_path
+):
+    """A RECORD session never consults the URL cache, so fetching one URL
+    twice can see different bytes. Pins are per-stream queues, not a
+    scalar: replay serves each recorded version in fetch order, and a fork
+    pins only its head's fetches — the tail falls back to the cache row."""
+    from parsec.fork import run_fork
+
+    sent_b3 = "The listed price is 99 dollars."  # must never be served
+    versions = iter([SENT_B1, SENT_B2])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == URL_B
+        return httpx.Response(
+            200, text=next(versions, sent_b3), headers={"content-type": "text/plain"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    p_b = _premise_id(SENT_B2, "volatile")
+    script = [
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",
+              "input": {"scope": "Cover the listed price.", "effort": "standard",
+                        "subquestions": ["what is the listed price"]}}],
+            stop_reason="tool_use"),
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_f1", "name": "fetch", "input": {"url": URL_B}}],
+            stop_reason="tool_use"),
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_f2", "name": "fetch", "input": {"url": URL_B}}],
+            stop_reason="tool_use"),
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_r", "name": "record_premises",
+              "input": {"premises": [{"text": SENT_B2, "span_refs": [_span(SENT_B2)],
+                                      "claim_class": "volatile"}]}}],
+            stop_reason="tool_use"),
+        scripted_response(
+            [{"type": "tool_use", "id": "tu_s", "name": "submit_report",
+              "input": {"status": "answered"}}], stop_reason="tool_use"),
+        scripted_response(
+            [{"type": "text", "text": f"Price settled. [narrative]\n{SENT_B2} [{p_b}]"}],
+            stop_reason="end_turn"),
+    ]
+    config = make_config(
+        tmp_path, session_id="s-twice", query="listed price", respect_robots=False,
+        budgets=Budgets(max_gap_rounds=0, max_coverage_gap_rounds=0),
+    )
+    documents = DocumentStore(db, clock)
+    spans = SpanStore(db)
+    dag = DagStore(db, event_log)
+    fetcher = Fetcher(documents, blobs, clock, CacheMode.RECORD, transport=transport)
+    registry = ToolRegistry(
+        [
+            FetchTool(fetcher, spans),
+            RecordPremisesTool(dag, spans, documents),
+            SearchWithinTool(spans, EmbeddingCache(db, HashedNgramEmbedder())),
+        ]
+    )
+    ctx = ToolContext(db, blobs, event_log, ledger, config, clock)
+    loop = OrchestratorLoop(
+        config, ModelGateway(FakeAdapter(script), event_log, blobs, ledger, config),
+        registry, ctx, sessions, dag, spans, documents,
+        CoverageLedger(db, event_log), Notebook(db, event_log, clock),
+    )
+    assert (await loop.run()).status == "done"
+
+    h1, h2 = ids.doc_hash(SENT_B1.encode()), ids.doc_hash(SENT_B2.encode())
+
+    def fetched(sid: str) -> list[str]:
+        return [
+            ev.payload["doc_hash"]
+            for ev in event_log.read(sid)
+            if ev.event_type == EventType.FETCH_PERFORMED
+        ]
+
+    def hashes(sid: str) -> list[str]:
+        return [
+            ev.payload["prompt_hash"]
+            for ev in event_log.read(sid)
+            if ev.event_type == EventType.LLM_REQUEST
+        ]
+
+    assert fetched("s-twice") == [h1, h2]
+
+    # Replay consumes the pins in order: the second fetch gets the second
+    # version, so the tool result and every later prompt match the recording.
+    outcome = await run_replay(db, blobs, clock, "s-twice")
+    assert outcome.projections_match, outcome.first_divergence
+    assert outcome.answers_match
+
+    # Fork after both fetches (head = calls 0..4): both pins are head pins.
+    fork = await run_fork(
+        db, blobs, clock, "s-twice", at_call=5, live_adapter=FakeAdapter(script[5:])
+    )
+    assert fork.status == "done"
+    assert fetched(fork.session_id) == [h1, h2]
+    assert hashes(fork.session_id)[:5] == hashes("s-twice")[:5]
+
+    # Fork between the fetches (head = calls 0..1): only the first fetch is
+    # pinned; the tail's re-fetch takes the cache row (advanced to the second
+    # version by the recording) — neither the stale first pin nor a live hit.
+    fork = await run_fork(
+        db, blobs, clock, "s-twice", at_call=2, live_adapter=FakeAdapter(script[2:])
+    )
+    assert fork.status == "done"
+    assert fetched(fork.session_id) == [h1, h2]
+    assert hashes(fork.session_id)[:2] == hashes("s-twice")[:2]
+    assert ids.doc_hash(sent_b3.encode()) not in fetched(fork.session_id)
+
+
 async def test_refresh_all_reresearches_stable_subquestions_too(
     parent, db, blobs, event_log, clock, pages, transport
 ):
