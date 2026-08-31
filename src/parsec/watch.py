@@ -30,6 +30,7 @@ schedule only decides WHEN each observation is taken.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -129,6 +130,11 @@ def _lock_backend() -> tuple[Callable, Callable]:
             "and neither is available on this platform"
         ) from None
 
+    # What the CRT reports when the byte is held by another process (LK_NBLCK)
+    # or LK_LOCK's own retries gave up. Anything else — EBADF, EINVAL — is a
+    # real failure and must surface, not spin forever.
+    contention = {errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+
     def acquire(f) -> None:
         # LK_NBLCK fails immediately when another process holds the byte;
         # poll rather than LK_LOCK, whose built-in retry gives up after ~10s.
@@ -136,7 +142,9 @@ def _lock_backend() -> tuple[Callable, Callable]:
             try:
                 msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
                 return
-            except OSError:
+            except OSError as exc:
+                if exc.errno not in contention:
+                    raise
                 time.sleep(0.05)
 
     return acquire, lambda f: msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)

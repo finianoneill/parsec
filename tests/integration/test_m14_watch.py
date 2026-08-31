@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 import pytest
 
@@ -118,21 +119,23 @@ def test_concurrent_watches_never_lose_labels(tmp_path):
 
 
 def test_lock_backend_covers_windows_and_refuses_unlocked_writes(tmp_path, monkeypatch):
-    """Without fcntl the lock comes from msvcrt (non-blocking poll, then
-    unlock); with neither, append_labels refuses rather than racing."""
+    """Without fcntl the lock comes from msvcrt: contention (EACCES) polls,
+    any other lock failure propagates instead of spinning forever; with
+    neither module, append_labels refuses rather than racing."""
+    import errno
     import sys
 
     calls: list[int] = []
 
     class FakeMsvcrt:
         LK_NBLCK, LK_UNLCK = 2, 0
-        busy = [OSError("locked by another process")]
+        failures = [OSError(errno.EACCES, "locked by another process")]
 
         @staticmethod
         def locking(fd, mode, nbytes):
             calls.append(mode)
-            if mode == FakeMsvcrt.LK_NBLCK and FakeMsvcrt.busy:
-                raise FakeMsvcrt.busy.pop()
+            if mode == FakeMsvcrt.LK_NBLCK and FakeMsvcrt.failures:
+                raise FakeMsvcrt.failures.pop()
 
     monkeypatch.setitem(sys.modules, "fcntl", None)  # `import fcntl` -> ImportError
     monkeypatch.setitem(sys.modules, "msvcrt", FakeMsvcrt)
@@ -142,10 +145,40 @@ def test_lock_backend_covers_windows_and_refuses_unlocked_writes(tmp_path, monke
     assert calls == [2, 2, 0]  # busy once, acquired, released
     assert read_labels(path) == [{"credence": 0.5, "label": 1}]
 
+    # A permanent failure (bad descriptor) is not contention: one attempt, raised.
+    calls.clear()
+    FakeMsvcrt.failures = [OSError(errno.EBADF, "bad file descriptor")]
+    with pytest.raises(OSError) as info:
+        append_labels(path, [{"credence": 0.5, "label": 1}])
+    assert info.value.errno == errno.EBADF and calls == [2]
+    assert read_labels(path) == [{"credence": 0.5, "label": 1}]
+
     monkeypatch.setitem(sys.modules, "msvcrt", None)
     with pytest.raises(RuntimeError, match="process lock"):
         append_labels(path, [{"credence": 0.5, "label": 1}])
     assert read_labels(path) == [{"credence": 0.5, "label": 1}]  # nothing written unlocked
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native msvcrt lock semantics")
+def test_windows_lock_propagates_non_contention_errors(tmp_path):
+    """Native regression: msvcrt.locking on an invalid descriptor raises
+    EBADF, which must surface immediately rather than be retried."""
+    import errno
+    import os
+
+    from parsec.watch import _lock_backend
+
+    acquire, _release = _lock_backend()
+    fd = os.open(tmp_path / "lock", os.O_RDWR | os.O_CREAT)
+    os.close(fd)
+
+    class Closed:
+        def fileno(self):
+            return fd  # no longer valid
+
+    with pytest.raises(OSError) as info:
+        acquire(Closed())
+    assert info.value.errno == errno.EBADF
 
 
 def test_labels_file_round_trips_in_calibrate_shape(tmp_path):
