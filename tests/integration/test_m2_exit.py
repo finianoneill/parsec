@@ -6,18 +6,9 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 import parsec.cli as cli
 from parsec.db.connection import open_db
-from tests.integration.test_orchestrator_exit import (  # shared scripted session
-    PAGE_A,
-    fixtures_path,
-    page_span_ids,
-    run_ask,
-    scripted_adapter,
-    transport,
-)
+from tests.integration.m3_corpus import PAGE_A, page_span_ids, run_ask  # shared scripted session
 
 
 def _verify(data_dir, session_id, capsys):
@@ -25,11 +16,11 @@ def _verify(data_dir, session_id, capsys):
     return code, json.loads(capsys.readouterr().out)
 
 
-def test_corrupt_span_flags_dependent_claim(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
+def test_corrupt_span_flags_dependent_claim(tmp_path, m3_transport, m3_fixtures_path, m3_scripted_adapter, capsys):
     data_dir = tmp_path / "data"
     session_id = "m2-exit-session"
 
-    assert run_ask(data_dir, fixtures_path, session_id) == 0
+    assert run_ask(data_dir, m3_fixtures_path, session_id) == 0
     capsys.readouterr()
 
     # Clean corpus verifies clean.
@@ -57,11 +48,11 @@ def test_corrupt_span_flags_dependent_claim(tmp_path, transport, fixtures_path, 
     assert "100 degrees Celsius" in dependent[0]["detail"]
 
 
-def test_deleted_document_blob_flagged(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
+def test_deleted_document_blob_flagged(tmp_path, m3_transport, m3_fixtures_path, m3_scripted_adapter, capsys):
     data_dir = tmp_path / "data"
     session_id = "m2-blob-session"
 
-    assert run_ask(data_dir, fixtures_path, session_id) == 0
+    assert run_ask(data_dir, m3_fixtures_path, session_id) == 0
     capsys.readouterr()
 
     # Remove page A's raw blob from the content-addressed store.

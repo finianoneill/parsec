@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
@@ -22,7 +21,7 @@ from parsec.evals.case import load_case, make_case_from_session
 from parsec.evals.runner import run_cases
 from parsec.gateway.fake_adapter import FakeAdapter, scripted_response
 from parsec.models.gateway import ModelResponse, Usage
-from tests.integration.test_orchestrator_exit import (
+from tests.integration.m3_corpus import (
     PAGE_A,
     PAGE_B,
     PREMISE_A_TEXT,
@@ -34,12 +33,9 @@ from tests.integration.test_orchestrator_exit import (
     URL_A,
     URL_B,
     finding_id,
-    fixtures_path,
     page_span_ids,
     premise_id,
     run_ask,
-    scripted_adapter,
-    transport,
 )
 
 MUST_FIND = ["100 degrees Celsius", "re:everest.*70 degrees", "mariana trench"]  # third is a planted miss
@@ -68,7 +64,6 @@ def _eval_script(answer: str) -> list:
     span_a = page_span_ids(PAGE_A)[0]
     span_b = page_span_ids(PAGE_B)[0]
     p_a = premise_id(PREMISE_A_TEXT, span_a)
-    p_b = premise_id(PREMISE_B_TEXT, span_b)
     return [
         scripted_response(
             [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",
@@ -124,19 +119,19 @@ def _answers() -> tuple[str, str]:
 
 
 @pytest.fixture
-def frozen_case(tmp_path, transport, fixtures_path, scripted_adapter, capsys):
+def frozen_case(tmp_path, m3_transport, m3_fixtures_path, m3_scripted_adapter, capsys):
     """Record a real session, then snapshot it into a frozen case with gold."""
     data_dir = tmp_path / "record-data"
-    assert run_ask(data_dir, fixtures_path, "recording-session") == 0
+    assert run_ask(data_dir, m3_fixtures_path, "recording-session") == 0
     capsys.readouterr()
     case_dir = tmp_path / "cases" / "boiling"
     make_case_from_session(
-        data_dir, fixtures_path, case_dir, case_id="boiling", query=QUERY, must_find=MUST_FIND
+        data_dir, m3_fixtures_path, case_dir, case_id="boiling", query=QUERY, must_find=MUST_FIND
     )
     return case_dir
 
 
-def test_m5_exit(tmp_path, frozen_case, transport, capsys):
+def test_m5_exit(tmp_path, frozen_case, m3_transport, capsys):
     good_answer, degraded_answer = _answers()
     judge = FakeJudge(score=4)
     clock = RealClock()
@@ -145,7 +140,7 @@ def test_m5_exit(tmp_path, frozen_case, transport, capsys):
     assert case.must_find == MUST_FIND
 
     # --- version A: full harness behavior on the frozen corpus ---
-    calls_before = transport["calls"]
+    calls_before = m3_transport["calls"]
     run_a = asyncio.run(
         run_cases(
             [frozen_case], tmp_path / "work-a",
@@ -154,7 +149,7 @@ def test_m5_exit(tmp_path, frozen_case, transport, capsys):
             judge_adapter=judge, judge_model="fake-judge",
         )
     )
-    assert transport["calls"] == calls_before  # frozen corpus: zero HTTP
+    assert m3_transport["calls"] == calls_before  # frozen corpus: zero HTTP
     result_a = run_a.results[0]
     assert result_a.status == "done"
     assert result_a.scores.citation_faithfulness == 1.0   # mechanical axis
@@ -193,7 +188,7 @@ def test_m5_exit(tmp_path, frozen_case, transport, capsys):
     assert exit_code == 0 and out["ok"] is True
 
 
-def test_eval_cli_run_and_make_case(tmp_path, frozen_case, transport, monkeypatch, capsys):
+def test_eval_cli_run_and_make_case(tmp_path, frozen_case, m3_transport, monkeypatch, capsys):
     """The CLI path: parsec eval run over a cases root, results file written."""
     good_answer, _ = _answers()
     monkeypatch.setattr(cli, "adapter_factory", lambda config: FakeAdapter(_eval_script(good_answer)))

@@ -321,11 +321,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--support-checker", choices=["mechanical", "grounded"], default="mechanical",
         help="Claim-support axis grader: grounded adds the M9 lexical-NLI tier over the exact-match floor",
     )
+    ev_run.add_argument(
+        "--metrics", default=None,
+        help="Comma-separated subset of the registered mechanical metrics to score "
+             "(default: all; the advisory synthesis judge is always in the manifest)",
+    )
     ev_cmp = ev_sub.add_parser("compare", help="Compare two results files for regressions")
     ev_cmp.add_argument("results_a", type=Path)
     ev_cmp.add_argument("results_b", type=Path)
     ev_cmp.add_argument("--epsilon", type=float, default=0.05)
     ev_cmp.add_argument("--json", action="store_true", dest="as_json")
+    ev_an = ev_sub.add_parser(
+        "analyze",
+        help="Loss taxonomy over a results file: why each case lost points, by pattern and category",
+    )
+    ev_an.add_argument("results", type=Path)
+    ev_an.add_argument("--case", default=None, help="Only this case_id")
+    ev_an.add_argument("--json", action="store_true", dest="as_json")
     ev_make = ev_sub.add_parser("make-case", help="Snapshot a recorded session's corpus into a frozen case")
     ev_make.add_argument("session_id")
     ev_make.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -1111,11 +1123,14 @@ def cmd_eval(args) -> int:
         return _eval_run(args)
     if args.eval_command == "compare":
         return _eval_compare(args)
+    if args.eval_command == "analyze":
+        return _eval_analyze(args)
     return _eval_make_case(args)
 
 
 def _eval_run(args) -> int:
     from parsec.evals.case import discover_cases
+    from parsec.evals.metrics import default_metrics
     from parsec.evals.runner import run_cases
     from parsec.evals.support import make_support_checker
 
@@ -1123,6 +1138,7 @@ def _eval_run(args) -> int:
     if not case_dirs:
         console.print(f"[red]no cases found under {args.cases_root}[/red]")
         return EXIT_USAGE
+    names = [n.strip() for n in args.metrics.split(",") if n.strip()] if args.metrics else None
 
     def factory(config: RunConfig):
         return make_adapter(config)
@@ -1132,33 +1148,42 @@ def _eval_run(args) -> int:
         from parsec.gateway.openai_adapter import OpenAIAdapter
 
         judge_adapter = OpenAIAdapter()
+    try:
+        metrics = default_metrics(judge_adapter, args.judge_model, names)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return EXIT_USAGE
 
     clock = RealClock()
     with tempfile.TemporaryDirectory(prefix="parsec-eval-") as workdir:
         run = asyncio.run(
             run_cases(
                 case_dirs, Path(workdir), factory, clock, args.model,
-                label=args.label, judge_adapter=judge_adapter, judge_model=args.judge_model,
-                runs=args.runs, support_checker=make_support_checker(args.support_checker),
+                label=args.label, runs=args.runs,
+                support_checker=make_support_checker(args.support_checker), metrics=metrics,
             )
         )
     payload = run.to_payload()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    table = Table("case", "status", "citation", "coverage", "nuggets", "support", "synthesis", "gold%", "turns")
+    table = Table("case", "status", "citation", "coverage", "nuggets", "support", "synthesis", "gold%", "turns", "losses")
     for r in run.results:
         s = r.scores
         fmt = lambda v: "—" if v is None else f"{v:.2f}"  # noqa: E731
         gold = fmt(r.trajectory.gold_fetch_fraction) if r.trajectory else "—"
         table.add_row(
-            r.case_id, r.status, fmt(s.citation_faithfulness), fmt(s.coverage),
-            fmt(s.nugget_recall), fmt(s.claim_support), fmt(s.synthesis), gold, str(r.turns),
+            r.case_id, r.status, fmt(s.get("citation_faithfulness")), fmt(s.get("coverage")),
+            fmt(s.get("nugget_recall")), fmt(s.get("claim_support")), fmt(s.get("synthesis")),
+            gold, str(r.turns), str(sum(loss.count for loss in r.losses)),
         )
-        if s.nugget_contradictions:
-            console.print(f"[red]{r.case_id}: report contradicts gold: {s.nugget_contradictions}[/red]")
+        contradictions = getattr(s, "nugget_contradictions", None)
+        if contradictions:
+            console.print(f"[red]{r.case_id}: report contradicts gold: {contradictions}[/red]")
     console.print(table)
     console.print(f"aggregate: {payload['aggregate']}  →  {args.out}")
+    if payload["loss_histogram"]:
+        console.print(f"losses: {_format_histogram(payload['loss_histogram'])}  (`parsec eval analyze {args.out}`)")
     return EXIT_OK if all(r.error is None for r in run.results) else EXIT_ERROR
 
 
@@ -1189,14 +1214,83 @@ def _eval_compare(args) -> int:
                 "—" if v.ci95 is None else f"{v.ci95:.3f}",
             )
         console.print(verdicts)
+        if comparison.loss_deltas:
+            losses = Table("loss pattern", "category", "before", "after", "Δ")
+            for d in comparison.loss_deltas:
+                color = "red" if d.delta > 0 else "green" if d.delta < 0 else "dim"
+                losses.add_row(
+                    d.pattern, d.category, str(d.before), str(d.after),
+                    f"[{color}]{d.delta:+d}[/{color}]",
+                )
+            console.print(losses)
         if comparison.only_in_a or comparison.only_in_b:
             console.print(f"only in A: {comparison.only_in_a}  only in B: {comparison.only_in_b}")
+        if comparison.advisory_regressions:
+            axes = ", ".join(v.axis for v in comparison.advisory_regressions)
+            console.print(f"[yellow]advisory axis regressed (never gates): {axes}[/yellow]")
         if comparison.ok:
             console.print("[green]no significant regressions[/green]")
         else:
             axes = ", ".join(v.axis for v in comparison.regressed_axes)
             console.print(f"[red]significant regression on: {axes} (epsilon={args.epsilon})[/red]")
     return EXIT_OK if comparison.ok else EXIT_PARTIAL
+
+
+def _format_histogram(hist: dict) -> str:
+    return ", ".join(f"{pattern}×{count}" for pattern, count in hist.items()) or "none"
+
+
+def _eval_analyze(args) -> int:
+    """Loss taxonomy (M15.2) read back from a results file — no re-run:
+    the diagnosis was computed at eval time from the recording."""
+    from parsec.evals.losses import CATEGORY, CATEGORY_ORDER, LossPattern, histogram_from_results
+
+    payload = json.loads(args.results.read_text(encoding="utf-8"))
+    results = payload.get("results", [])
+    if args.case:
+        results = [r for r in results if r["case_id"] == args.case]
+        if not results:
+            console.print(f"[red]no case {args.case!r} in {args.results}[/red]")
+            return EXIT_USAGE
+    if results and not any("losses" in r for r in results):
+        console.print("[yellow]results file predates the loss taxonomy (M15); re-run `parsec eval run`[/yellow]")
+        return EXIT_USAGE
+    hist = histogram_from_results(results)
+    by_category: dict[str, dict[str, int]] = {}
+    for pattern, count in hist.items():
+        by_category.setdefault(CATEGORY[LossPattern(pattern)], {})[pattern] = count
+    if args.as_json:
+        print(json.dumps({
+            "label": payload.get("label", ""),
+            "loss_histogram": hist,
+            "by_category": by_category,
+            "cases": [
+                {"case_id": r["case_id"], "status": r.get("status"), "losses": r.get("losses", [])}
+                for r in results
+            ],
+        }))
+        return EXIT_OK
+
+    summary = Table("category", "pattern", "count", title=f"losses — {payload.get('label') or args.results.name}")
+    for category in CATEGORY_ORDER:
+        for pattern, count in by_category.get(category, {}).items():
+            summary.add_row(category, pattern, str(count))
+    if hist:
+        console.print(summary)
+    else:
+        console.print("[green]no losses: every gold item found, every claim verified, no incidents[/green]")
+    for r in results:
+        losses = r.get("losses") or []
+        if not losses:
+            continue
+        table = Table("pattern", "subject", "detail", "n", title=f"{r['case_id']} ({r.get('status')})")
+        for loss in losses:
+            table.add_row(
+                loss["pattern"], escape(str(loss["subject"])[:80]),
+                escape(str(loss.get("detail", ""))[:120]), str(loss.get("count", 1)),
+            )
+        console.print(table)
+    return EXIT_OK
 
 
 def _eval_make_case(args) -> int:

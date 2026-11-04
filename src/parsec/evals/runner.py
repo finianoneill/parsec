@@ -2,9 +2,10 @@
 
 Each case run: fork the corpus by file copy → run the full orchestrator
 loop in replay cache mode (any fetch outside the corpus is a CacheMiss, so
-the world is frozen) → score the three axes. The model itself is LIVE (or
-a scripted fake in tests) — that is the point: same corpus, different
-harness/model, measurable difference (T4).
+the world is frozen) → score every configured metric (M15.1 seam) →
+diagnose losses (M15.2 taxonomy). The model itself is LIVE (or a scripted
+fake in tests) — that is the point: same corpus, different harness/model,
+measurable difference (T4).
 """
 
 from __future__ import annotations
@@ -15,8 +16,15 @@ from typing import Callable
 
 from parsec.config import Budgets, CacheMode, Clock, RunConfig
 from parsec.evals.case import FIXTURES_FILE, EvalCase, copy_corpus, load_case
-from parsec.evals.judge import judge_synthesis
-from parsec.evals.scoring import AxisScores, score_session
+from parsec.evals.losses import Loss, diagnose_losses, histogram, merge_losses
+from parsec.evals.metrics import (
+    Metric,
+    MetricContext,
+    Scores,
+    default_metrics,
+    manifest,
+    run_metrics,
+)
 from parsec.evals.support import MechanicalSupportChecker, SupportChecker, score_claim_support
 from parsec.evals.trajectory import TrajectoryMetrics, compute_trajectory
 from parsec.gateway.base import ModelAdapter
@@ -48,7 +56,7 @@ class CaseResult:
     case_id: str
     session_id: str
     status: str
-    scores: AxisScores                       # means across runs
+    scores: Scores                           # means across runs
     trajectory: TrajectoryMetrics | None = None
     runs: int = 1
     per_run_scores: list[dict] = None  # type: ignore[assignment]
@@ -58,6 +66,8 @@ class CaseResult:
     # pairs harvested from the run — the eval corpus is the label source
     # `parsec calibrate` consumes.
     labels: list[dict] = None  # type: ignore[assignment]
+    # Loss taxonomy (M15.2): why points went missing, summed across runs.
+    losses: list[Loss] = field(default_factory=list)
 
     def to_payload(self) -> dict:
         return {
@@ -71,6 +81,8 @@ class CaseResult:
             "turns": self.turns,
             "error": self.error,
             "labels": self.labels or [],
+            "losses": [loss.to_payload() for loss in self.losses],
+            "loss_histogram": histogram(self.losses),
         }
 
 
@@ -78,21 +90,32 @@ class CaseResult:
 class EvalRun:
     label: str
     results: list[CaseResult] = field(default_factory=list)
+    metrics: list[dict] = field(default_factory=list)  # the manifest: [{name, tier}]
 
     def to_payload(self) -> dict:
         return {
             "label": self.label,
+            "metrics": self.metrics,
             "results": [r.to_payload() for r in self.results],
             "aggregate": self.aggregate(),
+            "loss_histogram": histogram(loss for r in self.results for loss in r.losses),
         }
+
+    def axes(self) -> list[str]:
+        names = [m["name"] for m in self.metrics]
+        for r in self.results:
+            for name in r.scores.values:
+                if name not in names:
+                    names.append(name)
+        return names
 
     def aggregate(self) -> dict:
         agg: dict[str, float | None] = {}
-        for axis in ("citation_faithfulness", "coverage", "nugget_recall", "claim_support", "synthesis"):
+        for axis in self.axes():
             values = [
-                getattr(r.scores, axis)
+                r.scores.values[axis]
                 for r in self.results
-                if getattr(r.scores, axis) is not None
+                if r.scores.values.get(axis) is not None
             ]
             agg[axis] = round(sum(values) / len(values), 4) if values else None
         return agg
@@ -108,16 +131,18 @@ async def run_case(
     judge_model: str = "",
     runs: int = 1,
     support_checker: SupportChecker | None = None,
+    metrics: list[Metric] | None = None,
 ) -> CaseResult:
     """Run a case `runs` times (fresh corpus fork each); scores are per-run
     means — with frozen corpora the only residual variance is agent sampling."""
     case: EvalCase = load_case(case_dir)
+    metrics = metrics if metrics is not None else default_metrics(judge_adapter, judge_model)
     results: list[CaseResult] = []
     for r in range(runs):
         run_workdir = workdir / case.case_id / f"run-{r + 1}"
         result = await _run_once(
             case, case_dir, run_workdir, adapter_factory, clock, model,
-            judge_adapter, judge_model, run_index=r, support_checker=support_checker,
+            metrics, run_index=r, support_checker=support_checker,
         )
         results.append(result)
         if result.error is not None:
@@ -131,22 +156,18 @@ def _aggregate(case: EvalCase, results: list[CaseResult], runs: int) -> CaseResu
         first.runs = runs if first.error is None else len(results)
         first.per_run_scores = [first.scores.to_payload()]
         return first
-    all_labels = [pair for r in results for pair in (r.labels or [])]
-    mean_scores = first.scores
-    for axis in ("citation_faithfulness", "coverage", "nugget_recall", "claim_support", "synthesis"):
-        values = [getattr(r.scores, axis) for r in results if getattr(r.scores, axis) is not None]
-        setattr(mean_scores, axis, round(sum(values) / len(values), 6) if values else None)
     return CaseResult(
         case_id=first.case_id,
         session_id=first.session_id,
         status=first.status,
-        scores=mean_scores,
+        scores=Scores.mean([r.scores for r in results]),
         trajectory=first.trajectory,
         runs=len(results),
         per_run_scores=[r.scores.to_payload() for r in results],
         turns=first.turns,
         error=next((r.error for r in results if r.error), None),
-        labels=all_labels,
+        labels=[pair for r in results for pair in (r.labels or [])],
+        losses=merge_losses([r.losses for r in results]),
     )
 
 
@@ -157,8 +178,7 @@ async def _run_once(
     adapter_factory: AdapterFactory,
     clock: Clock,
     model: str,
-    judge_adapter: ModelAdapter | None,
-    judge_model: str,
+    metrics: list[Metric],
     run_index: int,
     support_checker: SupportChecker | None = None,
 ) -> CaseResult:
@@ -203,37 +223,43 @@ async def _run_once(
         CoverageLedger(conn, event_log), Notebook(conn, event_log, clock),
     )
 
+    checker = support_checker or MechanicalSupportChecker()
     try:
         result = await loop.run()
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        # The recording up to the failure is still diagnosable: the loop
+        # journals its own error before re-raising (halted_error).
+        mctx = MetricContext(
+            conn, blobs, event_log, ledger, session_id, case,
+            status="error", answer=None, support_checker=checker,
+        )
         return CaseResult(
-            case.case_id, session_id, "error",
-            AxisScores(None, None), error=f"{type(exc).__name__}: {exc}",
+            case.case_id, session_id, "error", Scores([]),
+            error=error, losses=diagnose_losses(mctx, error=error),
         )
 
-    synthesis = None
-    if judge_adapter is not None and result.answer:
-        synthesis = await judge_synthesis(judge_adapter, judge_model, case.query, result.answer)
-    scores = score_session(
-        conn, blobs, session_id, case.must_find, synthesis,
-        nuggets=case.nuggets, support_checker=support_checker,
+    mctx = MetricContext(
+        conn, blobs, event_log, ledger, session_id, case,
+        status=result.status, answer=result.answer, support_checker=checker,
     )
+    scores = await run_metrics(metrics, mctx)
     trajectory = compute_trajectory(
         conn, event_log, ledger, session_id, case.gold_docs, case.distractor_docs
     )
-    labels = _harvest_labels(conn, session_id, support_checker)
+    labels = _harvest_labels(conn, session_id, checker)
     return CaseResult(
         case.case_id, session_id, result.status, scores,
         trajectory=trajectory, turns=result.turns, labels=labels,
+        losses=diagnose_losses(mctx),
     )
 
 
-def _harvest_labels(conn, session_id: str, support_checker: SupportChecker | None) -> list[dict]:
+def _harvest_labels(conn, session_id: str, support_checker: SupportChecker) -> list[dict]:
     """Calibration labels (M10): every claim's persisted heuristic credence
     paired with a mechanical outcome from the claim-support grade
     (full -> correct, none -> incorrect; ambiguous partials are skipped)."""
-    checker = support_checker or MechanicalSupportChecker()
-    _, details = score_claim_support(conn, session_id, checker)
+    _, details = score_claim_support(conn, session_id, support_checker)
     credences = {
         row["node_id"]: row["credence"]
         for row in conn.execute(
@@ -260,13 +286,15 @@ async def run_cases(
     judge_model: str = "",
     runs: int = 1,
     support_checker: SupportChecker | None = None,
+    metrics: list[Metric] | None = None,
 ) -> EvalRun:
-    run = EvalRun(label=label)
+    metrics = metrics if metrics is not None else default_metrics(judge_adapter, judge_model)
+    run = EvalRun(label=label, metrics=manifest(metrics))
     for case_dir in case_dirs:
         run.results.append(
             await run_case(
                 case_dir, workdir, adapter_factory, clock, model,
-                judge_adapter, judge_model, runs=runs, support_checker=support_checker,
+                runs=runs, support_checker=support_checker, metrics=metrics,
             )
         )
     return run
