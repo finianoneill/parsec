@@ -273,7 +273,27 @@ def test_retry_ticker_flips_to_retrying_after_backoff():
         assert "machine slept 30s during the call" in str(view._tail[-1])
 
 
-# --- 6. keep-awake ------------------------------------------------------------
+# --- 6. the run footer names coverage reasons ---------------------------------
+
+
+def test_format_coverage_names_reasons():
+    from parsec.cli import format_coverage
+
+    rows = [
+        {"sq_id": "sq-2", "status": "partial", "reason": "subagent turn cap (9) reached before submit_report"},
+        {"sq_id": "sq-1", "status": "answered", "reason": None},
+        {"sq_id": "sq-3", "status": "blocked", "reason": "turn budget (40) exhausted before dispatch"},
+    ]
+    summary, detail = format_coverage(rows)
+    assert summary == "coverage 1/3 answered"
+    assert detail == (
+        "coverage: sq-1 answered · sq-2 partial — subagent turn cap (9) reached before submit_report"
+        " · sq-3 blocked — turn budget (40) exhausted before dispatch"
+    )
+    assert format_coverage([]) == ("coverage 0/0 answered", "coverage: ")
+
+
+# --- 7. keep-awake ------------------------------------------------------------
 
 
 def test_keep_awake_disabled_or_unavailable(monkeypatch):

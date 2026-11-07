@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import httpx
 import pytest
@@ -120,3 +121,17 @@ def test_search_within_replays_after_later_fetches(tmp_path, transport, fixtures
     outcome = asyncio.run(run_replay(conn, blobs, RealClock(), "scope-session"))
     assert outcome.projections_match, outcome.first_divergence
     assert outcome.answers_match
+
+
+def test_run_footer_reports_coverage_and_threshold_wording(tmp_path, transport, fixtures_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "adapter_factory", lambda config: FakeAdapter(_script()))
+    code = cli.main([
+        "ask", QUERY, "--session-id", "footer-session", "--adapter", "fake", "--model", "fake-model",
+        "--cache-mode", "record", "--data-dir", str(tmp_path / "data"),
+        "--search-fixtures", str(fixtures_path), "--max-gap-rounds", "0",
+    ])
+    out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert code == 0
+    assert "coverage: sq-1 answered · sq-2 answered" in out
+    assert "· done · coverage 2/2 answered ·" in out
+    assert "low-confidence" not in out

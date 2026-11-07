@@ -522,6 +522,26 @@ class SteeringReader:
             pass
 
 
+def format_coverage(rows: list[dict]) -> tuple[str, str]:
+    """(summary, detail) for the run footer: "coverage 1/4 answered", and the
+    per-row line carrying the ledger's recorded reason on every row that did
+    not end answered — "sq-1 partial — subagent turn cap (9) reached before
+    submit_report" says what a bare "partial" never did."""
+    answered = sum(1 for r in rows if r["status"] == "answered")
+    summary = f"coverage {answered}/{len(rows)} answered"
+    parts = []
+    for r in sorted(rows, key=lambda r: r["sq_id"]):
+        part = f"{r['sq_id']} {r['status']}"
+        if r["status"] != "answered" and r.get("reason"):
+            part += f" — {escape(r['reason'])}"
+        parts.append(part)
+    return summary, "coverage: " + " · ".join(parts)
+
+
+def _coverage_rows(conn, clock, session_id: str) -> list[dict]:
+    return [dict(r) for r in CoverageLedger(conn, EventLog(conn, clock)).all(session_id)]
+
+
 def cmd_ask(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -633,6 +653,7 @@ def cmd_ask(args) -> int:
 
     ledger = Ledger(conn, clock)
     totals = ledger.totals(session_id)
+    coverage_rows = _coverage_rows(conn, clock, session_id)
     if args.as_json:
         print(
             json.dumps(
@@ -644,6 +665,9 @@ def cmd_ask(args) -> int:
                     "unresolved": result.unresolved,
                     "violations": result.violations,
                     "coverage": result.coverage,
+                    "coverage_reasons": {
+                        r["sq_id"]: r["reason"] for r in coverage_rows if r.get("reason")
+                    },
                     "low_confidence": result.low_confidence,
                     "unused_sources": result.unused_sources,
                     "turns": result.turns,
@@ -653,12 +677,9 @@ def cmd_ask(args) -> int:
         )
     else:
         console.print(display_answer(result.answer))
-        if result.coverage:
-            console.print(
-                "[dim]coverage: "
-                + " · ".join(f"{sq} {status}" for sq, status in sorted(result.coverage.items()))
-                + "[/dim]"
-            )
+        coverage_note, coverage_line = format_coverage(coverage_rows)
+        if coverage_rows:
+            console.print(f"[dim]{coverage_line}[/dim]")
         cached = int(
             totals.get("cache_read_tokens", 0) + totals.get("cache_creation_tokens", 0)
         )
@@ -674,12 +695,19 @@ def cmd_ask(args) -> int:
             + f" tokens · {budget_note}"
         )
         console.print(
-            f"\n[dim]session {result.session_id} · {result.status} · {result.turns} turns · "
-            f"{token_note} · "
+            f"\n[dim]session {result.session_id} · {result.status}"
+            + (f" · {coverage_note}" if coverage_rows else "")
+            + f" · {result.turns} turns · {token_note} · "
             f"${totals.get('usd', 0.0):.4f} · claims {result.claims_total}"
             + (f" · [red]{len(result.unresolved)} unresolved[/red]" if result.unresolved else "")
             + (f" · [red]{len(result.violations)} verification violations[/red]" if result.violations else "")
-            + (f" · [yellow]{len(result.low_confidence)} low-confidence claims[/yellow]" if result.low_confidence else "")
+            # The appendix's tier vocabulary (high / moderate / low) is not
+            # this count: flagged = below the stakes threshold, which includes
+            # moderate single-source claims. Name it the way `verify` does.
+            + (
+                f" · [yellow]{len(result.low_confidence)} claims below the stakes threshold[/yellow]"
+                if result.low_confidence else ""
+            )
             + "[/dim]"
         )
     if result.status == "done":
