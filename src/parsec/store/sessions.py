@@ -39,11 +39,16 @@ class SessionStore:
             "SELECT * FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
 
-    def get_config(self, session_id: str) -> RunConfig:
+    def get_config_raw(self, session_id: str) -> dict:
+        """The stored config as recorded — missing keys stay missing, which is
+        how replay/fork tell a pre-flag recording from one that opted out."""
         row = self.get(session_id)
         if row is None:
             raise KeyError(f"unknown session: {session_id}")
-        return RunConfig.model_validate(json.loads(row["config_json"]))
+        return json.loads(row["config_json"])
+
+    def get_config(self, session_id: str) -> RunConfig:
+        return RunConfig.model_validate(self.get_config_raw(session_id))
 
     def list(self) -> list[sqlite3.Row]:
         return self.conn.execute(

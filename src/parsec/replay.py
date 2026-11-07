@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from parsec.config import CacheMode, Clock, RunConfig
+from parsec.config import CacheMode, Clock, RunConfig, legacy_flag_overrides
 from parsec.gateway.gateway import ModelGateway
 from parsec.gateway.replay_adapter import ReplayAdapter
 from parsec.loop.agent import OrchestratorLoop, RunResult
@@ -65,6 +65,9 @@ async def run_replay(
     replay_config = RunConfig(
         **{
             **recorded_config.model_dump(),
+            # A pre-flag recording replays under the behaviour it was
+            # recorded with, or its repair prompts and claim events diverge.
+            **legacy_flag_overrides(sessions.get_config_raw(original_session_id)),
             "session_id": _next_replay_id(conn, original_session_id),
             "adapter": "replay",
             "cache_mode": CacheMode.REPLAY,

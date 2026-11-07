@@ -58,6 +58,12 @@ class ActivityView:
         self._busy_label = "starting…"
         self._busy_since: float | None = None
         self._phase = "PLANNING"
+        # Retry state: once the journaled backoff has elapsed the re-attempt
+        # is in flight, and the ticker must say so — "waiting to retry · 36s"
+        # with a 2s delay reads as a hang (M15.8).
+        self._retry_delay: float | None = None
+        self._retry_attempt = 0
+        self._retry_who = ""
         # get_renderable (not a static renderable): the auto-refresh thread
         # re-renders 8x/s, so the elapsed ticker advances between events.
         self._live = Live(
@@ -81,7 +87,10 @@ class ActivityView:
                 self._busy(self._call_label(who, payload), timed=True)
             case EventType.LLM_RESPONSE:
                 self._busy_since = None  # call landed; stop the ticker
-                return
+                self._retry_delay = None
+                if not payload.get("suspended_s"):
+                    return
+                line = self._slept_line(who, payload)
             case EventType.TOOL_INTENT:
                 line = self._tool_line(who, payload)
             case EventType.FETCH_PERFORMED:
@@ -128,8 +137,21 @@ class ActivityView:
                     style="yellow",
                 )
                 self._busy(f"{who}waiting to retry ({payload.get('error_kind', 'error')})…", timed=True)
+                self._retry_delay = float(payload.get("delay_s") or 0.0)
+                self._retry_attempt = int(payload.get("attempt") or 0)
+                self._retry_who = who
+                if payload.get("suspended_s"):
+                    line.append(
+                        f" — machine slept {self._fmt_elapsed(payload['suspended_s'])} during the call",
+                        style="yellow",
+                    )
             case EventType.LLM_FAILED:
                 line = Text(f"  ✗ {who}model call failed", style="red")
+                if payload.get("suspended_s"):
+                    line.append(
+                        f" — machine slept {self._fmt_elapsed(payload['suspended_s'])} during the call",
+                        style="yellow",
+                    )
             case EventType.VERIFICATION_COMPLETED:
                 line = Text("  ✓ verification complete", style="green")
             case EventType.ANSWER_EMITTED:
@@ -189,6 +211,13 @@ class ActivityView:
     def _busy(self, text: str, timed: bool = False) -> None:
         self._busy_label = text
         self._busy_since = time.monotonic() if timed else None
+        self._retry_delay = None
+
+    def _slept_line(self, who: str, payload: dict) -> Text:
+        return Text(
+            f"  ⏾ {who}machine slept {self._fmt_elapsed(payload['suspended_s'])} during the call",
+            style="yellow",
+        )
 
     @staticmethod
     def _fmt_elapsed(seconds: float) -> str:
@@ -198,6 +227,11 @@ class ActivityView:
     def _render(self) -> Group:
         label = self._busy_label
         if self._busy_since is not None:
-            label += f" · {self._fmt_elapsed(time.monotonic() - self._busy_since)}"
+            elapsed = time.monotonic() - self._busy_since
+            if self._retry_delay is not None and elapsed >= self._retry_delay:
+                # Backoff over: the re-attempt is the thing in flight now.
+                label = f"{self._retry_who}retrying (attempt {self._retry_attempt + 1})…"
+                elapsed -= self._retry_delay
+            label += f" · {self._fmt_elapsed(elapsed)}"
         self._spinner.update(text=Text(label, style="#22d3ee"))
         return Group(self._spinner, *self._tail, self._stats)

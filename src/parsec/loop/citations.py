@@ -30,6 +30,13 @@ _SENTENCE_SPLIT_RE = re.compile(
 )
 
 
+# Markdown structure the writer emits around its claims: ATX headings and
+# horizontal rules. With structure_lines_narrative these are skipped whole,
+# never sentence-split ("## 1. ADK 2.0" used to become the claims "## 1."
+# and "ADK 2.0") and never reported as uncited sentences (M15.8).
+_STRUCTURE_LINE_RE = re.compile(r"^(?:#{1,6}\s|(?:-{3,}|\*{3,}|_{3,})\s*$)")
+
+
 @dataclass
 class Segment:
     text: str
@@ -51,12 +58,18 @@ class CitationCheck:
         return [s for s in self.segments if not s.narrative]
 
 
-def segment_answer(answer: str) -> list[Segment]:
+def segment_answer(answer: str, structure_lines_narrative: bool = False) -> list[Segment]:
     segments: list[Segment] = []
     for line in answer.splitlines():
         line = line.strip()
         if not line:
             continue
+        if (
+            structure_lines_narrative
+            and _STRUCTURE_LINE_RE.match(line)
+            and not NODE_REF_RE.search(line)
+        ):
+            continue  # structure, not a claim; a heading that cites is still checked
         for raw in _SENTENCE_SPLIT_RE.split(line):
             raw = raw.strip()
             if not raw:
@@ -75,8 +88,10 @@ def segment_answer(answer: str) -> list[Segment]:
     return segments
 
 
-def check_citations(answer: str, session_id: str, dag: DagStore) -> CitationCheck:
-    result = CitationCheck(segments=segment_answer(answer))
+def check_citations(
+    answer: str, session_id: str, dag: DagStore, structure_lines_narrative: bool = False
+) -> CitationCheck:
+    result = CitationCheck(segments=segment_answer(answer, structure_lines_narrative))
     known = {
         row["node_id"]
         for tier in (1, 2)

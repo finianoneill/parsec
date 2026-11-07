@@ -243,6 +243,11 @@ class OrchestratorLoop:
         # reduced (deterministic under gap-fill rewrites).
         self._writer_level = 0
         self._writer_view: tuple | None = None
+        # The newest writer draft and its citation problems (M15.8): a budget
+        # halt after the writer has produced text returns that text, not a
+        # premise dump — the draft is the run's most valuable artifact.
+        self._latest_draft: str | None = None
+        self._latest_problems: list[str] = []
         # Optional progress hook for the live CLI view; called with snapshots.
         self.reporter: Callable[[dict], None] | None = None
 
@@ -421,8 +426,11 @@ class OrchestratorLoop:
             )
             sm.transition(AgentState.HALTED, f"budget: {exc.category}")
             self._finish(sid, "halted_budget", answer_blob)
+            unresolved = [str(exc)]
+            if self.config.halt_keeps_draft and self._latest_draft:
+                unresolved += self._latest_problems
             return RunResult(
-                sid, "halted_budget", answer, 0, [str(exc)], [],
+                sid, "halted_budget", answer, 0, unresolved, [],
                 self.coverage.summary(sid), turns=self.turns,
             )
         except HaltRequested:
@@ -1328,6 +1336,7 @@ class OrchestratorLoop:
             messages.append({"role": "user", "content": prompts.TRUNCATED_NUDGE})
             resp, messages = await self._writer_complete(messages)
             self.turns += 1
+        self._latest_draft = resp.text
         return resp.text, messages
 
     _WRITER_TEXT_CAPS = {0: None, 1: 300, 2: 120}
@@ -1701,7 +1710,9 @@ class OrchestratorLoop:
 
     async def _cite_check_with_repair(self, answer: str, writer_messages: list[dict]):
         sid = self.config.session_id
-        check = check_citations(answer, sid, self.dag)
+        structure = self.config.structure_lines_narrative
+        check = check_citations(answer, sid, self.dag, structure_lines_narrative=structure)
+        self._latest_problems = list(check.problems)
         rounds = 0
         while not check.ok and rounds < MAX_REPAIR_ROUNDS:
             rounds += 1
@@ -1713,7 +1724,9 @@ class OrchestratorLoop:
             resp, writer_messages = await self._writer_complete(writer_messages)
             self.turns += 1
             answer = resp.text
-            check = check_citations(answer, sid, self.dag)
+            check = check_citations(answer, sid, self.dag, structure_lines_narrative=structure)
+            self._latest_draft = answer
+            self._latest_problems = list(check.problems)
         return answer, check
 
     # -- gates ---------------------------------------------------------------
@@ -1739,6 +1752,17 @@ class OrchestratorLoop:
         if self.turns >= self.config.budgets.max_turns - 1:
             self.gate_reason = f"turn budget ({self.config.budgets.max_turns}) exhausted"
             return True
+        # Writer wall reserve (M15.8): stop research while the writer still
+        # has time. The reason names the limit, not the live elapsed, so the
+        # coverage row it lands in reads identically on replay.
+        reserve = self.config.budgets.writer_wall_reserve
+        cap = self.config.budgets.max_wall_seconds
+        if reserve > 0 and elapsed >= cap * (1.0 - reserve):
+            self.gate_reason = (
+                f"wall-clock reserve for the writer reached "
+                f"({int(reserve * 100)}% of {cap}s held back)"
+            )
+            return True
         self.gate_reason = None
         return False
 
@@ -1762,6 +1786,19 @@ class OrchestratorLoop:
     # -- finishing -----------------------------------------------------------
 
     def _best_effort_answer(self, exc: BudgetExceeded) -> str:
+        if self.config.halt_keeps_draft and self._latest_draft:
+            # The writer already produced a report; what the budget cut was a
+            # repair or rewrite round. Ship the draft, say what is unresolved.
+            lines = [
+                f"PARTIAL — budget exhausted ({exc.category}) after a draft was written; "
+                "this is the latest draft, not a verified report.",
+                f"Query: {self.config.query}",
+            ]
+            if self._latest_problems:
+                lines.append(f"{len(self._latest_problems)} citation problem(s) left unresolved:")
+                lines += [f"- {p}" for p in self._latest_problems]
+            lines += ["", self._latest_draft]
+            return "\n".join(lines)
         premises = self.dag.nodes_for_session(self.config.session_id, tier=1)
         lines = [
             f"PARTIAL — budget exhausted ({exc.category}) before an answer could be written.",

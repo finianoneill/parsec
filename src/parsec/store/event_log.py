@@ -179,9 +179,17 @@ def _strip_volatile(event_type: EventType, payload: dict) -> dict | None:
             config.pop("max_context_tokens", None)
             config.pop("cache_strategy", None)  # its effects are the prompt bytes themselves
             config.pop("cost_gate_threshold", None)  # its effects are the gate events
+            # M15.8 behaviour flags: effects are the answer bytes / claim events
+            # (and replay pins them to the recording's era anyway).
+            config.pop("halt_keeps_draft", None)
+            config.pop("structure_lines_narrative", None)
             config.pop("parsec_version", None)
             payload["config"] = config
     if event_type == EventType.FETCH_PERFORMED:
         payload.pop("from_cache", None)  # original may live-fetch; replay always hits cache
         payload.pop("mode", None)
+    if event_type in (EventType.LLM_RESPONSE, EventType.LLM_RETRY, EventType.LLM_FAILED):
+        # M15.8: machine sleep observed during a live call — a fact about the
+        # recording machine, present on no replay.
+        payload.pop("suspended_s", None)
     return payload

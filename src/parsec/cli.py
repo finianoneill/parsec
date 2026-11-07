@@ -20,6 +20,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from parsec.awake import keep_awake
 from parsec.config import (
     Budgets,
     CacheMode,
@@ -126,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask.add_argument("--model", default=DEFAULT_MODEL)
     ask.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
+    ask.add_argument(
         "--cache-strategy", choices=["system", "full"], default="full",
         help="Prompt-cache breakpoints: 'full' (default) caches system + tool schemas + "
         "the rolling message prefix; 'system' is the pre-Phase-4 system-block-only shape",
@@ -204,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
     fork.add_argument("--at-call", type=int, required=True, help="Model-call index to branch at (0-based)")
     fork.add_argument("--steer", default=None, help="Steering message injected at the fork point")
     fork.add_argument("--data-dir", type=Path, default=Path("data"))
+    fork.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
     fork.add_argument("--json", action="store_true", dest="as_json")
 
     judge = sub.add_parser(
@@ -258,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Credence movement below this reads as held in the final diff (default 0.05)",
     )
     refresh.add_argument("--data-dir", type=Path, default=Path("data"))
+    refresh.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
     refresh.add_argument("--json", action="store_true", dest="as_json")
 
     watch = sub.add_parser(
@@ -291,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
         "(default <data-dir>/watch-labels.json); pass it to `parsec calibrate`",
     )
     watch.add_argument("--data-dir", type=Path, default=Path("data"))
+    watch.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
     watch.add_argument("--json", action="store_true", dest="as_json")
 
     sessions = sub.add_parser("sessions", help="Inspect sessions")
@@ -594,7 +615,10 @@ def cmd_ask(args) -> int:
     except ValueError:  # not the main thread (embedded callers): keep default behavior
         prev_sigint = None
     try:
-        result = asyncio.run(loop.run())
+        with keep_awake(args.keep_awake) as awake:
+            if args.keep_awake and not awake and not args.as_json:
+                console.print("[dim]keep-awake unavailable here (needs macOS caffeinate); continuing[/dim]")
+            result = asyncio.run(loop.run())
     except KeyboardInterrupt:
         console.print("[red]aborted[/red]")
         return EXIT_ERROR
@@ -899,12 +923,13 @@ def cmd_refresh(args) -> int:
     _warn_version_skew(row)
     config = store.get_config(args.session_id)
     live_adapter = make_adapter(config)
-    result = asyncio.run(
-        run_refresh(
-            conn, blobs, clock, args.session_id, live_adapter,
-            fetch_transport=fetch_transport, refresh_all=args.refresh_all,
+    with keep_awake(args.keep_awake):
+        result = asyncio.run(
+            run_refresh(
+                conn, blobs, clock, args.session_id, live_adapter,
+                fetch_transport=fetch_transport, refresh_all=args.refresh_all,
+            )
         )
-    )
     if result.status not in ("done", "partial"):
         console.print(
             f"[red]refresh run {result.session_id} ended {result.status} — no diff emitted[/red]"
@@ -977,15 +1002,16 @@ def cmd_watch(args) -> int:
             console.print(f"[dim]next check in {format_duration(args.every)} (Ctrl-C to stop)[/dim]")
 
     try:
-        summary = asyncio.run(
-            run_watch(
-                conn, blobs, clock, args.session_id,
-                make_adapter, fetch_transport=fetch_transport,
-                refresh_all=args.refresh_all, epsilon=args.epsilon,
-                every_s=args.every, rounds=args.rounds,
-                labels_path=labels_path, on_round=on_round,
+        with keep_awake(args.keep_awake):
+            summary = asyncio.run(
+                run_watch(
+                    conn, blobs, clock, args.session_id,
+                    make_adapter, fetch_transport=fetch_transport,
+                    refresh_all=args.refresh_all, epsilon=args.epsilon,
+                    every_s=args.every, rounds=args.rounds,
+                    labels_path=labels_path, on_round=on_round,
+                )
             )
-        )
     except KeyboardInterrupt:
         if not args.as_json:
             console.print(f"\n[dim]watch stopped after {len(seen)} round(s)[/dim]")
@@ -1077,12 +1103,13 @@ def cmd_fork(args) -> int:
     _warn_version_skew(row)
     config = SessionStore(conn, clock).get_config(args.session_id)
     live_adapter = make_adapter(config)
-    result = asyncio.run(
-        run_fork(
-            conn, blobs, clock, args.session_id, args.at_call, live_adapter,
-            fetch_transport=fetch_transport, steer=args.steer,
+    with keep_awake(args.keep_awake):
+        result = asyncio.run(
+            run_fork(
+                conn, blobs, clock, args.session_id, args.at_call, live_adapter,
+                fetch_transport=fetch_transport, steer=args.steer,
+            )
         )
-    )
     if args.as_json:
         print(json.dumps({"session_id": result.session_id, "status": result.status, "answer": result.answer}))
     else:

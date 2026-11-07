@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 
 import pytest
@@ -26,6 +27,8 @@ from parsec.watch import (
     run_watch,
 )
 from tests.integration.m14_corpus import SENT_A, SENT_B2, URL_B, _premise_id, _span
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _watch_script(answer: str) -> list:
@@ -287,7 +290,9 @@ async def test_cli_watch_json_lines_and_exit_codes(
         )
     finally:
         cli.adapter_factory, cli.fetch_transport = prev
-    out = capsys.readouterr().out
+    # Rich honours FORCE_COLOR even under capture, and its number highlighting
+    # splits "(1 held)" into styled fragments — compare the plain text.
+    out = _ANSI_RE.sub("", capsys.readouterr().out)
     assert code == cli.EXIT_OK  # same answer again: every claim held
     assert "unchanged (1 held)" in out and "labels: +1 (1 held, 0 overturned)" in out
     assert "3 labels in" in out and "parsec calibrate" in out
