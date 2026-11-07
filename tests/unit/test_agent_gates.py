@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from parsec.config import Budgets
 from parsec.gateway.fake_adapter import FakeAdapter, scripted_response
@@ -99,7 +98,7 @@ async def test_invalid_decomposition_falls_back_to_whole_query(tmp_path, db, blo
         tmp_path, db, blobs, event_log, ledger, sessions, clock, adapter,
         Budgets(max_turns=10), session_id="s-fallback",
     )
-    result = await loop.run()
+    await loop.run()
     rows = CoverageLedger(db, event_log).all("s-fallback")
     assert len(rows) == 1
     assert rows[0]["question"] == "test query"  # the whole query
@@ -194,7 +193,7 @@ async def test_subagent_turn_cap_marks_partial(tmp_path, db, blobs, event_log, l
     loop = build_loop(
         tmp_path, db, blobs, event_log, ledger, sessions, clock, adapter, budgets, session_id="s-cap"
     )
-    result = await loop.run()
+    await loop.run()
     rows = CoverageLedger(db, event_log).all("s-cap")
     assert rows[0]["status"] == "blocked"
     assert "cap" in rows[0]["reason"]

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from parsec.config import CacheMode, Clock, RunConfig
+from parsec.config import CacheMode, Clock, RunConfig, legacy_flag_overrides
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.fork_adapter import ForkAdapter
 from parsec.gateway.gateway import ModelGateway
@@ -69,6 +69,9 @@ async def run_fork(
     fork_config = RunConfig(
         **{
             **recorded_config.model_dump(),
+            # The head replays with prompt hashes asserted: a pre-flag
+            # recording keeps the behaviour it was recorded with.
+            **legacy_flag_overrides(sessions.get_config_raw(original_session_id)),
             "session_id": _next_fork_id(conn, original_session_id, at_call),
             "cache_mode": CacheMode.LIVE_PREFER_CACHE,
         }

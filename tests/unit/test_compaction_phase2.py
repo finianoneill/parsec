@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 
 from parsec.config import Budgets
-from parsec.gateway.fake_adapter import FakeAdapter, scripted_response
+from parsec.gateway.fake_adapter import scripted_response
 from parsec.loop import compaction, prompts
 from parsec.models.events import EventType
 from parsec.store.coverage import CoverageLedger

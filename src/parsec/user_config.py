@@ -45,6 +45,7 @@ _ALLOWED = _PATH_KEYS | {
     "brief_gate",
     "cost_gate",
     "epsilon",
+    "keep_awake",
 }
 
 

@@ -8,6 +8,7 @@ the codebase may call a model.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from collections.abc import Callable
 
 from parsec.canonical import canonical_json
@@ -27,6 +28,13 @@ from parsec.store.ledger import Ledger
 # the ReplayAdapter reproduces it through the ordinary failure path, so a
 # wall-cut subagent replays like any other dead stream (M11).
 WALL_CLOCK_KIND = "WallClockExceeded"
+# M15.8: a call during which the wall clock advanced this much further than
+# the monotonic clock was interrupted by system sleep (macOS pauses
+# monotonic time while asleep; the in-flight socket does not survive). The
+# gap is journaled as `suspended_s` on the call's retry/failure/response
+# event so a dropped connection reads as what it was. Volatile: stripped
+# from projections.
+SUSPEND_THRESHOLD_S = 5.0
 
 
 def wall_clock_detail(cap_s: float) -> str:
@@ -133,42 +141,49 @@ class ModelGateway:
         # sequence, so a throttled-then-recovered call replays identically.
         attempt = 1
         while True:
+            started = self._clocks()
             try:
                 response = await self._attempt(request)
+                suspended = self._suspended_since(started)
                 break
             except (ReplayDivergence, HaltRequested):
                 raise  # harness-level: never journaled as a model failure
             except ModelCallFailed as exc:
-                if await self._retry(sid, call_index, attempt, exc.kind, exc.detail, exc.error_kind, req_seq):
+                suspended = self._suspended_since(started)
+                if await self._retry(
+                    sid, call_index, attempt, exc.kind, exc.detail, exc.error_kind, req_seq, suspended
+                ):
                     attempt += 1
                     continue
-                self._record_failure(sid, call_index, exc.kind, exc.detail, exc.error_kind, req_seq)
+                self._record_failure(
+                    sid, call_index, exc.kind, exc.detail, exc.error_kind, req_seq, suspended
+                )
                 raise
             except Exception as exc:
+                suspended = self._suspended_since(started)
                 kind, detail = type(exc).__name__, str(exc)
                 error_kind = classify_model_error(exc)
-                if await self._retry(sid, call_index, attempt, kind, detail, error_kind, req_seq):
+                if await self._retry(sid, call_index, attempt, kind, detail, error_kind, req_seq, suspended):
                     attempt += 1
                     continue
-                self._record_failure(sid, call_index, kind, detail, error_kind, req_seq)
+                self._record_failure(sid, call_index, kind, detail, error_kind, req_seq, suspended)
                 raise ModelCallFailed(kind, detail, error_kind) from exc
 
         response_json = canonical_json(response.model_dump(mode="json"))
         response_blob = self.blobs.put(response_json)
         cost = compute_cost(response.model, response.usage, self.config.pricing_override)
+        response_payload = {
+            "call_index": call_index,
+            "prompt_hash": request.prompt_hash,
+            "response_blob": response_blob,
+            "stop_reason": response.stop_reason,
+            "usage": response.usage.model_dump(),
+            "cost_usd": round(cost.usd, 8),
+        }
+        if suspended:
+            response_payload["suspended_s"] = suspended
         resp_seq = self.event_log.append(
-            sid,
-            "model",
-            EventType.LLM_RESPONSE,
-            {
-                "call_index": call_index,
-                "prompt_hash": request.prompt_hash,
-                "response_blob": response_blob,
-                "stop_reason": response.stop_reason,
-                "usage": response.usage.model_dump(),
-                "cost_usd": round(cost.usd, 8),
-            },
-            parent_seq=req_seq,
+            sid, "model", EventType.LLM_RESPONSE, response_payload, parent_seq=req_seq
         )
 
         actor = f"gateway:{response.model}"
@@ -204,6 +219,25 @@ class ModelGateway:
         spend["usd"] += cost.usd
         return response
 
+    def _clocks(self) -> tuple[float, float]:
+        """(wall seconds, monotonic seconds) now — the pair whose drift
+        reveals system sleep."""
+        try:
+            wall = datetime.fromisoformat(self.clock.now_iso()).timestamp()
+        except ValueError:
+            wall = 0.0
+        return wall, self.clock.monotonic()
+
+    def _suspended_since(self, started: tuple[float, float]) -> float:
+        """Seconds the machine was asleep during the attempt (0.0 below the
+        threshold or when the clock gives no usable wall time)."""
+        wall0, mono0 = started
+        wall1, mono1 = self._clocks()
+        if not wall0 or not wall1:
+            return 0.0
+        gap = (wall1 - wall0) - (mono1 - mono0)
+        return round(gap, 1) if gap >= SUSPEND_THRESHOLD_S else 0.0
+
     async def _retry(
         self,
         sid: str,
@@ -213,25 +247,23 @@ class ModelGateway:
         detail: str,
         error_kind: ModelErrorKind | None,
         req_seq: int,
+        suspended: float = 0.0,
     ) -> bool:
         """Journal-and-wait for one retryable failed attempt; False = give up."""
         if not self.retry_policy.should_retry(error_kind, attempt):
             return False
         delay = self.retry_policy.delay_s(attempt)
-        self.event_log.append(
-            sid,
-            "harness",
-            EventType.LLM_RETRY,
-            {
-                "call_index": call_index,
-                "attempt": attempt,
-                "error_kind": error_kind,
-                "kind": kind,
-                "detail": detail,
-                "delay_s": delay,
-            },
-            parent_seq=req_seq,
-        )
+        payload = {
+            "call_index": call_index,
+            "attempt": attempt,
+            "error_kind": error_kind,
+            "kind": kind,
+            "detail": detail,
+            "delay_s": delay,
+        }
+        if suspended:
+            payload["suspended_s"] = suspended
+        self.event_log.append(sid, "harness", EventType.LLM_RETRY, payload, parent_seq=req_seq)
         # Replay serves the recorded attempt sequence instantly; sleeping
         # would re-run a throttled session in real time for no fidelity gain
         # (the journaled delay_s is already compared byte-for-byte).
@@ -247,10 +279,13 @@ class ModelGateway:
         detail: str,
         error_kind: ModelErrorKind | None,
         req_seq: int,
+        suspended: float = 0.0,
     ) -> None:
         payload = {"call_index": call_index, "kind": kind, "detail": detail}
         if error_kind is not None:
             # None = unclassified (a pre-taxonomy recording replaying); the
             # key is omitted so those old projections still match.
             payload["error_kind"] = error_kind
+        if suspended:
+            payload["suspended_s"] = suspended
         self.event_log.append(sid, "harness", EventType.LLM_FAILED, payload, parent_seq=req_seq)

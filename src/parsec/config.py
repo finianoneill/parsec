@@ -46,6 +46,12 @@ class Budgets(BaseModel):
     # plus headroom is unfinished work, not a result. Bounded like weak-
     # evidence gap-fill; 0 disables.
     max_coverage_gap_rounds: int = 2
+    # Writer wall-clock reserve (M15.8): the fraction of max_wall_seconds
+    # held back from research dispatch so the writer and one repair round
+    # start with time on the clock. The turn budget always reserved one turn
+    # for the writer; wall time reserved nothing beyond the 1.25x grace, so a
+    # 600s run that researched for 596s handed the writer 154s. 0 disables.
+    writer_wall_reserve: float = Field(default=0.2, ge=0, lt=1)
     # Fraction of BOTH the usd and token budgets that must remain for a
     # coverage retry to dispatch (clock-free: wall time never participates,
     # so the decision replays byte-identically).
@@ -160,6 +166,18 @@ class RunConfig(BaseModel):
     # wraps up what was gathered. The reply is a recorded, gate-tagged
     # steering event, so gated sessions replay byte-identically.
     cost_gate_threshold: float | None = Field(default=None, gt=0, le=1)
+    # Behaviour flags (M15.8), recorded per session so a recording replays
+    # under the behaviour it was recorded with: replay and fork pin a flag
+    # False when the recorded config predates it (legacy_flag_overrides),
+    # and both are stripped from projections — their effects are the answer
+    # bytes and the claim events themselves.
+    #   halt_keeps_draft — a budget halt after the writer produced a draft
+    #   returns that draft, marked partial with its unresolved citation
+    #   problems listed, instead of the raw premise dump.
+    #   structure_lines_narrative — markdown headings and horizontal rules in
+    #   the answer are structure, never "uncited sentences".
+    halt_keeps_draft: bool = True
+    structure_lines_narrative: bool = True
     # Politeness 2.0: robots respected by purpose; contact appended to the UA.
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600
@@ -240,6 +258,17 @@ class RunConfig(BaseModel):
 
     def to_json_dict(self) -> dict:
         return self.model_dump(mode="json")
+
+
+LEGACY_BEHAVIOUR_FLAGS = ("halt_keeps_draft", "structure_lines_narrative")
+
+
+def legacy_flag_overrides(raw_config: dict) -> dict:
+    """For a recording whose stored config predates a behaviour flag, the
+    value it was recorded under: False. Replay and fork apply these so the
+    recorded trajectory (repair prompts, claim events, halt answers)
+    reproduces byte-identically under today's code."""
+    return {flag: False for flag in LEGACY_BEHAVIOUR_FLAGS if flag not in raw_config}
 
 
 def make_session_id(query: str, now_utc: str) -> str:

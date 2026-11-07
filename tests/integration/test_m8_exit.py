@@ -269,3 +269,58 @@ def test_multi_run_mean_aggregation(tmp_path, case_dirs, transport):
     assert result.runs == 3
     assert len(result.per_run_scores) == 3
     assert result.scores.nugget_recall == 1.0  # mean of three identical deterministic runs
+
+def test_m15_loss_taxonomy_exit(tmp_path, case_dirs, transport, capsys):
+    """M15 exit: the lucky retriever's misses are localized mechanically —
+    gold pages surfaced by search but never fetched, its one source named as
+    a cited distractor, the gold contradiction called out — while the good
+    run carries no losses at all; a gold doc absent from the search fixtures
+    reads as a surfacing loss, not a coverage miss; `eval compare` reports
+    the taxonomy delta and the results file carries the tiered manifest."""
+    from parsec.evals.case import load_case
+
+    run_good = _run(case_dirs, tmp_path / "work-good", _good_script, "good")
+    assert all(r.losses == [] for r in run_good.results)
+    manifest = {m["name"]: m["tier"] for m in run_good.to_payload()["metrics"]}
+    assert manifest["nugget_recall"] == "mechanical" and manifest["synthesis"] == "advisory"
+
+    run_lucky = _run(case_dirs, tmp_path / "work-lucky", _lucky_script, "lucky")
+    by: dict[str, list] = {}
+    for loss in run_lucky.results[0].losses:
+        by.setdefault(loss.pattern.value, []).append(loss)
+    assert set(by) == {"doc_not_fetched", "distractor_cited", "gold_contradicted", "gold_unreachable"}
+    assert {loss.subject for loss in by["doc_not_fetched"]} == {URL_A, URL_B}
+    assert by["distractor_cited"][0].subject == URL_BAD
+    assert by["gold_contradicted"][0].subject == NUGGETS[0].text
+    unreachable = by["gold_unreachable"][0]
+    assert unreachable.subject == NUGGETS[1].text
+    assert f"{URL_B}: doc_not_fetched" in unreachable.detail
+
+    # A gold doc the fixtures never surface: a retrieval-surface loss while
+    # nugget recall stays perfect — the loss is about the document.
+    case_dir = case_dirs[0]
+    case = load_case(case_dir)
+    case.gold_docs.append("https://reference.example/missing")
+    save_case(case_dir, case)
+    run_missing = _run([case_dir], tmp_path / "work-missing", _good_script, "missing")
+    losses = run_missing.results[0].losses
+    assert [(loss.pattern.value, loss.subject) for loss in losses] == [
+        ("doc_not_surfaced", "https://reference.example/missing")
+    ]
+    assert run_missing.results[0].scores.nugget_recall == 1.0
+
+    a_file, b_file = tmp_path / "good.json", tmp_path / "lucky.json"
+    a_file.write_text(json.dumps(run_good.to_payload()))
+    b_file.write_text(json.dumps(run_lucky.to_payload()))
+    assert cli.main(["eval", "compare", str(a_file), str(b_file), "--json"]) == 3
+    out = json.loads(capsys.readouterr().out)
+    deltas = {d["pattern"]: d for d in out["loss_deltas"]}
+    assert deltas["doc_not_fetched"] == {
+        "pattern": "doc_not_fetched", "category": "retrieval", "before": 0, "after": 4, "delta": 4,
+    }
+    assert deltas["gold_contradicted"]["delta"] == 2
+
+    assert cli.main(["eval", "analyze", str(b_file), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["loss_histogram"]["distractor_cited"] == 2
+    assert out["by_category"]["retrieval"]["doc_not_fetched"] == 4

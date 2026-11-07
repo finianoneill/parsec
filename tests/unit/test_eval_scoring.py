@@ -1,9 +1,13 @@
+import asyncio
+
 import pytest
 
 from parsec import ids
 from parsec.evals.judge import parse_judge_reply
 from parsec.evals.regression import compare_runs
-from parsec.evals.scoring import score_citation_faithfulness, score_coverage, score_session
+from parsec.evals.case import EvalCase
+from parsec.evals.metrics import MetricContext, default_metrics, run_metrics
+from parsec.evals.scoring import score_citation_faithfulness, score_coverage
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
 from parsec.store.spans import SpanStore
@@ -76,11 +80,32 @@ def test_coverage_none_without_gold(graph, db):
     assert score_coverage(db, graph[0], []) == (None, [], [])
 
 
-def test_score_session_bundle(graph, db, blobs):
-    scores = score_session(db, blobs, graph[0], ["100 degrees"], synthesis=0.75)
+def test_metric_bundle(graph, db, blobs, event_log, ledger):
+    """The M15 seam: the default metric set scored through one context
+    reads like the old AxisScores bundle, with tiers in the manifest."""
+    ctx = MetricContext(
+        db, blobs, event_log, ledger, graph[0],
+        EvalCase(case_id="c", query="q", must_find=["100 degrees"]), answer="Water boils.",
+    )
+    scores = asyncio.run(run_metrics(default_metrics(), ctx))
     assert scores.citation_faithfulness == 1.0
     assert scores.coverage == 1.0
-    assert scores.synthesis == 0.75
+    assert scores.must_find_misses == []
+    assert scores.synthesis is None  # no judge wired: advisory axis present, null
+    assert scores.tiers == {
+        "citation_faithfulness": "mechanical", "coverage": "mechanical",
+        "nugget_recall": "mechanical", "claim_support": "mechanical", "synthesis": "advisory",
+    }
+    assert scores.to_payload()["claims_total"] == 1
+    with pytest.raises(AttributeError):
+        scores.no_such_axis
+
+
+def test_metric_subset_and_unknown_name():
+    names = [m.name for m in default_metrics(names=["coverage"])]
+    assert names == ["coverage", "synthesis"]
+    with pytest.raises(ValueError):
+        default_metrics(names=["coverage", "vibes"])
 
 
 def test_judge_parse():

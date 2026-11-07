@@ -7,8 +7,6 @@ record/replay substrate underneath it.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from parsec.canonical import canonical_json

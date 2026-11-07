@@ -20,6 +20,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from parsec.awake import keep_awake
 from parsec.config import (
     Budgets,
     CacheMode,
@@ -126,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask.add_argument("--model", default=DEFAULT_MODEL)
     ask.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
+    ask.add_argument(
         "--cache-strategy", choices=["system", "full"], default="full",
         help="Prompt-cache breakpoints: 'full' (default) caches system + tool schemas + "
         "the rolling message prefix; 'system' is the pre-Phase-4 system-block-only shape",
@@ -204,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
     fork.add_argument("--at-call", type=int, required=True, help="Model-call index to branch at (0-based)")
     fork.add_argument("--steer", default=None, help="Steering message injected at the fork point")
     fork.add_argument("--data-dir", type=Path, default=Path("data"))
+    fork.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
     fork.add_argument("--json", action="store_true", dest="as_json")
 
     judge = sub.add_parser(
@@ -258,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Credence movement below this reads as held in the final diff (default 0.05)",
     )
     refresh.add_argument("--data-dir", type=Path, default=Path("data"))
+    refresh.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
     refresh.add_argument("--json", action="store_true", dest="as_json")
 
     watch = sub.add_parser(
@@ -291,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
         "(default <data-dir>/watch-labels.json); pass it to `parsec calibrate`",
     )
     watch.add_argument("--data-dir", type=Path, default=Path("data"))
+    watch.add_argument(
+        "--keep-awake", action="store_true", dest="keep_awake",
+        help="macOS: hold off idle sleep for the run (caffeinate -i). A sleeping machine drops "
+             "every in-flight model call and pauses the wall clock; also settable as keep_awake in config",
+    )
     watch.add_argument("--json", action="store_true", dest="as_json")
 
     sessions = sub.add_parser("sessions", help="Inspect sessions")
@@ -321,11 +342,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--support-checker", choices=["mechanical", "grounded"], default="mechanical",
         help="Claim-support axis grader: grounded adds the M9 lexical-NLI tier over the exact-match floor",
     )
+    ev_run.add_argument(
+        "--metrics", default=None,
+        help="Comma-separated subset of the registered mechanical metrics to score "
+             "(default: all; the advisory synthesis judge is always in the manifest)",
+    )
     ev_cmp = ev_sub.add_parser("compare", help="Compare two results files for regressions")
     ev_cmp.add_argument("results_a", type=Path)
     ev_cmp.add_argument("results_b", type=Path)
     ev_cmp.add_argument("--epsilon", type=float, default=0.05)
     ev_cmp.add_argument("--json", action="store_true", dest="as_json")
+    ev_an = ev_sub.add_parser(
+        "analyze",
+        help="Loss taxonomy over a results file: why each case lost points, by pattern and category",
+    )
+    ev_an.add_argument("results", type=Path)
+    ev_an.add_argument("--case", default=None, help="Only this case_id")
+    ev_an.add_argument("--json", action="store_true", dest="as_json")
     ev_make = ev_sub.add_parser("make-case", help="Snapshot a recorded session's corpus into a frozen case")
     ev_make.add_argument("session_id")
     ev_make.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -489,6 +522,26 @@ class SteeringReader:
             pass
 
 
+def format_coverage(rows: list[dict]) -> tuple[str, str]:
+    """(summary, detail) for the run footer: "coverage 1/4 answered", and the
+    per-row line carrying the ledger's recorded reason on every row that did
+    not end answered — "sq-1 partial — subagent turn cap (9) reached before
+    submit_report" says what a bare "partial" never did."""
+    answered = sum(1 for r in rows if r["status"] == "answered")
+    summary = f"coverage {answered}/{len(rows)} answered"
+    parts = []
+    for r in sorted(rows, key=lambda r: r["sq_id"]):
+        part = f"{r['sq_id']} {r['status']}"
+        if r["status"] != "answered" and r.get("reason"):
+            part += f" — {escape(r['reason'])}"
+        parts.append(part)
+    return summary, "coverage: " + " · ".join(parts)
+
+
+def _coverage_rows(conn, clock, session_id: str) -> list[dict]:
+    return [dict(r) for r in CoverageLedger(conn, EventLog(conn, clock)).all(session_id)]
+
+
 def cmd_ask(args) -> int:
     clock = RealClock()
     conn, blobs = _open(args.data_dir)
@@ -582,7 +635,10 @@ def cmd_ask(args) -> int:
     except ValueError:  # not the main thread (embedded callers): keep default behavior
         prev_sigint = None
     try:
-        result = asyncio.run(loop.run())
+        with keep_awake(args.keep_awake) as awake:
+            if args.keep_awake and not awake and not args.as_json:
+                console.print("[dim]keep-awake unavailable here (needs macOS caffeinate); continuing[/dim]")
+            result = asyncio.run(loop.run())
     except KeyboardInterrupt:
         console.print("[red]aborted[/red]")
         return EXIT_ERROR
@@ -597,6 +653,7 @@ def cmd_ask(args) -> int:
 
     ledger = Ledger(conn, clock)
     totals = ledger.totals(session_id)
+    coverage_rows = _coverage_rows(conn, clock, session_id)
     if args.as_json:
         print(
             json.dumps(
@@ -608,6 +665,9 @@ def cmd_ask(args) -> int:
                     "unresolved": result.unresolved,
                     "violations": result.violations,
                     "coverage": result.coverage,
+                    "coverage_reasons": {
+                        r["sq_id"]: r["reason"] for r in coverage_rows if r.get("reason")
+                    },
                     "low_confidence": result.low_confidence,
                     "unused_sources": result.unused_sources,
                     "turns": result.turns,
@@ -617,12 +677,9 @@ def cmd_ask(args) -> int:
         )
     else:
         console.print(display_answer(result.answer))
-        if result.coverage:
-            console.print(
-                "[dim]coverage: "
-                + " · ".join(f"{sq} {status}" for sq, status in sorted(result.coverage.items()))
-                + "[/dim]"
-            )
+        coverage_note, coverage_line = format_coverage(coverage_rows)
+        if coverage_rows:
+            console.print(f"[dim]{coverage_line}[/dim]")
         cached = int(
             totals.get("cache_read_tokens", 0) + totals.get("cache_creation_tokens", 0)
         )
@@ -638,12 +695,19 @@ def cmd_ask(args) -> int:
             + f" tokens · {budget_note}"
         )
         console.print(
-            f"\n[dim]session {result.session_id} · {result.status} · {result.turns} turns · "
-            f"{token_note} · "
+            f"\n[dim]session {result.session_id} · {result.status}"
+            + (f" · {coverage_note}" if coverage_rows else "")
+            + f" · {result.turns} turns · {token_note} · "
             f"${totals.get('usd', 0.0):.4f} · claims {result.claims_total}"
             + (f" · [red]{len(result.unresolved)} unresolved[/red]" if result.unresolved else "")
             + (f" · [red]{len(result.violations)} verification violations[/red]" if result.violations else "")
-            + (f" · [yellow]{len(result.low_confidence)} low-confidence claims[/yellow]" if result.low_confidence else "")
+            # The appendix's tier vocabulary (high / moderate / low) is not
+            # this count: flagged = below the stakes threshold, which includes
+            # moderate single-source claims. Name it the way `verify` does.
+            + (
+                f" · [yellow]{len(result.low_confidence)} claims below the stakes threshold[/yellow]"
+                if result.low_confidence else ""
+            )
             + "[/dim]"
         )
     if result.status == "done":
@@ -887,12 +951,13 @@ def cmd_refresh(args) -> int:
     _warn_version_skew(row)
     config = store.get_config(args.session_id)
     live_adapter = make_adapter(config)
-    result = asyncio.run(
-        run_refresh(
-            conn, blobs, clock, args.session_id, live_adapter,
-            fetch_transport=fetch_transport, refresh_all=args.refresh_all,
+    with keep_awake(args.keep_awake):
+        result = asyncio.run(
+            run_refresh(
+                conn, blobs, clock, args.session_id, live_adapter,
+                fetch_transport=fetch_transport, refresh_all=args.refresh_all,
+            )
         )
-    )
     if result.status not in ("done", "partial"):
         console.print(
             f"[red]refresh run {result.session_id} ended {result.status} — no diff emitted[/red]"
@@ -965,15 +1030,16 @@ def cmd_watch(args) -> int:
             console.print(f"[dim]next check in {format_duration(args.every)} (Ctrl-C to stop)[/dim]")
 
     try:
-        summary = asyncio.run(
-            run_watch(
-                conn, blobs, clock, args.session_id,
-                make_adapter, fetch_transport=fetch_transport,
-                refresh_all=args.refresh_all, epsilon=args.epsilon,
-                every_s=args.every, rounds=args.rounds,
-                labels_path=labels_path, on_round=on_round,
+        with keep_awake(args.keep_awake):
+            summary = asyncio.run(
+                run_watch(
+                    conn, blobs, clock, args.session_id,
+                    make_adapter, fetch_transport=fetch_transport,
+                    refresh_all=args.refresh_all, epsilon=args.epsilon,
+                    every_s=args.every, rounds=args.rounds,
+                    labels_path=labels_path, on_round=on_round,
+                )
             )
-        )
     except KeyboardInterrupt:
         if not args.as_json:
             console.print(f"\n[dim]watch stopped after {len(seen)} round(s)[/dim]")
@@ -1065,12 +1131,13 @@ def cmd_fork(args) -> int:
     _warn_version_skew(row)
     config = SessionStore(conn, clock).get_config(args.session_id)
     live_adapter = make_adapter(config)
-    result = asyncio.run(
-        run_fork(
-            conn, blobs, clock, args.session_id, args.at_call, live_adapter,
-            fetch_transport=fetch_transport, steer=args.steer,
+    with keep_awake(args.keep_awake):
+        result = asyncio.run(
+            run_fork(
+                conn, blobs, clock, args.session_id, args.at_call, live_adapter,
+                fetch_transport=fetch_transport, steer=args.steer,
+            )
         )
-    )
     if args.as_json:
         print(json.dumps({"session_id": result.session_id, "status": result.status, "answer": result.answer}))
     else:
@@ -1111,11 +1178,14 @@ def cmd_eval(args) -> int:
         return _eval_run(args)
     if args.eval_command == "compare":
         return _eval_compare(args)
+    if args.eval_command == "analyze":
+        return _eval_analyze(args)
     return _eval_make_case(args)
 
 
 def _eval_run(args) -> int:
     from parsec.evals.case import discover_cases
+    from parsec.evals.metrics import default_metrics
     from parsec.evals.runner import run_cases
     from parsec.evals.support import make_support_checker
 
@@ -1123,6 +1193,7 @@ def _eval_run(args) -> int:
     if not case_dirs:
         console.print(f"[red]no cases found under {args.cases_root}[/red]")
         return EXIT_USAGE
+    names = [n.strip() for n in args.metrics.split(",") if n.strip()] if args.metrics else None
 
     def factory(config: RunConfig):
         return make_adapter(config)
@@ -1132,33 +1203,42 @@ def _eval_run(args) -> int:
         from parsec.gateway.openai_adapter import OpenAIAdapter
 
         judge_adapter = OpenAIAdapter()
+    try:
+        metrics = default_metrics(judge_adapter, args.judge_model, names)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return EXIT_USAGE
 
     clock = RealClock()
     with tempfile.TemporaryDirectory(prefix="parsec-eval-") as workdir:
         run = asyncio.run(
             run_cases(
                 case_dirs, Path(workdir), factory, clock, args.model,
-                label=args.label, judge_adapter=judge_adapter, judge_model=args.judge_model,
-                runs=args.runs, support_checker=make_support_checker(args.support_checker),
+                label=args.label, runs=args.runs,
+                support_checker=make_support_checker(args.support_checker), metrics=metrics,
             )
         )
     payload = run.to_payload()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    table = Table("case", "status", "citation", "coverage", "nuggets", "support", "synthesis", "gold%", "turns")
+    table = Table("case", "status", "citation", "coverage", "nuggets", "support", "synthesis", "gold%", "turns", "losses")
     for r in run.results:
         s = r.scores
         fmt = lambda v: "—" if v is None else f"{v:.2f}"  # noqa: E731
         gold = fmt(r.trajectory.gold_fetch_fraction) if r.trajectory else "—"
         table.add_row(
-            r.case_id, r.status, fmt(s.citation_faithfulness), fmt(s.coverage),
-            fmt(s.nugget_recall), fmt(s.claim_support), fmt(s.synthesis), gold, str(r.turns),
+            r.case_id, r.status, fmt(s.get("citation_faithfulness")), fmt(s.get("coverage")),
+            fmt(s.get("nugget_recall")), fmt(s.get("claim_support")), fmt(s.get("synthesis")),
+            gold, str(r.turns), str(sum(loss.count for loss in r.losses)),
         )
-        if s.nugget_contradictions:
-            console.print(f"[red]{r.case_id}: report contradicts gold: {s.nugget_contradictions}[/red]")
+        contradictions = getattr(s, "nugget_contradictions", None)
+        if contradictions:
+            console.print(f"[red]{r.case_id}: report contradicts gold: {contradictions}[/red]")
     console.print(table)
     console.print(f"aggregate: {payload['aggregate']}  →  {args.out}")
+    if payload["loss_histogram"]:
+        console.print(f"losses: {_format_histogram(payload['loss_histogram'])}  (`parsec eval analyze {args.out}`)")
     return EXIT_OK if all(r.error is None for r in run.results) else EXIT_ERROR
 
 
@@ -1189,14 +1269,83 @@ def _eval_compare(args) -> int:
                 "—" if v.ci95 is None else f"{v.ci95:.3f}",
             )
         console.print(verdicts)
+        if comparison.loss_deltas:
+            losses = Table("loss pattern", "category", "before", "after", "Δ")
+            for d in comparison.loss_deltas:
+                color = "red" if d.delta > 0 else "green" if d.delta < 0 else "dim"
+                losses.add_row(
+                    d.pattern, d.category, str(d.before), str(d.after),
+                    f"[{color}]{d.delta:+d}[/{color}]",
+                )
+            console.print(losses)
         if comparison.only_in_a or comparison.only_in_b:
             console.print(f"only in A: {comparison.only_in_a}  only in B: {comparison.only_in_b}")
+        if comparison.advisory_regressions:
+            axes = ", ".join(v.axis for v in comparison.advisory_regressions)
+            console.print(f"[yellow]advisory axis regressed (never gates): {axes}[/yellow]")
         if comparison.ok:
             console.print("[green]no significant regressions[/green]")
         else:
             axes = ", ".join(v.axis for v in comparison.regressed_axes)
             console.print(f"[red]significant regression on: {axes} (epsilon={args.epsilon})[/red]")
     return EXIT_OK if comparison.ok else EXIT_PARTIAL
+
+
+def _format_histogram(hist: dict) -> str:
+    return ", ".join(f"{pattern}×{count}" for pattern, count in hist.items()) or "none"
+
+
+def _eval_analyze(args) -> int:
+    """Loss taxonomy (M15.2) read back from a results file — no re-run:
+    the diagnosis was computed at eval time from the recording."""
+    from parsec.evals.losses import CATEGORY, CATEGORY_ORDER, LossPattern, histogram_from_results
+
+    payload = json.loads(args.results.read_text(encoding="utf-8"))
+    results = payload.get("results", [])
+    if args.case:
+        results = [r for r in results if r["case_id"] == args.case]
+        if not results:
+            console.print(f"[red]no case {args.case!r} in {args.results}[/red]")
+            return EXIT_USAGE
+    if results and not any("losses" in r for r in results):
+        console.print("[yellow]results file predates the loss taxonomy (M15); re-run `parsec eval run`[/yellow]")
+        return EXIT_USAGE
+    hist = histogram_from_results(results)
+    by_category: dict[str, dict[str, int]] = {}
+    for pattern, count in hist.items():
+        by_category.setdefault(CATEGORY[LossPattern(pattern)], {})[pattern] = count
+    if args.as_json:
+        print(json.dumps({
+            "label": payload.get("label", ""),
+            "loss_histogram": hist,
+            "by_category": by_category,
+            "cases": [
+                {"case_id": r["case_id"], "status": r.get("status"), "losses": r.get("losses", [])}
+                for r in results
+            ],
+        }))
+        return EXIT_OK
+
+    summary = Table("category", "pattern", "count", title=f"losses — {payload.get('label') or args.results.name}")
+    for category in CATEGORY_ORDER:
+        for pattern, count in by_category.get(category, {}).items():
+            summary.add_row(category, pattern, str(count))
+    if hist:
+        console.print(summary)
+    else:
+        console.print("[green]no losses: every gold item found, every claim verified, no incidents[/green]")
+    for r in results:
+        losses = r.get("losses") or []
+        if not losses:
+            continue
+        table = Table("pattern", "subject", "detail", "n", title=f"{r['case_id']} ({r.get('status')})")
+        for loss in losses:
+            table.add_row(
+                loss["pattern"], escape(str(loss["subject"])[:80]),
+                escape(str(loss.get("detail", ""))[:120]), str(loss.get("count", 1)),
+            )
+        console.print(table)
+    return EXIT_OK
 
 
 def _eval_make_case(args) -> int:
