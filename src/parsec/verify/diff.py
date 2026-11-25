@@ -44,9 +44,15 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from parsec.config import RunConfig
+from parsec.config import RunConfig, behaviour_level
 from parsec.retrieval.embeddings import cosine
-from parsec.verify.credence import CredenceReport, annotate, compute_credences, render_tier
+from parsec.verify.credence import (
+    CredenceReport,
+    annotate,
+    compute_credences,
+    credence_settings,
+    render_tier,
+)
 
 # Fuzzy-match floor on character-3-gram cosine: a lightly reworded claim
 # stays above this; two different claims about the same topic fall below.
@@ -121,6 +127,10 @@ class DiffReport:
     config_skew: bool            # credence-relevant config differs between sessions
     claims: list[ClaimDelta]
     documents: list[DocDelta]
+    # Set when the two sessions were recorded under different credence
+    # behaviour versions: both sides were re-scored under the newer one, so a
+    # change in how claims are scored does not read as the world changing.
+    rescored_under: dict[str, int] | None = None
 
     @property
     def counts(self) -> dict[str, int]:
@@ -142,6 +152,7 @@ class DiffReport:
             "query_b": self.query_b,
             "same_query": self.query_a == self.query_b,
             "config_skew": self.config_skew,
+            "rescored_under": self.rescored_under,
             "unchanged": self.unchanged,
             "counts": self.counts,
             "claims": [c.to_payload() for c in self.claims],
@@ -161,7 +172,9 @@ class _SessionGraph:
     credence: CredenceReport
 
 
-def _load(conn: sqlite3.Connection, session_id: str, embed: Embed) -> _SessionGraph:
+def _load(
+    conn: sqlite3.Connection, session_id: str, embed: Embed, claim_credence: int | None = None
+) -> _SessionGraph:
     row = conn.execute(
         "SELECT query, config_json FROM sessions WHERE session_id=?", (session_id,)
     ).fetchone()
@@ -190,18 +203,10 @@ def _load(conn: sqlite3.Connection, session_id: str, embed: Embed) -> _SessionGr
         if e["edge_type"] != "contradicts":
             evidence_of.setdefault(e["src_node_id"], []).append(e["dst_node_id"])
 
-    credence = compute_credences(
-        conn,
-        session_id,
-        source_tiers=config.source_tiers,
-        stakes_threshold=config.stakes_threshold,
-        volatile_penalty=config.volatile_penalty,
-        persist=False,
-        volatile_half_life_days=config.volatile_half_life_days,
-        slow_half_life_days=config.slow_half_life_days,
-        learned_reliability=config.learned_reliability,
-        embed=embed,
-    )
+    settings = credence_settings(config)
+    if claim_credence is not None:
+        settings["claim_credence"] = claim_credence
+    credence = compute_credences(conn, session_id, persist=False, embed=embed, **settings)
     return _SessionGraph(session_id, row["query"], config, claims, premises, spans, evidence_of, credence)
 
 
@@ -362,8 +367,22 @@ def diff_sessions(
 
         embed = EmbeddingCache(conn, HashedNgramEmbedder()).embed
 
-    a = _load(conn, session_a, embed)
-    b = _load(conn, session_b, embed)
+    # Compare like with like: score both sessions under the newer of the two
+    # claim-credence versions they were recorded with.
+    levels = [
+        behaviour_level(RunConfig.model_validate(json.loads(row["config_json"])).claim_credence)
+        for sid in (session_a, session_b)
+        if (
+            row := conn.execute(
+                "SELECT config_json FROM sessions WHERE session_id=?", (sid,)
+            ).fetchone()
+        )
+        is not None
+    ]
+    level = max(levels) if levels else None
+    rescored = {"claim_credence": level} if level is not None and len(set(levels)) > 1 else None
+    a = _load(conn, session_a, embed, level)
+    b = _load(conn, session_b, embed, level)
 
     claims: list[ClaimDelta] = []
     matches, a_only, b_only = _match_claims(a, b, embed)
@@ -414,6 +433,7 @@ def diff_sessions(
         query_a=a.query,
         query_b=b.query,
         config_skew=_credence_config(a.config) != _credence_config(b.config),
+        rescored_under=rescored,
         claims=claims,
         documents=_document_deltas(a, b),
     )

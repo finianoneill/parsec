@@ -154,8 +154,7 @@ def test_volatile_penalty_applied(dag, db, config):
     assert abs(report.nodes[p_volatile].credence - DEFAULT_TIER * 0.85) < 1e-9
 
 
-def test_finding_min_times_penalty_and_claim_noisy_or(dag, db, config):
-    sid = config.session_id
+def _finding_cited_with_its_parent(dag, sid):
     s_hi = _span(dag, sid, "https://data.census.gov/x")   # 0.9
     s_lo = _span(dag, sid, "https://myblog.blogspot.com/y", "doc:dddddddddddd#0-10")  # 0.4
     p_hi = _premise(dag, sid, "Strong fact.", [s_hi])
@@ -168,12 +167,28 @@ def test_finding_min_times_penalty_and_claim_noisy_or(dag, db, config):
     claim = dag.add_node(sid, "ReportClaim", {"text": "Claimed.", "refs": [fid, p_hi], "narrative": False})
     dag.add_edge(sid, claim, fid, "aggregates")
     dag.add_edge(sid, claim, p_hi, "aggregates")
-    report = compute_credences(db, sid)
+    return fid, claim
+
+
+def test_finding_is_min_times_penalty_and_claim_is_its_weakest_required_ref(dag, db, config):
+    sid = config.session_id
+    fid, claim = _finding_cited_with_its_parent(dag, sid)
+    report = compute_credences(db, sid, claim_credence=2)
     # finding: min(0.9, 0.4) * 0.95 — the weak premise dominates the chain
     assert abs(report.nodes[fid].credence - 0.4 * 0.95) < 1e-9
-    # claim: two independent refs -> noisy-OR
-    expected = noisy_or(sorted([0.4 * 0.95, 0.9]))
-    assert abs(report.nodes[claim].credence - expected) < 1e-9
+    # claim: the finding's own parent is not a second support — the claim is
+    # exactly as credible as the finding
+    assert abs(report.nodes[claim].credence - 0.4 * 0.95) < 1e-9
+
+
+def test_legacy_claim_credence_still_double_counts_for_old_recordings(dag, db, config):
+    """claim_credence 1 is frozen: a recording made under it must be scored
+    the way it was, wrong as that was (0.38 and 0.9 "corroborating" to 0.938)."""
+    sid = config.session_id
+    fid, claim = _finding_cited_with_its_parent(dag, sid)
+    report = compute_credences(db, sid)  # default: level 1
+    assert abs(report.nodes[fid].credence - 0.4 * 0.95) < 1e-9
+    assert abs(report.nodes[claim].credence - noisy_or(sorted([0.4 * 0.95, 0.9]))) < 1e-9
 
 
 def test_flagging_and_persistence(dag, db, config):

@@ -152,6 +152,9 @@ CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
     # 1: every number and quote in a report sentence must appear in what the
     # sentence cites; failures go through repair, then are marked unverified.
     "sentence_check": "1-dev",
+    # 2: a claim is as credible as the weakest distinct fact it cites (no
+    # corroboration from citing more refs); intake dedup respects word order.
+    "claim_credence": "2-dev",
 }
 
 

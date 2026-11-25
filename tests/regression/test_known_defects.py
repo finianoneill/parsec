@@ -1,7 +1,7 @@
 """One test per known correctness defect, each asserting the CORRECT
 behaviour and marked as a strict expected failure until its fix lands.
-A test with no marker is a defect that has been fixed (WS0 so far); it stays
-here as that fix's regression test.
+A test with no marker is a defect that has been fixed (WS0 and WS1 so far);
+it stays here as that fix's regression test.
 
 These are the "before" half of every remediation change: the bug is pinned
 by a failing test before the fix is written, so the fix is measured rather
@@ -30,6 +30,7 @@ import pytest
 
 import parsec.cli as cli
 from parsec import demo, ids
+from parsec.config import CURRENT_BEHAVIOUR
 from parsec.db.connection import open_db
 from parsec.gateway.fake_adapter import scripted_response
 from parsec.models.tools import ToolIntent
@@ -107,7 +108,6 @@ def _claim(dag, sid, text, refs):
     return claim
 
 
-@pytest.mark.xfail(strict=True, reason="WS1: claims noisy-OR their cited refs (0.60 -> 0.84)")
 def test_ws1_two_premises_from_one_span_do_not_corroborate_each_other(dag, db, config):
     """Two facts read off the same default-tier span (0.6), cited together:
     the claim rests on one source and is no more credible than it."""
@@ -118,12 +118,11 @@ def test_ws1_two_premises_from_one_span_do_not_corroborate_each_other(dag, db, c
     p_width = _premise(dag, sid, "The tower is 125 metres wide.", span, span_id)
     claim = _claim(dag, sid, "The tower is 300 m tall and 125 m wide.", [p_height, p_width])
 
-    report = compute_credences(db, sid)
+    report = compute_credences(db, sid, claim_credence=2)
     assert report.nodes[claim].credence == pytest.approx(0.60)
     assert claim in report.flagged_claims  # below the 0.7 stakes threshold
 
 
-@pytest.mark.xfail(strict=True, reason="WS1: a finding cited with its own parent (0.38 -> 0.938)")
 def test_ws1_finding_cited_with_its_own_parent_is_not_double_counted(dag, db, config):
     """A finding (min(0.9, 0.4) x 0.95 = 0.38) cited next to one of its own
     parent premises (0.9) is the same evidence twice, not two supports."""
@@ -139,7 +138,7 @@ def test_ws1_finding_cited_with_its_own_parent_is_not_double_counted(dag, db, co
     dag.add_edge(sid, finding, p_lo, "deduces")
     claim = _claim(dag, sid, "Claimed.", [finding, p_hi])
 
-    report = compute_credences(db, sid)
+    report = compute_credences(db, sid, claim_credence=2)
     assert report.nodes[finding].credence == pytest.approx(0.38)
     assert report.nodes[claim].credence == pytest.approx(0.38)
 
@@ -155,7 +154,9 @@ DOC_TEXT = (
 
 @pytest.fixture
 def intake(db, blobs, event_log, ledger, sessions, config, clock):
-    """record_premises over one document with three single-sentence spans."""
+    """record_premises over one document with three single-sentence spans,
+    in a session recording today's behaviour versions."""
+    config = config.model_copy(update=CURRENT_BEHAVIOUR)
     sessions.create(config)
     documents = DocumentStore(db, clock)
     spans = SpanStore(db)
@@ -188,7 +189,6 @@ def intake(db, blobs, event_log, ledger, sessions, config, clock):
     return record, dag, span_ids
 
 
-@pytest.mark.xfail(strict=True, reason="WS1: near-duplicate matching compares token sets")
 async def test_ws1_reversed_propositions_are_not_merged_at_intake(intake, config):
     """"Alder acquired Birch" and "Birch acquired Alder" share every token
     and say opposite things. They are two premises, not one."""

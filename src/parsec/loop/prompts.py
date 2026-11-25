@@ -85,10 +85,23 @@ _WRITER_SENTENCE_RULES = (
     "- [narrative] sentences carry no evidence, so they may contain no numbers and no "
     "quotations. A heading may only use figures that appear in evidence the answer cites.\n"
 )
-assert WRITER_SYSTEM.count(_WRITER_CONTRACT_V1_TAIL) == 1
-WRITER_SYSTEM_SENTENCE_CHECK = WRITER_SYSTEM.replace(
-    _WRITER_CONTRACT_V1_TAIL, _WRITER_CONTRACT_V1_TAIL + _WRITER_SENTENCE_RULES
+# claim_credence >= 2: a sentence is scored by the weakest thing it cites.
+_WRITER_CLAIM_RULES = (
+    "- A sentence is only as credible as the weakest premise or finding it cites, and citing "
+    "more of them does not strengthen it. Write one fact per sentence: do not join unrelated "
+    "facts in one sentence, and cite every premise that sentence depends on.\n"
 )
+assert WRITER_SYSTEM.count(_WRITER_CONTRACT_V1_TAIL) == 1
+
+
+def _writer_system(sentence_rules: bool, claim_rules: bool) -> str:
+    extra = (_WRITER_SENTENCE_RULES if sentence_rules else "") + (
+        _WRITER_CLAIM_RULES if claim_rules else ""
+    )
+    return WRITER_SYSTEM.replace(_WRITER_CONTRACT_V1_TAIL, _WRITER_CONTRACT_V1_TAIL + extra)
+
+
+WRITER_SYSTEM_SENTENCE_CHECK = _writer_system(sentence_rules=True, claim_rules=False)
 
 SUBMIT_SUBQUESTIONS_SCHEMA = {
     "name": "submit_subquestions",
@@ -126,9 +139,10 @@ def subagent_system(config: RunConfig) -> str:
 
 
 def writer_system(config: RunConfig) -> str:
-    if behaviour_level(config.sentence_check) >= 1:
-        return WRITER_SYSTEM_SENTENCE_CHECK
-    return WRITER_SYSTEM
+    return _writer_system(
+        sentence_rules=behaviour_level(config.sentence_check) >= 1,
+        claim_rules=behaviour_level(config.claim_credence) >= 2,
+    )
 
 
 def repair_template(config: RunConfig) -> str:
