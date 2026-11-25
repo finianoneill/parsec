@@ -3,9 +3,9 @@ import pytest
 from parsec import ids
 from parsec.models.tools import ToolIntent
 from parsec.retrieval.embeddings import EmbeddingCache, HashedNgramEmbedder, cosine
+from parsec.store.event_log import stream_scope
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
-from parsec.store.event_log import stream_scope
 from parsec.tools.search_within import SearchWithinTool, bm25_rank, visible_doc_hashes
 
 

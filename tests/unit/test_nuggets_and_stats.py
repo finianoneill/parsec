@@ -42,14 +42,14 @@ def test_nugget_full_recall(claims, db):
         "Water boils at 100 degrees Celsius at sea level.",
         "On Mount Everest water boils at about 70 degrees Celsius.",
     ])
-    recall, hits, misses, contra = score_nuggets(db, sid, NUGGETS)
+    recall, _hits, misses, contra = score_nuggets(db, sid, NUGGETS)
     assert recall == 1.0 and misses == [] and contra == []
 
 
 def test_nugget_weighted_partial_recall(claims, db):
     write, sid = claims
     write(["Water boils at 100 degrees Celsius at sea level."])
-    recall, hits, misses, contra = score_nuggets(db, sid, NUGGETS)
+    recall, _hits, misses, _contra = score_nuggets(db, sid, NUGGETS)
     assert abs(recall - 1.0 / 1.5) < 1e-9  # vital hit, okay missed
     assert misses == ["everest boiling ~70C"]
 
@@ -57,7 +57,7 @@ def test_nugget_weighted_partial_recall(claims, db):
 def test_nugget_contradiction_detected(claims, db):
     write, sid = claims
     write(["My tests show water boils at 90 degrees Celsius."])
-    recall, hits, misses, contra = score_nuggets(db, sid, NUGGETS)
+    recall, _hits, _misses, contra = score_nuggets(db, sid, NUGGETS)
     assert contra == ["sea-level boiling point is 100C"]
     assert recall == 0.0
 

@@ -46,9 +46,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Iterable
 
 from parsec.evals.case import EvalCase
 from parsec.evals.metrics import MetricContext
@@ -173,7 +173,7 @@ class Loss:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "Loss":
+    def from_payload(cls, payload: dict) -> Loss:
         return cls(
             LossPattern(payload["pattern"]),
             payload["subject"],
@@ -471,7 +471,9 @@ def diagnose_losses(ctx: MetricContext, error: str | None = None) -> list[Loss]:
     # Gold items: must_find entries and nuggets, localized by the ladder.
     texts = [t.lower() for t in claim_texts(conn, sid)]
     doc_texts = _doc_texts(conn, trace)
-    items = [(entry, [entry], []) for entry in case.must_find]
+    items: list[tuple[str, list[str], list[str]]] = [
+        (entry, [entry], []) for entry in case.must_find
+    ]
     items += [(n.text, n.patterns, n.contradiction_patterns) for n in case.nuggets]
     for text, patterns, contradiction in items:
         if contradiction and matches_any(contradiction, texts):

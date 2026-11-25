@@ -4,7 +4,7 @@ replay reads it back so a replayed run is configured identically."""
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
@@ -92,7 +92,7 @@ class EffortLimits(BaseModel):
 MIN_SUBAGENT_TURNS = 3
 
 
-def effort_limits(effort: str, budgets: "Budgets") -> EffortLimits:
+def effort_limits(effort: str, budgets: Budgets) -> EffortLimits:
     """quick: one subagent, few calls, no gap-fill. standard: small fan-out.
     deep (and anything unrecognized — the v1-compatible default): the full
     configured caps. Every tier is additionally clamped to the number of
@@ -284,7 +284,7 @@ class Clock(Protocol):
 
 class RealClock:
     def now_iso(self) -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        return datetime.now(UTC).isoformat(timespec="milliseconds")
 
     def monotonic(self) -> float:
         return time.monotonic()

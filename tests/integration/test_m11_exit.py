@@ -202,7 +202,7 @@ def test_exit_2_subagent_killed_mid_wave(tmp_path, transport, monkeypatch, capsy
     monkeypatch.setattr(
         cli, "adapter_factory", lambda config: StreamFakeAdapter(scripts)
     )
-    exit_code, data_dir = _ask(tmp_path, "m11-failure")
+    _exit_code, data_dir = _ask(tmp_path, "m11-failure")
     out = json.loads(capsys.readouterr().out)
     assert SENTENCES["sq-1"] in out["answer"] and SENTENCES["sq-3"] in out["answer"]
 
@@ -248,7 +248,7 @@ def test_exit_3_wave_allowance_starves_deterministically(tmp_path, transport, mo
     monkeypatch.setattr(cli, "adapter_factory", lambda config: StreamFakeAdapter(scripts))
     # decomposer spends 150 tokens; 200-150=50 remaining -> ~16 tokens per
     # subagent -> each stops after its first (150-token) call
-    exit_code, data_dir = _ask(tmp_path, "m11-starved", extra=["--max-tokens", "200"])
+    _exit_code, data_dir = _ask(tmp_path, "m11-starved", extra=["--max-tokens", "200"])
     capsys.readouterr()
 
     conn = open_db(data_dir / "parsec.db")

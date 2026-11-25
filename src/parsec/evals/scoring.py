@@ -85,7 +85,8 @@ def score_coverage(
     if not must_find:
         return None, [], []
     texts = [t.lower() for t in claim_texts(conn, session_id)]
-    hits, misses = [], []
+    hits: list[str] = []
+    misses: list[str] = []
     for item in must_find:
         (hits if matches(item, texts) else misses).append(item)
     return len(hits) / len(must_find), hits, misses

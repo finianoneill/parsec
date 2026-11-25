@@ -58,4 +58,4 @@ class RetryPolicy:
         return error_kind in RETRYABLE and attempt < self.max_attempts
 
     def delay_s(self, attempt: int) -> float:
-        return min(self.base_delay_s * (2 ** (attempt - 1)), self.max_delay_s)
+        return min(self.base_delay_s * float(2 ** (attempt - 1)), self.max_delay_s)

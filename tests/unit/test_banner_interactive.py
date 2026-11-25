@@ -5,7 +5,7 @@ import io
 from rich.console import Console
 
 import parsec.cli as cli
-from parsec.banner import render_banner, print_banner
+from parsec.banner import print_banner, render_banner
 
 
 def test_banner_renders_wordmark_and_tagline():
@@ -18,7 +18,11 @@ def test_banner_renders_wordmark_and_tagline():
 
 def test_banner_gradient_spans_indigo_to_cyan():
     buf = io.StringIO()
-    console = Console(file=buf, force_terminal=True, color_system="truecolor", width=120)
+    # no_color=False: rich honours NO_COLOR from the environment even on a
+    # forced terminal, which made this test fail on any machine that sets it.
+    console = Console(
+        file=buf, force_terminal=True, color_system="truecolor", width=120, no_color=False
+    )
     print_banner(console)
     out = buf.getvalue()
     assert "\x1b[38;2;165;180;252" in out  # #a5b4fc at the left edge

@@ -19,6 +19,7 @@ date (definitely out of order), so granularity mismatches ("2020" vs
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 # (year, month, day) — granularity encoded by interval endpoints.
 DateTuple = tuple[int, int, int]
@@ -27,7 +28,7 @@ Interval = tuple[DateTuple, DateTuple]
 _MONTHS = {
     name: i + 1
     for i, name in enumerate(
-        "january february march april may june july august september october november december".split()
+        ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
     )
 }
 _MONTH_PATTERN = "|".join(_MONTHS)
@@ -51,7 +52,7 @@ def extract_date_intervals(text: str) -> list[Interval]:
     intervals: list[Interval] = []
     working = text
 
-    def consume(pattern: re.Pattern, build) -> None:
+    def consume(pattern: re.Pattern, build: Callable[[re.Match], Interval]) -> None:
         nonlocal working
 
         def replace(m: re.Match) -> str:
@@ -140,13 +141,13 @@ def check_temporal_findings(
             )
             continue
         intervals = [_premise_interval(pid, nodes, out_edges) for pid in premise_ids]
-        missing = [pid for pid, iv in zip(premise_ids, intervals) if iv is None]
+        missing = [pid for pid, iv in zip(premise_ids, intervals, strict=True) if iv is None]
         if missing:
             advisories.append(
                 (nid, f"no timestamps found on premise(s) {', '.join(missing)}; ordering not checkable")
             )
             continue
-        (a_lo, a_hi), (b_lo, b_hi) = intervals
+        (a_lo, a_hi), (b_lo, b_hi) = [iv for iv in intervals if iv is not None]
         a_id, b_id = premise_ids
         if direction == "before" and a_lo > b_hi:
             violations.append(

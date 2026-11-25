@@ -31,15 +31,15 @@ QUERY = "boiling point of water at sea level and on everest"
 SQ1, SQ2 = "boiling point at sea level", "boiling point on everest"
 URL_A, URL_B = "https://example.test/a", "https://example.test/b"
 PAGE_A = (
-    "<html><body><p>Water boils at 100 degrees Celsius at standard atmospheric pressure at sea "
-    "level, the reference value used to calibrate laboratory thermometers worldwide.</p></body></html>"
-).encode()
+    b"<html><body><p>Water boils at 100 degrees Celsius at standard atmospheric pressure at sea "
+    b"level, the reference value used to calibrate laboratory thermometers worldwide.</p></body></html>"
+)
 # Page B is the stronger lexical match for sq-1's search query, but sq-2 fetches it later.
 PAGE_B = (
-    "<html><body><p>Boiling point of water at sea level: the boiling point of water at sea level is "
-    "100 degrees Celsius because sea level pressure is one atmosphere; on Everest the boiling point of "
-    "water is lower.</p></body></html>"
-).encode()
+    b"<html><body><p>Boiling point of water at sea level: the boiling point of water at sea level is "
+    b"100 degrees Celsius because sea level pressure is one atmosphere; on Everest the boiling point of "
+    b"water is lower.</p></body></html>"
+)
 PREMISE_A = "Water boils at 100 degrees Celsius at standard atmospheric pressure at sea level."
 
 

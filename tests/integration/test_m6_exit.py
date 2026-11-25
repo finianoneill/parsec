@@ -235,7 +235,7 @@ async def test_wall_clock_cuts_a_wedged_call_and_still_writes(env, db, event_log
     """max_wall_seconds was only checked between turns; a wedged call now
     dies at the deadline, the next boundary stops dispatch with the wall
     cap named, and the writer still runs inside its grace."""
-    make_loop, span_ref = env
+    make_loop, _span_ref = env
     script = [
         scripted_response(
             [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",
@@ -285,13 +285,7 @@ async def test_writer_wall_grace_is_scoped_to_writer_calls(env, tmp_path):
     make_loop, span_ref = env
     p_id = _premise_id(span_ref)
     answer = f"One source says water boils at 99 degrees Celsius. [{p_id}]"
-    script = _base_script(span_ref, answer) + [
-        scripted_response(
-            [{"type": "tool_use", "id": "tu_gap", "name": "submit_report",
-              "input": {"status": "blocked", "dead_ends": ["no corroborating sources found"]}}],
-            stop_reason="tool_use", index=4),
-        scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=5),
-    ]
+    script = [*_base_script(span_ref, answer), scripted_response([{"type": "tool_use", "id": "tu_gap", "name": "submit_report", "input": {"status": "blocked", "dead_ends": ["no corroborating sources found"]}}], stop_reason="tool_use", index=4), scripted_response([{"type": "text", "text": answer}], stop_reason="end_turn", index=5)]
     adapter = _CapSpyAdapter(script)
     loop = make_loop(tmp_path, adapter, "s-grace", budgets=Budgets(max_wall_seconds=100))
     adapter.loop = loop
@@ -302,7 +296,7 @@ async def test_writer_wall_grace_is_scoped_to_writer_calls(env, tmp_path):
 
 
 async def test_wall_clock_past_writer_grace_halts_with_best_effort(env, event_log, clock, tmp_path):
-    make_loop, span_ref = env
+    make_loop, _span_ref = env
     script = [
         scripted_response(
             [{"type": "tool_use", "id": "tu_dec", "name": "submit_subquestions",

@@ -22,11 +22,11 @@ from parsec.evals.runner import run_cases
 from parsec.gateway.fake_adapter import FakeAdapter, scripted_response
 from parsec.models.gateway import ModelResponse, Usage
 from tests.integration.m3_corpus import (
+    FINDING_A_TEXT,
     PAGE_A,
     PAGE_B,
     PREMISE_A_TEXT,
     PREMISE_B_TEXT,
-    FINDING_A_TEXT,
     QUERY,
     SQ1,
     SQ2,

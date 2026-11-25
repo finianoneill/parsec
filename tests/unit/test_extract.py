@@ -14,20 +14,20 @@ def test_html_extraction_strips_tags_and_scripts():
 
 
 BOILERPLATE_PAGE = (
-    "<html><head><title>Article Page</title></head><body>"
-    "<nav><ul><li><a href='/'>Home</a></li><li><a href='/about'>About</a></li>"
-    "<li><a href='/contact'>Contact</a></li></ul></nav>"
-    "<article><h1>The Boiling Point of Water</h1>"
-    "<p>Water boils at 100 degrees Celsius at standard atmospheric pressure, a value "
-    "used to calibrate thermometers worldwide and taught in every introductory "
-    "chemistry course as one of the fixed points of the Celsius scale.</p>"
-    "<p>At higher altitudes the boiling point decreases; in Denver water boils at "
-    "roughly 95 degrees Celsius because atmospheric pressure is lower there than at "
-    "sea level, a difference that measurably affects cooking times.</p></article>"
-    "<footer>Copyright 2026 Example Corp. All rights reserved. "
-    "<a href='/privacy'>Privacy Policy</a> <a href='/terms'>Terms of Service</a></footer>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Article Page</title></head><body>"
+    b"<nav><ul><li><a href='/'>Home</a></li><li><a href='/about'>About</a></li>"
+    b"<li><a href='/contact'>Contact</a></li></ul></nav>"
+    b"<article><h1>The Boiling Point of Water</h1>"
+    b"<p>Water boils at 100 degrees Celsius at standard atmospheric pressure, a value "
+    b"used to calibrate thermometers worldwide and taught in every introductory "
+    b"chemistry course as one of the fixed points of the Celsius scale.</p>"
+    b"<p>At higher altitudes the boiling point decreases; in Denver water boils at "
+    b"roughly 95 degrees Celsius because atmospheric pressure is lower there than at "
+    b"sea level, a difference that measurably affects cooking times.</p></article>"
+    b"<footer>Copyright 2026 Example Corp. All rights reserved. "
+    b"<a href='/privacy'>Privacy Policy</a> <a href='/terms'>Terms of Service</a></footer>"
+    b"</body></html>"
+)
 
 
 def test_trafilatura_main_content_extraction():
@@ -45,13 +45,13 @@ def test_trafilatura_deterministic():
 
 
 def test_plain_text_passthrough():
-    text, title, note = extract_text(b"line one\n\nline two", "text/plain")
+    text, title, _note = extract_text(b"line one\n\nline two", "text/plain")
     assert "line one" in text and "line two" in text
     assert title is None
 
 
 def test_binary_unsupported():
-    text, title, note = extract_text(b"\x89PNG\r\n", "image/png")
+    text, _title, note = extract_text(b"\x89PNG\r\n", "image/png")
     assert text == ""
     assert note and "unsupported" in note
 
@@ -90,7 +90,7 @@ def make_pdf(text: str) -> bytes:
 
 def test_pdf_extraction():
     pdf = make_pdf("Adaptive designs guidance text.")
-    text, title, note = extract_text(pdf, "application/pdf")
+    text, _title, note = extract_text(pdf, "application/pdf")
     assert text == "Adaptive designs guidance text."
     assert note is None
 
@@ -99,7 +99,7 @@ def test_pdf_sniffed_from_magic_bytes():
     # PDF endpoints often serve application/octet-stream (or nothing).
     pdf = make_pdf("Sniffed fine.")
     for ct in ("application/octet-stream", None):
-        text, title, note = extract_text(pdf, ct)
+        text, _title, note = extract_text(pdf, ct)
         assert text == "Sniffed fine."
         assert note is None
 
@@ -110,7 +110,7 @@ def test_pdf_extraction_deterministic():
 
 
 def test_damaged_pdf_yields_note_not_crash():
-    text, title, note = extract_text(b"%PDF-1.4 but truncated garbage", "application/pdf")
+    text, _title, note = extract_text(b"%PDF-1.4 but truncated garbage", "application/pdf")
     assert text == ""
     assert note and note.startswith("pdf extraction failed")
 

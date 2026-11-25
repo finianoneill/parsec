@@ -117,7 +117,7 @@ class FetchTool:
                 + " Try an HTML version of this document or a different source."
             )
         lines = [header]
-        for sid_, s, e, text in span_rows:
+        for sid_, _s, _e, text in span_rows:
             preview = " ".join(text[:PREVIEW_CHARS].split())
             lines.append(f"[{sid_}] {preview}")
         return outcome.model_dump(exclude={"from_cache"}), "\n".join(lines)

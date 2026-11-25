@@ -27,7 +27,7 @@ class Notebook:
             "SELECT COALESCE(MAX(entry_idx)+1, 0) FROM notebook WHERE session_id=?",
             (session_id,),
         ).fetchone()
-        entry_idx = row[0]
+        entry_idx = int(row[0])
         self.conn.execute(
             "INSERT INTO notebook (session_id, entry_idx, ts, author, md_text) VALUES (?,?,?,?,?)",
             (session_id, entry_idx, self.clock.now_iso(), author, md_text),

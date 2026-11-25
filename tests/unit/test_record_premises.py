@@ -40,7 +40,7 @@ def setup(db, blobs, event_log, ledger, sessions, config, clock):
 
 
 async def test_valid_premise_recorded(setup, config):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     intent = ToolIntent(
         tool_use_id="t1",
         tool_name="record_premises",
@@ -57,7 +57,7 @@ async def test_valid_premise_recorded(setup, config):
 
 
 async def test_wrong_number_rejected(setup, config):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     intent = ToolIntent(
         tool_use_id="t2",
         tool_name="record_premises",
@@ -70,7 +70,7 @@ async def test_wrong_number_rejected(setup, config):
 
 
 async def test_unknown_span_rejected(setup, config):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, _s1, _s2 = setup
     intent = ToolIntent(
         tool_use_id="t3",
         tool_name="record_premises",
@@ -82,7 +82,7 @@ async def test_unknown_span_rejected(setup, config):
 
 
 async def test_mixed_batch_partial_acceptance(setup, config, blobs):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, _s1, s2 = setup
     intent = ToolIntent(
         tool_use_id="t4",
         tool_name="record_premises",
@@ -101,7 +101,7 @@ async def test_mixed_batch_partial_acceptance(setup, config, blobs):
 
 
 async def test_transform_note_stored_on_edge(setup, config):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, _s1, s2 = setup
     intent = ToolIntent(
         tool_use_id="t5",
         tool_name="record_premises",
@@ -124,7 +124,7 @@ async def test_transform_note_stored_on_edge(setup, config):
 async def test_vague_premise_refused_at_record_time(setup, config):
     """M9 ambiguity-refusal gate: 'the study showed benefits'-class premises
     are rejected with the reason, not recorded vaguely."""
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     intent = ToolIntent(
         tool_use_id="t-lint",
         tool_name="record_premises",
@@ -140,7 +140,7 @@ async def test_vague_premise_refused_at_record_time(setup, config):
 async def test_unsupported_premise_recorded_with_advisory_note(setup, config):
     """M9 grounded-NLI tier is advisory (T9): a premise the span does not
     appear to support is still recorded, but the subagent gets a NOTE."""
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     intent = ToolIntent(
         tool_use_id="t-nli",
         tool_name="record_premises",
@@ -160,7 +160,7 @@ async def test_overlong_premise_rejected_alone_not_the_batch(setup, config, blob
     """A >300-char premise is rejected individually with the reason; sibling
     premises in the same batch still record — the length cap must never fail
     the whole call at schema level."""
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     long_text = "Water boils at 100 degrees Celsius at sea level, " * 8
     assert len(long_text) > 300
     intent = ToolIntent(
@@ -185,7 +185,7 @@ async def test_near_duplicate_returns_existing_premise_and_corroborates(setup, c
     """A rephrased known fact must not fragment into a second premise node:
     the existing ID comes back, and a genuinely new span attaches to it as
     corroboration."""
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     first = ToolIntent(
         tool_use_id="t-orig",
         tool_name="record_premises",
@@ -215,7 +215,7 @@ async def test_near_duplicate_returns_existing_premise_and_corroborates(setup, c
 
 
 async def test_duplicate_with_supporting_new_span_attaches_corroboration(setup, config, blobs, db, clock):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     # A second document that independently states the fact.
     documents = DocumentStore(db, clock)
     spans_store = SpanStore(db)
@@ -255,7 +255,7 @@ async def test_duplicate_with_uncontained_span_does_not_attach(setup, config, bl
     """Corroboration has the same mechanical bar as recording: the RECORDED
     text (here, its quoted phrase) must be contained in the new spans on
     their own — else the span rides in without stating the fact."""
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     documents = DocumentStore(db, clock)
     spans_store = SpanStore(db)
     text = "Sea-level boiling point: 100 degrees Celsius exactly."
@@ -318,7 +318,7 @@ async def test_different_quantity_is_not_a_duplicate(setup, config):
 
 
 async def test_in_batch_near_duplicates_collapse(setup, config, blobs):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, _s1, s2 = setup
     intent = ToolIntent(
         tool_use_id="t-batch",
         tool_name="record_premises",
@@ -337,7 +337,7 @@ async def test_in_batch_near_duplicates_collapse(setup, config, blobs):
 
 
 async def test_idempotent_re_record(setup, config):
-    registry, ctx, dag, s1, s2 = setup
+    registry, ctx, dag, s1, _s2 = setup
     intent = ToolIntent(
         tool_use_id="t6",
         tool_name="record_premises",

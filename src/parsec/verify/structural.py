@@ -145,7 +145,9 @@ def _out_edges(edges: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
-def _check_acyclic(nodes, edges, report: VerificationReport) -> None:
+def _check_acyclic(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     out = _out_edges(edges)
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {nid: WHITE for nid in nodes}
@@ -172,7 +174,9 @@ def _check_acyclic(nodes, edges, report: VerificationReport) -> None:
                 stack.pop()
 
 
-def _check_edge_rules(nodes, edges, report: VerificationReport) -> None:
+def _check_edge_rules(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     for e in edges:
         src = nodes.get(e["src_node_id"])
         dst = nodes.get(e["dst_node_id"])
@@ -198,7 +202,9 @@ def _check_edge_rules(nodes, edges, report: VerificationReport) -> None:
             )
 
 
-def _check_claim_paths(nodes, edges, report: VerificationReport) -> None:
+def _check_claim_paths(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     out = _out_edges(edges)
     for nid, node in nodes.items():
         if node["type"] != "ReportClaim":
@@ -229,7 +235,9 @@ def _check_claim_paths(nodes, edges, report: VerificationReport) -> None:
             )
 
 
-def _check_tier_integrity(nodes, edges, report: VerificationReport) -> None:
+def _check_tier_integrity(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     out = _out_edges(edges)
     for nid, node in nodes.items():
         if node["type"] == "Premise":
@@ -249,7 +257,12 @@ def _check_tier_integrity(nodes, edges, report: VerificationReport) -> None:
                 )
 
 
-def _check_corpus_integrity(conn, blobs: BlobStore, nodes, report: VerificationReport) -> None:
+def _check_corpus_integrity(
+    conn: sqlite3.Connection,
+    blobs: BlobStore,
+    nodes: dict[str, dict],
+    report: VerificationReport,
+) -> None:
     for nid, node in nodes.items():
         if node["type"] != "SourceSpan":
             continue
@@ -295,7 +308,9 @@ def _check_corpus_integrity(conn, blobs: BlobStore, nodes, report: VerificationR
             )
 
 
-def _flag_dependent_claims(nodes, edges, report: VerificationReport) -> None:
+def _flag_dependent_claims(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     """Walk violations back up the DAG: every ReportClaim whose evidence path
     touches a violated node is itself flagged — a corrupted span condemns the
     claims that rest on it, mechanically."""
@@ -331,7 +346,9 @@ def _flag_dependent_claims(nodes, edges, report: VerificationReport) -> None:
                     queue.append(src)
 
 
-def _check_containment(nodes, edges, report: VerificationReport) -> None:
+def _check_containment(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     out = _out_edges(edges)
     for nid, node in nodes.items():
         if node["type"] != "Premise":
@@ -352,7 +369,9 @@ def _check_containment(nodes, edges, report: VerificationReport) -> None:
             report.violations.append(Violation("containment", nid, problem))
 
 
-def _check_temporal(nodes, edges, report: VerificationReport) -> None:
+def _check_temporal(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
     """Stage 2 (§6): temporal edges checked against evidence timestamps
     mechanically, before any judge sees them. Definite ordering
     contradictions are violations; undecidable findings are advisories."""
@@ -365,7 +384,10 @@ def _check_temporal(nodes, edges, report: VerificationReport) -> None:
 
 
 def _check_premise_support(
-    nodes, edges, report: VerificationReport, checker: GroundedChecker | None
+    nodes: dict[str, dict],
+    edges: list[dict],
+    report: VerificationReport,
+    checker: GroundedChecker | None,
 ) -> None:
     """Grounded-NLI tier (M9, T9): flags premises whose spans pass exact-match
     containment but do not appear to carry the premise's content. Advisory —
@@ -389,7 +411,7 @@ def _check_premise_support(
             report.advisories.append(Violation("premise-support", nid, verdict.describe()))
 
 
-def _lint_premises(nodes, report: VerificationReport) -> None:
+def _lint_premises(nodes: dict[str, dict], report: VerificationReport) -> None:
     for nid in sorted(nodes):
         node = nodes[nid]
         if node["type"] != "Premise":

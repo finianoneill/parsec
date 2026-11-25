@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import ValidationError
 
@@ -77,6 +79,9 @@ from parsec.verify.credence import (
 from parsec.verify.nli import make_grounded_checker
 from parsec.verify.omission import OmissionReport, detect_omissions, extraction_note
 from parsec.verify.structural import verify_session
+
+if TYPE_CHECKING:
+    from parsec.refresh import RefreshSeed  # refresh imports this module
 
 MAX_REPAIR_ROUNDS = 1
 MAX_BRIEF_ROUNDS = 3  # brief-gate edit rounds before the latest brief proceeds
@@ -225,7 +230,7 @@ class OrchestratorLoop:
         # re-dispatching. Set by refresh.run_refresh — and by replay/fork
         # for sessions whose config records refresh_of, re-derived from the
         # same immutable parent, so seeded sessions replay byte-identically.
-        self.refresh_seed = None  # parsec.refresh.RefreshSeed | None
+        self.refresh_seed: RefreshSeed | None = None
         # M11 replay scheduler: recorded join order per wave. Empty on live
         # runs (observed completion order is used and journaled); set by the
         # replay runner from the recorded SUBAGENT_JOINED events.
@@ -606,8 +611,7 @@ class OrchestratorLoop:
             messages.append(
                 {
                     "role": "user",
-                    "content": tool_results
-                    + [{"type": "text", "text": f"[brief edit] {text}\nRevise the brief and call submit_subquestions again."}],
+                    "content": [*tool_results, {"type": "text", "text": f"[brief edit] {text}\nRevise the brief and call submit_subquestions again."}],
                 }
             )
             resp = await self.gateway.complete(
@@ -689,6 +693,8 @@ class OrchestratorLoop:
         from parsec.refresh import copy_carried_evidence  # lazy: refresh imports this module
 
         seed = self.refresh_seed
+        if seed is None:  # run() only calls this for a seeded session
+            return subquestions
         sid = self.config.session_id
         carried = [sq for sq in subquestions if sq.sq_id in seed.carried]
         remaining = [sq for sq in subquestions if sq.sq_id not in seed.carried]
@@ -790,7 +796,14 @@ class OrchestratorLoop:
 
             done_order: list[str] = []
 
-            async def run_one(sq: Subquestion) -> SubagentOutcome:
+            # Bound as defaults: each wave's tasks see that wave's values even
+            # if a later refactor lets them outlive the loop iteration.
+            async def run_one(
+                sq: Subquestion,
+                allowance: WaveAllowance = allowance,
+                turn_cap: int = turn_cap,
+                done_order: list[str] = done_order,
+            ) -> SubagentOutcome:
                 try:
                     return await self._subagent_task(sq, allowance, turn_cap)
                 finally:
@@ -862,7 +875,7 @@ class OrchestratorLoop:
         # The per-phase immutable prefix, counted by the compaction trigger
         # (the old char trigger ignored it and could not react to overflow).
         static_chars = compaction.static_prefix_chars(
-            prompts.SUBAGENT_SYSTEM, tool_schemas + [prompts.submit_report_schema()]
+            prompts.SUBAGENT_SYSTEM, [*tool_schemas, prompts.submit_report_schema()]
         )
         messages: list[dict] = [
             {
@@ -1014,7 +1027,7 @@ class OrchestratorLoop:
             return "wave token allowance exhausted"
         return None
 
-    _RUNG_ACTIONS = {1: "evict", 2: "reconstruct", 3: "reset"}
+    _RUNG_ACTIONS: ClassVar[dict[int, str]] = {1: "evict", 2: "reconstruct", 3: "reset"}
 
     def _apply_rung(
         self, rung: int, messages: list[dict], sq: Subquestion, recorded_premises: list[str]
@@ -1237,7 +1250,7 @@ class OrchestratorLoop:
         finding_ids: list[str] = []
         if submission is None:
             status = "blocked" if not recorded_premises else "partial"
-            reason = end_reason or "no report submitted"
+            reason: str | None = end_reason or "no report submitted"
             self.coverage.set_status(sid, sq.sq_id, status, reason)
             dead_ends: list[str] = []
         else:
@@ -1339,13 +1352,15 @@ class OrchestratorLoop:
         self._latest_draft = resp.text
         return resp.text, messages
 
-    _WRITER_TEXT_CAPS = {0: None, 1: 300, 2: 120}
+    _WRITER_TEXT_CAPS: ClassVar[dict[int, int | None]] = {0: None, 1: 300, 2: 120}
 
     def _writer_head(self) -> dict:
         """The writer's base user message, rebuilt at the current reduction
         level. Levels clip evidence TEXT only — node IDs, sources,
         confidence tiers, and coverage gaps are never dropped, so the
         citation universe is unchanged (degrade, don't die)."""
+        if self._writer_view is None:  # harness bug guard
+            raise RuntimeError("writer head requested before the writer view was built")
         premises, findings, sources, unresolved, confidence = self._writer_view
         return {
             "role": "user",
@@ -1385,7 +1400,7 @@ class OrchestratorLoop:
                     raise
                 before = self._writer_estimate(messages)
                 self._writer_level += 1
-                messages = [self._writer_head()] + messages[1:]
+                messages = [self._writer_head(), *messages[1:]]
                 self._journal_compaction(
                     "harness", "overflow", "writer_clip", 0,
                     before, self._writer_estimate(messages), level=self._writer_level,
@@ -1476,7 +1491,7 @@ class OrchestratorLoop:
         md += [f"- {f['url']} — {f['note']}" for f in failed_primary]
         self.notebook.append(sid, "harness", "\n".join(md))
 
-    def _coverage_gap_target(self, retried: set[str]) -> object | None:
+    def _coverage_gap_target(self, retried: set[str]) -> sqlite3.Row | None:
         """The first original subquestion still PARTIAL and not yet retried
         (sq_id order — deterministic). Gap/retry rows are never themselves
         retried: a retry that comes back partial is the budget's answer."""
@@ -1503,7 +1518,7 @@ class OrchestratorLoop:
             return False
         return b.max_turns - 1 - self.turns >= MIN_SUBAGENT_TURNS + 1
 
-    async def _coverage_gap_fill(self, row, coverage_rounds: int) -> None:
+    async def _coverage_gap_fill(self, row: sqlite3.Row, coverage_rounds: int) -> None:
         """Re-dispatch one PARTIAL subquestion with its shortfall named. If
         the retry answers it, the original row is marked recovered — the
         writer's gap list then reflects what is STILL missing, not what was."""

@@ -35,9 +35,10 @@ class SessionStore:
         )
 
     def get(self, session_id: str) -> sqlite3.Row | None:
-        return self.conn.execute(
+        row: sqlite3.Row | None = self.conn.execute(
             "SELECT * FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
+        return row
 
     def get_config_raw(self, session_id: str) -> dict:
         """The stored config as recorded — missing keys stay missing, which is
@@ -45,7 +46,8 @@ class SessionStore:
         row = self.get(session_id)
         if row is None:
             raise KeyError(f"unknown session: {session_id}")
-        return json.loads(row["config_json"])
+        raw: dict = json.loads(row["config_json"])
+        return raw
 
     def get_config(self, session_id: str) -> RunConfig:
         return RunConfig.model_validate(self.get_config_raw(session_id))

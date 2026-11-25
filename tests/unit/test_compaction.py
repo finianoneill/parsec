@@ -33,7 +33,7 @@ def test_evict_keeps_last_n():
 
 
 def test_evict_noop_when_under_keep(  ):
-    msgs, evicted = evict_tool_results(_messages(2), keep_last=2)
+    _msgs, evicted = evict_tool_results(_messages(2), keep_last=2)
     assert evicted == 0
 
 

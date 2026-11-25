@@ -8,8 +8,8 @@ the codebase may call a model.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from collections.abc import Callable
+from datetime import datetime
 
 from parsec.canonical import canonical_json
 from parsec.config import RunConfig
@@ -99,9 +99,10 @@ class ModelGateway:
         try:
             await task
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
                 raise  # our own cancellation (halt), not the child's
-        except Exception:  # noqa: BLE001 — the abandoned call's error is moot
+        except Exception:
             pass
         raise ModelCallFailed(WALL_CLOCK_KIND, wall_clock_detail(cap), ModelErrorKind.FATAL)
 

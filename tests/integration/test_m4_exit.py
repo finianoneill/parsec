@@ -31,24 +31,24 @@ QUERY = "at what temperature does water boil according to available sources"
 SQ = "boiling point of water"
 
 BLOG_PAGE = (
-    "<html><head><title>My Kitchen Blog</title></head><body>"
-    "<p>I tested this on my stove last weekend and in my experience water boils at "
-    "99 degrees Celsius, at least at my house. Your mileage may vary of course, but "
-    "that is what my thermometer consistently showed across several attempts during "
-    "the afternoon, and I stand by the measurement even if the textbooks disagree "
-    "with me on the exact number for this experiment.</p>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>My Kitchen Blog</title></head><body>"
+    b"<p>I tested this on my stove last weekend and in my experience water boils at "
+    b"99 degrees Celsius, at least at my house. Your mileage may vary of course, but "
+    b"that is what my thermometer consistently showed across several attempts during "
+    b"the afternoon, and I stand by the measurement even if the textbooks disagree "
+    b"with me on the exact number for this experiment.</p>"
+    b"</body></html>"
+)
 
 GOOD_PAGE = (
-    "<html><head><title>Reference Tables</title></head><body>"
-    "<p>Standard reference tables list the boiling point of water as 100 degrees "
-    "Celsius at one atmosphere of pressure. These values are maintained by national "
-    "metrology institutes and are used for instrument calibration worldwide, forming "
-    "the basis of countless engineering and scientific procedures that depend on "
-    "accurate thermometric reference points for their validity.</p>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Reference Tables</title></head><body>"
+    b"<p>Standard reference tables list the boiling point of water as 100 degrees "
+    b"Celsius at one atmosphere of pressure. These values are maintained by national "
+    b"metrology institutes and are used for instrument calibration worldwide, forming "
+    b"the basis of countless engineering and scientific procedures that depend on "
+    b"accurate thermometric reference points for their validity.</p>"
+    b"</body></html>"
+)
 
 BLOG_URL = "https://myblog.blogspot.com/water"
 GOOD_URL = "https://data.reference.example/tables"

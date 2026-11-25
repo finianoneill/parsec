@@ -69,10 +69,7 @@ def test_full_strategy_marks_tools_and_rolling_message(tmp_path):
 def test_rolling_marker_moves_but_prefix_is_stable(tmp_path):
     config = make_config(tmp_path, cache_strategy="full")
     turn1 = [{"role": "user", "content": "go"}]
-    turn2 = turn1 + [
-        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "r"}]},
-    ]
+    turn2 = [*turn1, {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "r"}]}]
     req1 = prompts.build_subagent_request(config, list(_TOOLS), turn1)
     req2 = prompts.build_subagent_request(config, list(_TOOLS), turn2)
 

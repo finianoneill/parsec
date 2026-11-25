@@ -32,7 +32,6 @@ from parsec.verify.containment import check_containment, extract_numbers
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, make_grounded_checker
 
-
 # Near-duplicate gate: the same fact re-recorded in a fresh phrasing
 # fragments corroboration across premise nodes and bloats the writer's
 # context. Token-set Jaccard is deterministic, cheap, and conservative —
@@ -135,6 +134,8 @@ class RecordPremisesTool:
         ref = row["span_id"]
         if ref not in span_nodes:
             doc = self.documents.get_document(row["doc_hash"])
+            if doc is None:  # spans reference documents by foreign key
+                raise LookupError(f"span {ref} has no document row")
             span_nodes[ref] = self.dag.add_node(
                 sid,
                 "SourceSpan",

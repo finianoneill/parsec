@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ValidationError
 
@@ -34,12 +34,21 @@ class ToolContext:
 
 
 class Tool(Protocol):
-    name: str
-    description: str
-    input_model: type[BaseModel]
-    max_context_chars: int
+    # Read-only members: a settable `input_model: type[BaseModel]` is
+    # invariant, so no tool declaring its own input class would conform.
+    @property
+    def name(self) -> str: ...
+    @property
+    def description(self) -> str: ...
+    @property
+    def input_model(self) -> type[BaseModel]: ...
+    @property
+    def max_context_chars(self) -> int: ...
 
-    async def run(self, input: BaseModel, ctx: ToolContext) -> tuple[dict, str]:
+    # `input` is the tool's own input_model instance; a Protocol parameter
+    # typed BaseModel would reject every concrete tool (parameters are
+    # contravariant), so it is Any here and validated by the registry.
+    async def run(self, input: Any, ctx: ToolContext) -> tuple[dict, str]:
         """Return (full_result_dict, context_text). Truncation applied by the registry."""
         ...
 

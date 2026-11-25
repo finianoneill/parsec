@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 
 import pytest
@@ -68,7 +69,7 @@ def _subagent_token_cap(loop, msgs_chars_budget: int) -> int:
 
     static = compaction.static_prefix_chars(
         prompts.SUBAGENT_SYSTEM,
-        loop.registry.export_schemas() + [prompts.submit_report_schema()],
+        [*loop.registry.export_schemas(), prompts.submit_report_schema()],
     )
     return (static + msgs_chars_budget) // compaction.CHARS_PER_TOKEN
 
@@ -306,7 +307,7 @@ async def test_exit_3_kv_cache_prefix_audit(env, db, blobs, event_log, clock, tm
     audited_pairs = 0
     for stream, requests in requests_by_stream.items():
         requests.sort()
-        for (idx_a, a), (idx_b, b) in zip(requests, requests[1:]):
+        for (idx_a, a), (idx_b, b) in itertools.pairwise(requests):
             if (a["system"], a["tools"]) != (b["system"], b["tools"]):
                 continue  # phase boundary (decomposer -> writer share the orchestrator stream)
             prefix_stable = b["messages"][: len(a["messages"])] == a["messages"]
@@ -346,7 +347,7 @@ async def test_full_cache_strategy_audit_and_replay(env, db, blobs, event_log, c
             body = json.loads(blobs.get_text(ev.payload["request_blob"]))
             requests_by_stream.setdefault(ev.stream_id, []).append((ev.stream_idx, body))
 
-    for stream, requests in requests_by_stream.items():
+    for _stream, requests in requests_by_stream.items():
         requests.sort()
         for _, body in requests:
             assert "cache_control" in body["system"][0]
@@ -356,7 +357,7 @@ async def test_full_cache_strategy_audit_and_replay(env, db, blobs, event_log, c
             final_block = body["messages"][-1]["content"][-1]
             assert "cache_control" in final_block  # the rolling marker
         # markers stripped, same-phase consecutive requests are strict prefix extensions
-        for (_, a), (_, b) in zip(requests, requests[1:]):
+        for (_, a), (_, b) in itertools.pairwise(requests):
             if (a["system"], a["tools"]) != (b["system"], b["tools"]):
                 continue
             sa, sb = _strip_cache(a["messages"]), _strip_cache(b["messages"])

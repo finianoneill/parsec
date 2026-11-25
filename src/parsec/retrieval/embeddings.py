@@ -68,10 +68,10 @@ class EmbeddingCache:
             ).fetchone()
             if row is not None:
                 cached[h] = json.loads(row["vector_json"])
-        missing = [(t, h) for t, h in zip(texts, hashes) if h not in cached]
+        missing = [(t, h) for t, h in zip(texts, hashes, strict=True) if h not in cached]
         if missing:
             vectors = self.provider.embed([t for t, _ in missing])
-            for (_, h), vec in zip(missing, vectors):
+            for (_, h), vec in zip(missing, vectors, strict=False):
                 self.conn.execute(
                     "INSERT OR IGNORE INTO embeddings (model_id, text_hash, vector_json)"
                     " VALUES (?,?,?)",
@@ -82,4 +82,4 @@ class EmbeddingCache:
 
 
 def cosine(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))  # inputs are L2-normalized
+    return sum(x * y for x, y in zip(a, b, strict=False))  # inputs are L2-normalized

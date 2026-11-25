@@ -37,7 +37,7 @@ def graph(db, event_log, sessions, config):
 
 
 async def test_judge_pass_scores_deductions_only(graph, db, event_log):
-    dag, sid, f_ded, f_tmp = graph
+    _dag, sid, f_ded, _f_tmp = graph
     judge = ScriptedJudge(['{"validity_score": 5, "rationale": "strictly follows"}'])
     judgments = await judge_pass(db, event_log, sid, judge, "fake-judge")
 
@@ -61,7 +61,7 @@ async def test_judge_pass_scores_deductions_only(graph, db, event_log):
 
 
 async def test_judge_failure_degrades_to_none(graph, db, event_log):
-    dag, sid, f_ded, _ = graph
+    _dag, sid, f_ded, _ = graph
     # bad reply, then the corrective retry (Phase 3) also fails -> None
     judge = ScriptedJudge(["not json at all", "still not json"])
     judgments = await judge_pass(db, event_log, sid, judge, "fake-judge")
@@ -75,7 +75,7 @@ async def test_judge_failure_degrades_to_none(graph, db, event_log):
 
 
 async def test_judge_retry_recovers_a_malformed_reply(graph, db, event_log):
-    dag, sid, f_ded, _ = graph
+    _dag, sid, _f_ded, _ = graph
     judge = ScriptedJudge(
         ["oops, no json here", '{"validity_score": 3, "rationale": "assumes an unstated step"}']
     )

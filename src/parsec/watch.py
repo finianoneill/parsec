@@ -80,9 +80,7 @@ def label_outcomes(report: DiffReport, refresh_status: str) -> list[dict]:
             continue  # `new`: nothing prior to score
         if c.status in ("held", "strengthened", "weakened"):
             outcome = "held"
-        elif c.status == "superseded":
-            outcome = "overturned"
-        elif c.status == "retracted" and refresh_status == "done":
+        elif c.status == "superseded" or (c.status == "retracted" and refresh_status == "done"):
             outcome = "overturned"
         else:
             continue
@@ -116,7 +114,7 @@ def _lock_backend() -> tuple[Callable, Callable]:
     try:
         import fcntl
     except ImportError:
-        fcntl = None
+        fcntl = None  # type: ignore[assignment]
     if fcntl is not None:
         return (
             lambda f: fcntl.flock(f, fcntl.LOCK_EX),

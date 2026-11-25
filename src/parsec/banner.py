@@ -43,7 +43,7 @@ def _gradient_line(line: str) -> Text:
     for i, ch in enumerate(line):
         t = i / width
         r, g, b = (
-            round(s + (e - s) * t) for s, e in zip(_GRAD_START, _GRAD_END)
+            round(s + (e - s) * t) for s, e in zip(_GRAD_START, _GRAD_END, strict=True)
         )
         text.append(ch, style=f"#{r:02x}{g:02x}{b:02x}")
     return text

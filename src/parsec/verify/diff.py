@@ -41,12 +41,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from parsec.config import RunConfig
 from parsec.retrieval.embeddings import cosine
-from parsec.verify.credence import annotate, compute_credences, render_tier
+from parsec.verify.credence import CredenceReport, annotate, compute_credences, render_tier
 
 # Fuzzy-match floor on character-3-gram cosine: a lightly reworded claim
 # stays above this; two different claims about the same topic fall below.
@@ -158,7 +158,7 @@ class _SessionGraph:
     premises: dict[str, dict]         # Premise node_id -> payload
     spans: dict[str, dict]            # SourceSpan node_id -> payload
     evidence_of: dict[str, list[str]] # src (derived) -> dst (evidence), contradicts excluded
-    credence: "object"                # CredenceReport
+    credence: CredenceReport
 
 
 def _load(conn: sqlite3.Connection, session_id: str, embed: Embed) -> _SessionGraph:

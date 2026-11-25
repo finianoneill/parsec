@@ -84,7 +84,7 @@ def bm25_rank(query: str, rows: list[tuple[str, str]]) -> list[str]:
     docs = [(span_id, _TOKEN_RE.findall(text.lower())) for span_id, text in rows]
     n_docs = len(docs)
     avgdl = sum(len(toks) for _, toks in docs) / n_docs
-    df = Counter()
+    df: Counter[str] = Counter()
     for _, toks in docs:
         for term in set(toks):
             df[term] += 1
@@ -167,7 +167,7 @@ class SearchWithinTool:
         qvec = self.embeddings.embed([query])[0]
         span_vecs = self.embeddings.embed([text for _, text in rows])
         scored = sorted(
-            zip((span_id for span_id, _ in rows), span_vecs),
+            zip((span_id for span_id, _ in rows), span_vecs, strict=False),
             key=lambda pair: (-cosine(qvec, pair[1]), pair[0]),
         )
         return [span_id for span_id, _ in scored[:CANDIDATES]]

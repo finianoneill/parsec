@@ -77,7 +77,7 @@ async def test_final_turn_nudge_injected_before_cap(tmp_path, db, blobs, event_l
             scripted_response([{"type": "text", "text": "No evidence. [narrative]"}], stop_reason="end_turn", index=3),
         ]
     )
-    loop, dag, s1 = build_loop(
+    loop, _dag, _s1 = build_loop(
         tmp_path, db, blobs, event_log, ledger, sessions, clock, adapter,
         Budgets(max_turns=10, max_turns_per_subagent=2), session_id="s-nudge",
     )
