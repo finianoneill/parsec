@@ -53,6 +53,19 @@ class Tool(Protocol):
         ...
 
 
+def tool_spec(tool: Tool, config: RunConfig) -> tuple[str, type[BaseModel]]:
+    """(description, input model) a tool presents under this session's
+    behaviour versions. A tool whose wording or schema differs by version
+    defines `spec_for(config)` returning that pair; the rest present their
+    class attributes. Export and dispatch both come through here, so the
+    schema the model was shown is always the one its call is validated by."""
+    spec_for = getattr(tool, "spec_for", None)
+    if spec_for is not None:
+        description, input_model = spec_for(config)
+        return description, input_model
+    return tool.description, tool.input_model
+
+
 class ToolRegistry:
     def __init__(self, tools: list[Tool]):
         self._tools = {t.name: t for t in sorted(tools, key=lambda t: t.name)}
@@ -61,16 +74,17 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
-    def export_schemas(self) -> list[dict]:
-        """Anthropic tool schemas, deterministic order (prefix stability, §7)."""
+    def export_schemas(self, config: RunConfig) -> list[dict]:
+        """Anthropic tool schemas, deterministic order (prefix stability, §7),
+        as the session's behaviour versions define them — the schemas are
+        prompt bytes, so a recording must get back the ones it was sent."""
         out = []
         for tool in self._tools.values():
-            schema = tool.input_model.model_json_schema()
+            description, input_model = tool_spec(tool, config)
+            schema = input_model.model_json_schema()
             schema.pop("title", None)
             schema["additionalProperties"] = False
-            out.append(
-                {"name": tool.name, "description": tool.description, "input_schema": schema}
-            )
+            out.append({"name": tool.name, "description": description, "input_schema": schema})
         return out
 
     async def dispatch(self, intent: ToolIntent, ctx: ToolContext) -> ToolResult:
@@ -93,7 +107,7 @@ class ToolRegistry:
             return self._record(result, ctx, intent_seq)
 
         try:
-            validated = tool.input_model.model_validate(intent.input)
+            validated = tool_spec(tool, ctx.config)[1].model_validate(intent.input)
         except ValidationError as exc:
             result = ToolResult(
                 tool_use_id=intent.tool_use_id,

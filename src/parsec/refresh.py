@@ -42,7 +42,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from parsec import __version__
-from parsec.config import CacheMode, Clock, RunConfig
+from parsec.config import CacheMode, Clock, RunConfig, new_session_behaviour
 from parsec.gateway.base import ModelAdapter
 from parsec.gateway.gateway import ModelGateway
 from parsec.loop.agent import OrchestratorLoop, RunResult
@@ -278,6 +278,9 @@ async def run_refresh(
             "refresh_of": original_session_id,
             "refresh_all": refresh_all,
             "parsec_version": __version__,
+            # A refresh is a new observation of the world: it runs today's
+            # behaviour against its own "now", whatever the parent recorded.
+            **new_session_behaviour(clock.now_iso()),
         }
     )
 

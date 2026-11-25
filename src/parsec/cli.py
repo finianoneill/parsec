@@ -30,6 +30,7 @@ from parsec.config import (
     RealClock,
     RunConfig,
     make_session_id,
+    new_session_behaviour,
 )
 from parsec.db.connection import open_db
 from parsec.gateway.gateway import ModelGateway
@@ -547,6 +548,7 @@ def cmd_ask(args) -> int:
     conn, blobs = _open(args.data_dir)
     session_id = args.session_id or make_session_id(args.query, clock.now_iso())
     config = RunConfig(
+        **new_session_behaviour(clock.now_iso()),
         session_id=session_id,
         query=args.query,
         model=args.model,

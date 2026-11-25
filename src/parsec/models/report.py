@@ -2,6 +2,12 @@
 
 The load-bearing rule: a finding with zero premise_ids is rejected at
 schema level — it cannot enter the DAG.
+
+These models are wire contracts: their JSON schemas are sent to the model as
+tool schemas, so their fields, descriptions and constraints are prompt bytes.
+They are FROZEN for the behaviour versions that already use them — a changed
+contract is a new model class, selected by version (submission_model below,
+ToolRegistry's tool_spec for tool inputs), never an edit to these.
 """
 
 from __future__ import annotations
@@ -9,6 +15,8 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from parsec.config import RunConfig
 
 # Atomicity guard (§10.1): one subject, one predicate — enforced softly via a
 # hard length cap. The record_premises tool checks it per premise so one
@@ -76,3 +84,10 @@ class SubagentSubmission(BaseModel):
     conflicts: list[Conflict] = Field(default_factory=list)
     dead_ends: list[str] = Field(default_factory=list)
     summary: str = Field(default="", max_length=500)
+
+
+def submission_model(config: RunConfig) -> type[SubagentSubmission]:
+    """The submit_report contract for this session's behaviour versions. The
+    schema shown to the subagent and the validation of what it sends back
+    both come from here, so they cannot drift apart."""
+    return SubagentSubmission

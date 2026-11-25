@@ -28,7 +28,7 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 
 from parsec.canonical import canonical_json
-from parsec.config import Clock
+from parsec.config import BEHAVIOUR_FIELDS, Clock
 from parsec.models.events import Event, EventType
 
 ORCHESTRATOR_STREAM = "orchestrator"
@@ -185,6 +185,11 @@ def _strip_volatile(event_type: EventType, payload: dict) -> dict | None:
             config.pop("halt_keeps_draft", None)
             config.pop("structure_lines_narrative", None)
             config.pop("parsec_version", None)
+            # Behaviour versions: absent from pre-registry recordings, whose
+            # replay still carries the (legacy) defaults — and replay copies
+            # the recording's values, so there is nothing left to compare.
+            for key in BEHAVIOUR_FIELDS:
+                config.pop(key, None)
             payload["config"] = config
     if event_type == EventType.FETCH_PERFORMED:
         payload.pop("from_cache", None)  # original may live-fetch; replay always hits cache

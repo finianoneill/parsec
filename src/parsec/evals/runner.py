@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from parsec.config import Budgets, CacheMode, Clock, RunConfig
+from parsec.config import Budgets, CacheMode, Clock, RunConfig, new_session_behaviour
 from parsec.evals.case import FIXTURES_FILE, EvalCase, copy_corpus, load_case
 from parsec.evals.losses import Loss, diagnose_losses, histogram, merge_losses
 from parsec.evals.metrics import (
@@ -188,6 +188,7 @@ async def _run_once(
     session_id = f"eval-{case.case_id}-r{run_index + 1}"
 
     config = RunConfig(
+        **new_session_behaviour(clock.now_iso()),
         session_id=session_id,
         query=case.query,
         model=model,

@@ -44,11 +44,54 @@ def registry():
     return ToolRegistry([EchoTool(), BoomTool()])
 
 
-def test_schema_export_deterministic_sorted(registry):
-    schemas = registry.export_schemas()
+def test_schema_export_deterministic_sorted(registry, config):
+    schemas = registry.export_schemas(config)
     assert [s["name"] for s in schemas] == ["boom", "echo"]
     assert schemas[1]["input_schema"]["additionalProperties"] is False
-    assert registry.export_schemas() == schemas
+    assert registry.export_schemas(config) == schemas
+
+
+class ShoutInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1)
+    volume: int
+
+
+class VersionedEchoTool(EchoTool):
+    """A tool whose contract changed at sentence_check 1: the schema the model
+    is shown and the validation of its call must both follow the session."""
+
+    def spec_for(self, config):
+        if config.sentence_check == 1:
+            return "Echo text back, loudly", ShoutInput
+        return self.description, self.input_model
+
+    async def run(self, input, ctx) -> tuple[dict, str]:
+        return {"echoed": input.text}, input.text
+
+
+def test_tool_spec_follows_the_sessions_behaviour_version(config):
+    registry = ToolRegistry([VersionedEchoTool()])
+    legacy = registry.export_schemas(config)[0]
+    current = registry.export_schemas(config.model_copy(update={"sentence_check": 1}))[0]
+    assert legacy["description"] == "Echo text back"
+    assert "volume" not in legacy["input_schema"]["properties"]
+    assert current["description"] == "Echo text back, loudly"
+    assert "volume" in current["input_schema"]["properties"]
+
+
+async def test_dispatch_validates_with_the_schema_the_session_was_shown(ctx, config):
+    registry = ToolRegistry([VersionedEchoTool()])
+    intent = ToolIntent(tool_use_id="tu_1", tool_name="echo", input={"text": "hi"})
+    # legacy session: the legacy input model accepts the call
+    assert (await registry.dispatch(intent, ctx)).ok
+    # a session on the newer contract rejects the same call (volume missing)
+    newer = ToolContext(
+        ctx.conn, ctx.blobs, ctx.event_log, ctx.ledger,
+        config.model_copy(update={"sentence_check": 1}), ctx.clock,
+    )
+    result = await registry.dispatch(intent, newer)
+    assert not result.ok and "volume" in result.error
 
 
 async def test_dispatch_success_records_events(registry, ctx, event_log, config):
