@@ -37,7 +37,13 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import ValidationError
 
-from parsec.config import MIN_SUBAGENT_TURNS, EffortLimits, RunConfig, effort_limits
+from parsec.config import (
+    MIN_SUBAGENT_TURNS,
+    EffortLimits,
+    RunConfig,
+    behaviour_level,
+    effort_limits,
+)
 from parsec.errors import (
     BudgetExceeded,
     HaltRequested,
@@ -47,7 +53,12 @@ from parsec.errors import (
 )
 from parsec.gateway.gateway import WALL_CLOCK_KIND, ModelGateway
 from parsec.loop import compaction, prompts
-from parsec.loop.citations import check_citations, write_claims
+from parsec.loop.citations import (
+    CitationCheck,
+    check_citations,
+    mark_unverified,
+    write_claims,
+)
 from parsec.loop.states import AgentState, StateMachine
 from parsec.loop.structured import (
     BriefSubmission,
@@ -253,6 +264,9 @@ class OrchestratorLoop:
         # premise dump — the draft is the run's most valuable artifact.
         self._latest_draft: str | None = None
         self._latest_problems: list[str] = []
+        # WS0: check what each sentence SAYS against what it cites. Read once
+        # from the frozen config, so a recording keeps the check it ran with.
+        self.sentence_check = behaviour_level(config.sentence_check) >= 1
         # Optional progress hook for the live CLI view; called with snapshots.
         self.reporter: Callable[[dict], None] | None = None
 
@@ -334,10 +348,11 @@ class OrchestratorLoop:
                 sm.transition(AgentState.VERIFYING, "citation check + structural verification")
                 self._notify(sm)
                 answer, check = await self._cite_check_with_repair(answer, writer_messages)
-                claims = write_claims(sid, check, self.dag)
+                claims = write_claims(sid, check, self.dag, self.sentence_check)
 
                 vreport = verify_session(
-                    self.ctx.conn, self.blobs, sid, nli_checker=self.nli_checker
+                    self.ctx.conn, self.blobs, sid, nli_checker=self.nli_checker,
+                    sentence_check=self.sentence_check,
                 )
                 self.event_log.append(
                     sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
@@ -395,7 +410,7 @@ class OrchestratorLoop:
             self.event_log.append(
                 sid, "harness", EventType.OMISSION_DETECTED, omissions.to_payload()
             )
-            answer = answer + self._build_appendix(credence, omissions, failed_primary)
+            answer = answer + self._build_appendix(credence, omissions, failed_primary, check)
             low_confidence = self._low_confidence_lines(credence)
 
             answer_blob = self.blobs.put(answer)
@@ -1641,6 +1656,7 @@ class OrchestratorLoop:
         credence: CredenceReport,
         omissions: OmissionReport,
         failed_primary: list[dict] | None = None,
+        check: CitationCheck | None = None,
     ) -> str:
         """Mechanical appendix (harness-built, deterministic): a one-line
         confidence tally over all claims (§10.3 — tiers, never raw numbers),
@@ -1687,6 +1703,26 @@ class OrchestratorLoop:
                 continue
             text = json.loads(row["payload_json"])["text"]
             lines.append(f"- \"{text}\" — {self._annotation(credence, nid)} confidence")
+        if self.sentence_check and check is not None:
+            # Every sentence the harness could not defend, and how many it
+            # did not try to (narrative sentences carry no evidence by rule).
+            if check.failing:
+                lines += [
+                    "",
+                    "Unverified sentences (marked [unverified] above; the citation check "
+                    "failed and repair did not fix it):",
+                ]
+                for index in sorted(check.failing):
+                    lines.append(f"- \"{check.segments[index].text}\"")
+                    lines += [f"  - {problem}" for problem in check.failing[index]]
+            narrative = sum(1 for s in check.segments if s.narrative and not s.structure)
+            if narrative:
+                plural = "s" if narrative != 1 else ""
+                lines += [
+                    "",
+                    f"Narrative sentence{plural} (uncited by design; no figures or "
+                    f"quotations): {narrative}",
+                ]
         if failed_primary:
             lines += ["", "Primary sources that could not be read (high-tier fetches yielding no citable text):"]
             lines += [f"- {f['url']} — {f['note']}" for f in failed_primary]
@@ -1728,7 +1764,14 @@ class OrchestratorLoop:
     async def _cite_check_with_repair(self, answer: str, writer_messages: list[dict]):
         sid = self.config.session_id
         structure = self.config.structure_lines_narrative
-        check = check_citations(answer, sid, self.dag, structure_lines_narrative=structure)
+
+        def run_check(text: str) -> CitationCheck:
+            return check_citations(
+                text, sid, self.dag,
+                structure_lines_narrative=structure, sentence_check=self.sentence_check,
+            )
+
+        check = run_check(answer)
         self._latest_problems = list(check.problems)
         rounds = 0
         while not check.ok and rounds < MAX_REPAIR_ROUNDS:
@@ -1736,14 +1779,24 @@ class OrchestratorLoop:
             problems = "\n".join(f"- {p}" for p in check.problems)
             writer_messages.append({"role": "assistant", "content": [{"type": "text", "text": answer}]})
             writer_messages.append(
-                {"role": "user", "content": prompts.repair_template(self.config).format(problems=problems)}
+                {
+                    "role": "user",
+                    "content": prompts.repair_template(self.config).format(problems=problems),
+                }
             )
             resp, writer_messages = await self._writer_complete(writer_messages)
             self.turns += 1
             answer = resp.text
-            check = check_citations(answer, sid, self.dag, structure_lines_narrative=structure)
+            check = run_check(answer)
             self._latest_draft = answer
             self._latest_problems = list(check.problems)
+        if self.sentence_check and not check.ok:
+            # Repair is exhausted. The answer still ships (as partial), but the
+            # reader is shown exactly which sentences could not be defended.
+            # Offsets in `check` refer to the unmarked text, which is all the
+            # callers use them for; the marked text is what gets emitted.
+            answer = mark_unverified(answer, check)
+            self._latest_draft = answer
         return answer, check
 
     # -- gates ---------------------------------------------------------------

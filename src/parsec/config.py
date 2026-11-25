@@ -147,7 +147,21 @@ LEGACY_BEHAVIOUR: dict[str, BehaviourVersion] = {
 }
 # What a session started today records. Each correctness change bumps its own
 # entry here, together with the code that reads it.
-CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = dict(LEGACY_BEHAVIOUR)
+CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
+    **LEGACY_BEHAVIOUR,
+    # 1: every number and quote in a report sentence must appear in what the
+    # sentence cites; failures go through repair, then are marked unverified.
+    "sentence_check": "1-dev",
+}
+
+
+def behaviour_level(version: BehaviourVersion) -> int:
+    """The numeric level of a behaviour version: 2 and "2-dev" are both 2.
+    Code branches on the level; the "-dev" suffix only records that the
+    session was made between releases."""
+    if isinstance(version, int):
+        return version
+    return int(version.split("-", 1)[0])
 
 # Every behaviour key a session config can carry. Stripped from replay
 # projections: a pre-registry recording's SESSION_STARTED event lacks them,

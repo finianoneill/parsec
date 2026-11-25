@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from parsec.config import RunConfig
+from parsec.config import RunConfig, behaviour_level
 from parsec.models.gateway import ModelRequest
 from parsec.models.report import submission_model
 
@@ -71,6 +71,25 @@ Substance first: the reader came for the answer, not a catalog of your evidence.
 
 Be concise. Answer directly."""
 
+# sentence_check >= 1: the citation contract also covers what a sentence SAYS,
+# and the writer is told so. Built from the frozen text so the two cannot
+# drift apart anywhere else.
+_WRITER_CONTRACT_V1_TAIL = (
+    "- If some subquestions are listed as unresolved, acknowledge the gap in [narrative] "
+    "sentences; do not paper over it.\n"
+)
+_WRITER_SENTENCE_RULES = (
+    "- Every number and every quoted phrase in a sentence must appear exactly in a premise or "
+    "finding that the sentence cites. State quantities as the evidence states them: do not "
+    "round, convert, or combine figures, and cite every premise a sentence depends on.\n"
+    "- [narrative] sentences carry no evidence, so they may contain no numbers and no "
+    "quotations. A heading may only use figures that appear in evidence the answer cites.\n"
+)
+assert WRITER_SYSTEM.count(_WRITER_CONTRACT_V1_TAIL) == 1
+WRITER_SYSTEM_SENTENCE_CHECK = WRITER_SYSTEM.replace(
+    _WRITER_CONTRACT_V1_TAIL, _WRITER_CONTRACT_V1_TAIL + _WRITER_SENTENCE_RULES
+)
+
 SUBMIT_SUBQUESTIONS_SCHEMA = {
     "name": "submit_subquestions",
     "description": "Submit the research brief: scope, effort estimate, and decomposition.",
@@ -107,10 +126,14 @@ def subagent_system(config: RunConfig) -> str:
 
 
 def writer_system(config: RunConfig) -> str:
+    if behaviour_level(config.sentence_check) >= 1:
+        return WRITER_SYSTEM_SENTENCE_CHECK
     return WRITER_SYSTEM
 
 
 def repair_template(config: RunConfig) -> str:
+    if behaviour_level(config.sentence_check) >= 1:
+        return REPAIR_TEMPLATE_SENTENCE_CHECK
     return REPAIR_TEMPLATE
 
 
@@ -297,6 +320,15 @@ REPAIR_TEMPLATE = (
     "Revise the FULL answer. Every factual sentence must end with valid [premise:<id>] or "
     "[finding:<id>] citations from the provided list; structural sentences must end with "
     "[narrative]. Do not add new claims."
+)
+
+REPAIR_TEMPLATE_SENTENCE_CHECK = (
+    "Your answer violated the citation contract. Problems:\n{problems}\n"
+    "Revise the FULL answer. Every factual sentence must end with valid [premise:<id>] or "
+    "[finding:<id>] citations from the provided list; structural sentences must end with "
+    "[narrative]. Every number and quoted phrase in a sentence must appear exactly in a premise "
+    "or finding that sentence cites: correct the figure to match the evidence, cite the premise "
+    "that states it, or remove it. Do not add new claims."
 )
 
 TRUNCATED_NUDGE = "Your answer was cut off by the length limit. Restate it more concisely, keeping the citation contract."

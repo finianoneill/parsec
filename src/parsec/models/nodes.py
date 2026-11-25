@@ -68,6 +68,10 @@ class ReportClaimNode(_Node):
     # path is what stage-1 verification walks.
     refs: list[str] = Field(default_factory=list)
     narrative: bool = False
+    # Set (sentence_check >= 1) when the sentence failed the citation check
+    # and repair did not fix it. Absent on verified claims, so their node
+    # ids are unchanged.
+    unverified: bool = False
 
     @model_validator(mode="after")
     def _non_narrative_needs_refs(self) -> ReportClaimNode:

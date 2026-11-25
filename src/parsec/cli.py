@@ -22,6 +22,7 @@ from rich.text import Text
 
 from parsec.awake import keep_awake
 from parsec.config import (
+    CURRENT_BEHAVIOUR,
     DEFAULT_MODEL,
     Budgets,
     CacheMode,
@@ -29,6 +30,7 @@ from parsec.config import (
     ModelRetry,
     RealClock,
     RunConfig,
+    behaviour_level,
     make_session_id,
     new_session_behaviour,
 )
@@ -237,6 +239,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("session_id")
     verify.add_argument("--data-dir", type=Path, default=Path("data"))
     verify.add_argument("--json", action="store_true", dest="as_json")
+    verify.add_argument(
+        "--rescore-with", choices=["recorded", "current"], default="recorded",
+        help="Checks to apply: the behaviour the session was recorded with (default), "
+        "or today's. Read-only either way.",
+    )
 
     diff = sub.add_parser(
         "diff",
@@ -836,9 +843,14 @@ def cmd_verify(args) -> int:
         console.print(f"[red]unknown session {args.session_id}[/red]")
         return EXIT_USAGE
     session_config = store.get_config(args.session_id)
+    # A recording is verified under the behaviour it was recorded with, so the
+    # verdict it got at run time is the verdict it gets now. --rescore-with
+    # current applies today's checks instead; it never changes the recording.
+    behaviour = CURRENT_BEHAVIOUR if args.rescore_with == "current" else session_config.model_dump()
     report = verify_session(
         conn, blobs, args.session_id,
         nli_checker=make_grounded_checker(session_config.nli_checker),
+        sentence_check=behaviour_level(behaviour["sentence_check"]) >= 1,
     )
     credence = compute_credences(
         conn,
