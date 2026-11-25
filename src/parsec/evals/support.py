@@ -154,6 +154,7 @@ def score_claim_support(
         if node["type"] != "ReportClaim" or node["payload"].get("narrative"):
             continue
         span_texts: list[str] = []
+        derived_figures: list[str] = []
         seen, stack = {nid}, [nid]
         while stack:
             cur = stack.pop()
@@ -164,9 +165,14 @@ def score_claim_support(
                 if nodes[dst]["type"] == "SourceSpan":
                     span_texts.append(nodes[dst]["payload"]["text"])
                 else:
+                    operation = nodes[dst]["payload"].get("operation")
+                    if operation and nodes[dst]["payload"].get("status") == "verified":
+                        # A figure the harness recomputed from the spans below
+                        # is supported by them, though no span states it.
+                        derived_figures.append(str(operation.get("output", "")))
                     stack.append(dst)
         span_texts.sort()
-        grade = checker.grade(node["payload"]["text"], span_texts)
+        grade = checker.grade(node["payload"]["text"], span_texts + sorted(derived_figures))
         details.append(ClaimSupport(nid, node["payload"]["text"], grade, len(span_texts)))
 
     if not details:

@@ -1,7 +1,7 @@
 """One test per known correctness defect, each asserting the CORRECT
 behaviour and marked as a strict expected failure until its fix lands.
-A test with no marker is a defect that has been fixed (WS0 and WS1 so far);
-it stays here as that fix's regression test.
+Every defect listed here is now fixed, so no test carries the marker; each
+stays as its fix's regression test.
 
 These are the "before" half of every remediation change: the bug is pinned
 by a failing test before the fix is written, so the fix is measured rather
@@ -16,10 +16,10 @@ Workstreams (see the remediation design brief):
   WS3  any transform_note exempts every number in a premise
 
 Not here yet: the WS2 recency cases (a 2019 observation asked about "now"
-versus "in 2019") and the WS3 end-to-end unit conversion. Their inputs —
-an observation date on a premise, a target time on a subquestion, a typed
-computation on a finding — do not exist in today's schema, so a test for
-them would be a guess at an interface. They land with those changes.
+versus "in 2019"). Their inputs — an observation date on a premise, a target
+time on a subquestion — do not exist in today's schema, so a test for them
+would be a guess at an interface. They land with that change. The WS3
+end-to-end unit conversion lives in tests/integration/test_ws3_computations.py.
 """
 
 from __future__ import annotations
@@ -202,17 +202,27 @@ async def test_ws1_reversed_propositions_are_not_merged_at_intake(intake, config
     assert len(dag.nodes_for_session(config.session_id, tier=1)) == 2
 
 
-@pytest.mark.xfail(strict=True, reason="WS3: a transform_note exempts every number in a premise")
 async def test_ws3_transform_note_does_not_excuse_an_unrelated_wrong_number(intake, config):
     """A note explaining a unit conversion must not let a different, wrong
-    figure (the 1975 here appears in no source) ride in with it."""
+    figure (the 1975 here appears in no source) ride in with it. There is no
+    transform_note any more: the premise is checked against its span, whole."""
     record, dag, (_, _, mons_span) = intake
-    results = await record(
-        {
-            "text": "Olympus Mons is about 13.6 miles tall and was first measured in 1975.",
-            "span_refs": [mons_span],
-            "transform_note": "21.9 km x 0.621371 = 13.6 mi",
-        }
-    )
-    assert "error" in results[0] and "1975" in results[0]["error"]
+    text = "Olympus Mons is about 13.6 miles tall and was first measured in 1975."
+    results = await record({"text": text, "span_refs": [mons_span]})
+    assert "error" in results[0]
+    assert "'1975'" in results[0]["error"] and "'13.6'" in results[0]["error"]
+    assert "computes finding" in results[0]["error"]
+    assert dag.nodes_for_session(config.session_id, tier=1) == []
+
+
+async def test_ws3_the_transform_note_field_is_gone(intake, config):
+    record, dag, (_, _, mons_span) = intake
+    with pytest.raises(AssertionError):  # the tool call itself is invalid now
+        await record(
+            {
+                "text": "Olympus Mons is about 13.6 miles tall.",
+                "span_refs": [mons_span],
+                "transform_note": "21.9 km x 0.621371 = 13.6 mi",
+            }
+        )
     assert dag.nodes_for_session(config.session_id, tier=1) == []

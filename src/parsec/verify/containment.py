@@ -65,6 +65,20 @@ def check_containment(
     return problems
 
 
+def check_premise_verbatim(premise_text: str, span_texts: list[str]) -> list[str]:
+    """derivations >= 2: a premise states only what its spans state. The same
+    exact-match test as check_containment with no exemption — and wording
+    that sends a derived figure where it now belongs."""
+    return [
+        problem.replace(
+            "(add a transform_note if it was derived, e.g. unit conversion)",
+            "(a premise states only what its span states; submit a derived figure "
+            "as a computes finding in submit_report)",
+        )
+        for problem in check_containment(premise_text, span_texts, None)
+    ]
+
+
 # -- sentence support (WS0) ---------------------------------------------------
 #
 # The premise check above is an exact string match and stays exactly as it

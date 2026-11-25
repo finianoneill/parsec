@@ -79,6 +79,7 @@ EDGE_PENALTY: dict[str, float] = {
     "deduces": 0.95,
     "induces": 0.85,    # generalization is the leakiest derivation
     "temporal": 0.9,
+    "computes": 1.0,    # recomputed by the harness: no inferential leak
     "aggregates": 1.0,  # structural merge, no new inference
 }
 
@@ -87,6 +88,9 @@ EDGE_PENALTY: dict[str, float] = {
 DERIVATION_EDGES = frozenset({"deduces", "induces", "temporal", "computes"})
 
 HIGH, MODERATE = 0.8, 0.6
+# A derivation the harness cannot recompute never scores above this, and
+# always below the stakes threshold, so every claim resting on it is flagged.
+UNVERIFIED_DERIVATION_CAP = 0.5
 
 VOLATILE_HALF_LIFE_DAYS = 30.0
 SLOW_HALF_LIFE_DAYS = 365.0
@@ -154,6 +158,7 @@ class NodeCredence:
     conflicted: bool = False        # unresolved contradiction lowered this
     superseded_by: str | None = None  # newer evidence replaced this mutable fact
     stale: bool = False             # mutable and decayed with evidence age
+    unverified: bool = False        # rests on a derivation the harness could not recompute
 
     @property
     def single_source(self) -> bool:
@@ -182,6 +187,8 @@ def annotate(nc: NodeCredence, ranges: dict[str, tuple[int, int]] | None = None)
         parts.append("single source")
     if nc.stale:
         parts.append("possibly stale")
+    if nc.unverified:
+        parts.append("unverified derivation")
     return f"{label} ({'; '.join(parts)})" if parts else label
 
 
@@ -284,10 +291,16 @@ def compute_credences(
                 premise_class[nid] = node["payload"].get("claim_class", "stable")
                 premise_ts[nid] = _newest_evidence_ts(nid, out_edges, span_meta)
             elif node["type"] == "Finding":
-                report.nodes[nid] = _derived_credence(
+                derived = _derived_credence(
                     nid, out_edges, report, joint=True,
                     propagate_superseded=claim_credence >= 2,
                 )
+                if node["payload"].get("status") == "unverified":
+                    derived.credence = min(
+                        derived.credence, UNVERIFIED_DERIVATION_CAP, stakes_threshold - 0.01
+                    )
+                    derived.unverified = True
+                report.nodes[nid] = derived
             elif node["type"] in ("Synthesis", "ReportClaim"):
                 if claim_credence >= 2:
                     report.nodes[nid] = _claim_credence(nid, out_edges, report)
@@ -437,6 +450,7 @@ def _claim_credence(nid: str, out_edges: dict, report: CredenceReport) -> NodeCr
         conflicted=any(p.conflicted for p in parents),
         stale=any(p.stale for p in parents),
         superseded_by=superseded[0] if superseded else None,
+        unverified=any(p.unverified for p in parents),
     )
 
 
@@ -529,7 +543,7 @@ def _resolve_conflicts(
             report.nodes[nid] = NodeCredence(
                 nc.credence * discount, nc.domains,
                 disbelief=snapshot.get(winner, 0.0),
-                superseded_by=winner, stale=nc.stale,
+                superseded_by=winner, stale=nc.stale, unverified=nc.unverified,
             )
             continue
         live = sorted(o for o in opponents[nid] if o not in superseded_by)
@@ -540,6 +554,7 @@ def _resolve_conflicts(
             conflict_discount(nc.credence, disbelief), nc.domains,
             disbelief=disbelief, conflicted=True, stale=nc.stale,
             superseded_by=nc.superseded_by,  # inherited from a parent, if any
+            unverified=nc.unverified,
         )
 
 

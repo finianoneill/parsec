@@ -154,3 +154,27 @@ def test_parallel_recording_joined_out_of_dispatch_order(restore):
         )
     ]
     assert joined == ["sq-3", "sq-2", "sq-1"]
+
+
+def test_rescoring_an_old_recording_reports_its_transform_note_as_unverified(restore, capsys):
+    """The `full` recording holds a premise accepted on a transform_note.
+    Verified as recorded it is clean; under today's checks the premise is
+    reported for what it is — a derivation nobody recomputed — as an
+    advisory, not as corruption, and the recording itself is not touched."""
+    import parsec.cli as cli
+
+    data_dir = restore("full")
+
+    def verify(*extra: str) -> tuple[int, dict]:
+        code = cli.main(["verify", "frozen-full", "--data-dir", str(data_dir), "--json", *extra])
+        return code, json.loads(capsys.readouterr().out)
+
+    code, recorded = verify()
+    assert code == 0
+    assert not [a for a in recorded["advisories"] if a["check"] == "unverified-derivation"]
+
+    code, rescored = verify("--rescore-with", "current")
+    assert code == 0 and rescored["violations"] == []
+    derivations = [a for a in rescored["advisories"] if a["check"] == "unverified-derivation"]
+    assert len(derivations) == 1
+    assert "transform note" in derivations[0]["detail"] and "'13.6'" in derivations[0]["detail"]

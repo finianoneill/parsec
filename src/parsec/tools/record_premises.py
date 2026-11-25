@@ -22,13 +22,17 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from parsec.config import behaviour_level
-from parsec.models.report import PREMISE_MAX_CHARS, PremiseDraft
+from parsec.config import RunConfig, behaviour_level
+from parsec.models.report import PREMISE_MAX_CHARS, PremiseDraft, PremiseDraftV2
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext
-from parsec.verify.containment import check_containment, extract_numbers
+from parsec.verify.containment import (
+    check_containment,
+    check_premise_verbatim,
+    extract_numbers,
+)
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, make_grounded_checker
 from parsec.verify.propositions import dup_tokens, near_duplicate
@@ -52,6 +56,22 @@ class RecordPremisesInput(BaseModel):
     premises: list[LenientPremiseDraft] = Field(min_length=1, max_length=20)
 
 
+class LenientPremiseDraftV2(PremiseDraftV2):
+    """One atomic premise, stated exactly as its spans state it."""
+
+    # (A class docstring becomes the JSON schema's description, so it is
+    # written for the model. For maintainers: this is the derivations >= 2
+    # draft; length is checked per premise by run(), as for the legacy one.)
+
+    text: str = Field(min_length=1)
+
+
+class RecordPremisesInputV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    premises: list[LenientPremiseDraftV2] = Field(min_length=1, max_length=20)
+
+
 class RecordPremisesTool:
     name = "record_premises"
     description = (
@@ -70,6 +90,22 @@ class RecordPremisesTool:
     )
     input_model = RecordPremisesInput
     max_context_chars = 6000
+
+    # derivations >= 2. The text above is frozen (it is prompt bytes for
+    # every recording made under it); this is the same text with the
+    # transform_note clause replaced.
+    _TRANSFORM_CLAUSE = "(or add transform_note explaining a derivation)"
+    assert description.count(_TRANSFORM_CLAUSE) == 1
+    description_verbatim = description.replace(
+        _TRANSFORM_CLAUSE,
+        "— a premise never holds a figure you derived: conversions, sums, ratios and the "
+        "like go in submit_report as computes findings",
+    )
+
+    def spec_for(self, config: RunConfig) -> tuple[str, type[BaseModel]]:
+        if behaviour_level(config.derivations) >= 2:
+            return self.description_verbatim, RecordPremisesInputV2
+        return self.description, self.input_model
 
     def __init__(self, dag: DagStore, spans: SpanStore, documents: DocumentStore):
         self.dag = dag
@@ -168,7 +204,9 @@ class RecordPremisesTool:
                 added += 1
         return added
 
-    async def run(self, input: RecordPremisesInput, ctx: ToolContext) -> tuple[dict, str]:
+    async def run(
+        self, input: RecordPremisesInput | RecordPremisesInputV2, ctx: ToolContext
+    ) -> tuple[dict, str]:
         sid = ctx.config.session_id
         checker = self._checker(ctx)
         results: list[dict] = []
@@ -176,8 +214,11 @@ class RecordPremisesTool:
         known, span_nodes, attached = self._session_premises(sid)
         # claim_credence >= 2: word order is part of what a premise says.
         order_aware = behaviour_level(ctx.config.claim_credence) >= 2
+        # derivations >= 2: premises are verbatim, with no transform_note.
+        verbatim = behaviour_level(ctx.config.derivations) >= 2
 
-        for i, draft in enumerate(input.premises):
+        drafts: list[LenientPremiseDraft | LenientPremiseDraftV2] = list(input.premises)
+        for i, draft in enumerate(drafts):
             if len(draft.text) > PREMISE_MAX_CHARS:
                 error = (
                     f"text is {len(draft.text)} chars (max {PREMISE_MAX_CHARS}); "
@@ -201,9 +242,12 @@ class RecordPremisesTool:
                 continue
 
             problems = lint_premise(draft.text)
-            problems += check_containment(
-                draft.text, [r["text"] for r in span_rows], draft.transform_note
-            )
+            span_texts = [r["text"] for r in span_rows]
+            transform_note = getattr(draft, "transform_note", None)  # legacy drafts only
+            if verbatim:
+                problems += check_premise_verbatim(draft.text, span_texts)
+            else:
+                problems += check_containment(draft.text, span_texts, transform_note)
             if problems:
                 error = "; ".join(problems)
                 results.append({"index": i, "error": error})
@@ -239,9 +283,7 @@ class RecordPremisesTool:
                     "claim_class": draft.claim_class,
                 },
             )
-            edge_payload = (
-                {"transform_note": draft.transform_note} if draft.transform_note else None
-            )
+            edge_payload = {"transform_note": transform_note} if transform_note else None
             for ref in draft.span_refs:
                 self.dag.add_edge(sid, premise_id, span_nodes[ref], "extracts", edge_payload)
                 attached.setdefault(premise_id, set()).add(span_nodes[ref])

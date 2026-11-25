@@ -71,6 +71,27 @@ Substance first: the reader came for the answer, not a catalog of your evidence.
 
 Be concise. Answer directly."""
 
+# derivations >= 2: premises are verbatim; derived figures are computes
+# findings. Built from the frozen text, replacing exactly the one rule.
+_SUBAGENT_TRANSFORM_RULE = (
+    "- Numbers and quoted phrases in a premise must appear exactly in a cited span, or carry "
+    "a transform_note explaining the derivation.\n"
+)
+_SUBAGENT_DERIVATION_RULES = (
+    "- Numbers and quoted phrases in a premise must appear exactly in a cited span. A premise "
+    "states only what its source states.\n"
+    "- A figure you derive — a unit conversion, sum, difference, ratio, percent change or "
+    "rounding — is never a premise. Submit it in submit_report as a finding with edge_type "
+    "\"computes\" and an operation: the operands are numbers taken from premises you recorded "
+    "(premise id plus the value as that premise states it), and the harness recomputes the "
+    "output. If the arithmetic is wrong the finding comes back with the correct value.\n"
+    "- Every number in any other finding must appear in the premises that finding cites.\n"
+)
+assert SUBAGENT_SYSTEM.count(_SUBAGENT_TRANSFORM_RULE) == 1
+SUBAGENT_SYSTEM_DERIVATIONS = SUBAGENT_SYSTEM.replace(
+    _SUBAGENT_TRANSFORM_RULE, _SUBAGENT_DERIVATION_RULES
+)
+
 # sentence_check >= 1: the citation contract also covers what a sentence SAYS,
 # and the writer is told so. Built from the frozen text so the two cannot
 # drift apart anywhere else.
@@ -135,6 +156,8 @@ def decomposer_system(config: RunConfig) -> str:
 
 
 def subagent_system(config: RunConfig) -> str:
+    if behaviour_level(config.derivations) >= 2:
+        return SUBAGENT_SYSTEM_DERIVATIONS
     return SUBAGENT_SYSTEM
 
 

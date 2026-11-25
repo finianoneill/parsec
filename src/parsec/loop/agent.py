@@ -68,7 +68,13 @@ from parsec.loop.structured import (
 )
 from parsec.models.events import EventType
 from parsec.models.gateway import ModelResponse
-from parsec.models.report import SubagentSubmission, submission_model
+from parsec.models.report import (
+    FindingDraft,
+    FindingDraftV2,
+    SubagentSubmission,
+    SubagentSubmissionV2,
+    submission_model,
+)
 from parsec.models.tools import ToolIntent
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
@@ -79,6 +85,7 @@ from parsec.store.sessions import SessionStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.verify.calibration import PlattScaling, tier_ranges
+from parsec.verify.computations import ComputationCheck, check_finding
 from parsec.verify.conflict import dual_perspective_question
 from parsec.verify.credence import (
     CredenceReport,
@@ -102,6 +109,8 @@ MAX_BRIEF_ROUNDS = 3  # brief-gate edit rounds before the latest brief proceeds
 # such a source that yields no citable text is a loud coverage failure, never
 # a silent downgrade to whatever secondary sources happened to extract.
 PRIMARY_SOURCE_TIER = 0.8
+
+Submission = SubagentSubmission | SubagentSubmissionV2
 
 _APPROVALS = frozenset({"approve", "approved", "ok", "yes", "y", "lgtm"})
 
@@ -129,7 +138,7 @@ class SubagentOutcome:
     state happens at JOIN time, never inside the task (M11)."""
 
     sq: Subquestion
-    submission: SubagentSubmission | None
+    submission: Submission | None
     recorded_premises: list[str]
     end_reason: str
     turns: int
@@ -268,6 +277,9 @@ class OrchestratorLoop:
         # WS0: check what each sentence SAYS against what it cites. Read once
         # from the frozen config, so a recording keeps the check it ran with.
         self.sentence_check = behaviour_level(config.sentence_check) >= 1
+        # WS3: findings' numbers are checked, and `computes` findings are
+        # recomputed, when the session records derivations >= 2.
+        self.derivations = behaviour_level(config.derivations)
         # Optional progress hook for the live CLI view; called with snapshots.
         self.reporter: Callable[[dict], None] | None = None
 
@@ -354,6 +366,7 @@ class OrchestratorLoop:
                 vreport = verify_session(
                     self.ctx.conn, self.blobs, sid, nli_checker=self.nli_checker,
                     sentence_check=self.sentence_check,
+                    derivations=self.derivations,
                 )
                 self.event_log.append(
                     sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
@@ -901,7 +914,7 @@ class OrchestratorLoop:
         ]
         recorded_premises: list[str] = []  # premise IDs this subagent recorded
         subagent_turns = 0
-        submission: SubagentSubmission | None = None
+        submission: Submission | None = None
         end_reason = ""
         # Token anchor for the compaction estimate: the total usage the model
         # reported for the previous turn (None after compaction rewrites the
@@ -1163,7 +1176,7 @@ class OrchestratorLoop:
 
     def _extract_submission(
         self, resp: ModelResponse, recorded_premises: list[str]
-    ) -> tuple[SubagentSubmission | None, list[str]]:
+    ) -> tuple[Submission | None, list[str]]:
         """Validate a submit_report call if present. Returns (submission,
         problems): an invalid submission comes back as None plus the
         per-field schema errors and semantic problems (Phase 3), which
@@ -1182,7 +1195,8 @@ class OrchestratorLoop:
             # rest on premise IDs THIS subagent recorded (T6 ownership).
             problems: list[str] = []
             allowed = set(recorded_premises)
-            for i, f in enumerate(submission.findings):
+            findings: list[FindingDraft | FindingDraftV2] = list(submission.findings)
+            for i, f in enumerate(findings):
                 bad = sorted(set(f.premise_ids) - allowed)
                 if bad:
                     problems.append(
@@ -1195,10 +1209,31 @@ class OrchestratorLoop:
                     problems.append(
                         f"conflicts[{i}]: {', '.join(bad)} were not recorded by you in this subquestion"
                     )
+            if not problems and self.derivations >= 2:
+                # A finding's numbers must come from its premises, and a
+                # computes finding's arithmetic must hold. A mismatch goes
+                # back with the expected value, so one round trip fixes it.
+                for i, f in enumerate(findings):
+                    check = self._check_finding(f)
+                    problems += [f"findings[{i}]: {p}" for p in check.problems]
             if problems:
                 return None, problems
             return submission, []
         return None, []
+
+    def _check_finding(self, finding: FindingDraft | FindingDraftV2) -> ComputationCheck:
+        recorded = {
+            row["node_id"]: json.loads(row["payload_json"])["text"]
+            for row in self.dag.nodes_for_session(self.config.session_id, tier=1)
+        }
+        texts = {pid: recorded[pid] for pid in finding.premise_ids if pid in recorded}
+        operation = getattr(finding, "operation", None)
+        return check_finding(
+            finding.text,
+            finding.edge_type,
+            operation.model_dump(exclude_none=True) if operation is not None else None,
+            texts,
+        )
 
     async def _run_tools(
         self,
@@ -1272,12 +1307,18 @@ class OrchestratorLoop:
             self.coverage.set_status(sid, sq.sq_id, status, reason)
             dead_ends: list[str] = []
         else:
-            for f in submission.findings:
-                fid = self.dag.add_node(
-                    sid,
-                    "Finding",
-                    {"text": f.text, "premise_ids": f.premise_ids, "edge_type": f.edge_type},
-                )
+            drafts: list[FindingDraft | FindingDraftV2] = list(submission.findings)
+            for f in drafts:
+                payload: dict = {
+                    "text": f.text, "premise_ids": f.premise_ids, "edge_type": f.edge_type,
+                }
+                operation = getattr(f, "operation", None)
+                if operation is not None:
+                    # Recomputed here rather than carried over from validation:
+                    # the stored status is a pure function of what is stored.
+                    payload["operation"] = operation.model_dump(exclude_none=True)
+                    payload["status"] = self._check_finding(f).status
+                fid = self.dag.add_node(sid, "Finding", payload)
                 for pid in f.premise_ids:
                     self.dag.add_edge(sid, fid, pid, f.edge_type)
                 finding_ids.append(fid)

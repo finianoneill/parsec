@@ -12,6 +12,12 @@ Walks the persisted Evidence DAG of a session and mechanically checks:
   temporal-order   — stage 2 (M9): ordering findings on `temporal` edges
                      checked against evidence date intervals; definite
                      contradictions are violations
+  finding-support  — (derivations >= 2) every number in a Finding's text
+                     appears in the premises it cites, or is the output of
+                     its own operation
+  computation      — (derivations >= 2) every `computes` operation is
+                     re-run with exact decimal arithmetic: operands must be
+                     numbers their premises state, and the output must match
   sentence-support — (sentence_check >= 1) every number and quotation in a
                      ReportClaim's text appears in the text of the premises
                      and findings it cites; a narrative claim carries neither.
@@ -26,6 +32,10 @@ Advisory checks (M9, T9 — recorded and surfaced, but they never flip `ok`):
                      premises in record_premises; advisory here so sessions
                      recorded before M9 stay verifiable)
   temporal         — temporal findings that could not be mechanically decided
+  unverified-derivation — a derived figure the harness cannot recompute: a
+                     free-text `computes` operation, or (when an older
+                     session is re-scored) a premise whose numbers rest on a
+                     transform_note
 
 Runs at the end of every session and on demand via `parsec verify` — the
 latter is what catches corpus corruption after the fact.
@@ -38,6 +48,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from parsec.store.blobs import BlobStore
+from parsec.verify.computations import UNVERIFIED, check_finding, evidence_text
 from parsec.verify.containment import check_containment, check_sentence, has_checkable_content
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
@@ -49,6 +60,7 @@ _EDGE_RULES: dict[str, tuple[set[str], set[str]]] = {
     "deduces": ({"Finding"}, {"Premise", "Finding"}),
     "induces": ({"Finding"}, {"Premise", "Finding"}),
     "temporal": ({"Finding"}, {"Premise", "Finding"}),
+    "computes": ({"Finding"}, {"Premise", "Finding"}),
     "aggregates": ({"Synthesis", "ReportClaim"}, {"Premise", "Finding", "Synthesis"}),
     "contradicts": (
         {"Premise", "Finding", "Synthesis"},
@@ -108,6 +120,7 @@ def verify_session(
     session_id: str,
     nli_checker: GroundedChecker | None = _DEFAULT_NLI,
     sentence_check: bool = False,
+    derivations: int = 1,
 ) -> VerificationReport:
     report = VerificationReport()
     # ORDER BY id, not insertion: concurrent subagents (M11) interleave row
@@ -136,7 +149,9 @@ def verify_session(
     _check_claim_paths(nodes, edges, report)
     _check_tier_integrity(nodes, edges, report)
     _check_corpus_integrity(conn, blobs, nodes, report)
-    _check_containment(nodes, edges, report)
+    _check_containment(nodes, edges, report, verbatim=derivations >= 2)
+    if derivations >= 2:
+        _check_findings(nodes, report)
     _check_temporal(nodes, edges, report)
     if sentence_check:
         _check_sentence_support(nodes, edges, report)
@@ -326,7 +341,11 @@ def _flag_dependent_claims(
         v.subject
         for v in report.violations
         if v.subject in nodes
-        and v.check in ("corpus-integrity", "containment", "tier-integrity", "temporal-order")
+        and v.check
+        in (
+            "corpus-integrity", "containment", "tier-integrity", "temporal-order",
+            "finding-support", "computation",
+        )
     }
     if not violated:
         return
@@ -354,8 +373,43 @@ def _flag_dependent_claims(
                     queue.append(src)
 
 
+def _check_findings(nodes: dict[str, dict], report: VerificationReport) -> None:
+    """derivations >= 2: re-run, from the graph alone, what the harness
+    checked when the finding was submitted."""
+    for nid in sorted(nodes):
+        node = nodes[nid]
+        if node["type"] != "Finding":
+            continue
+        payload = node["payload"]
+        texts = {
+            pid: nodes[pid]["payload"].get("text", "")
+            for pid in payload.get("premise_ids", [])
+            if pid in nodes
+        }
+        edge_type = payload.get("edge_type", "")
+        check = check_finding(payload.get("text", ""), edge_type, payload.get("operation"), texts)
+        kind = "computation" if edge_type == "computes" else "finding-support"
+        for problem in check.problems:
+            report.violations.append(Violation(kind, nid, problem))
+        if check.ok and check.status != payload.get("status"):
+            report.violations.append(
+                Violation(
+                    "computation", nid,
+                    f"stored status {payload.get('status')!r} but the operation "
+                    f"recomputes as {check.status!r}",
+                )
+            )
+        elif check.ok and check.status == UNVERIFIED:
+            report.advisories.append(
+                Violation(
+                    "unverified-derivation", nid,
+                    f"derived figure the harness cannot recompute: {payload.get('text', '')[:80]!r}",
+                )
+            )
+
+
 def _check_containment(
-    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport, verbatim: bool = False
 ) -> None:
     out = _out_edges(edges)
     for nid, node in nodes.items():
@@ -373,6 +427,19 @@ def _check_containment(
                 transform_note = note
         if not span_texts:
             continue  # already flagged by tier-integrity
+        if verbatim and transform_note:
+            # Only reachable when an older session is re-scored: sessions
+            # recorded at derivations >= 2 cannot carry a note. The premise
+            # was accepted under the old rule, so this is reported as what
+            # it now is — an unverified derivation — not as corruption.
+            for problem in check_containment(node["payload"]["text"], span_texts, None):
+                report.advisories.append(
+                    Violation(
+                        "unverified-derivation", nid,
+                        f"premise rests on a transform note ({transform_note!r}): {problem}",
+                    )
+                )
+            continue
         for problem in check_containment(node["payload"]["text"], span_texts, transform_note):
             report.violations.append(Violation("containment", nid, problem))
 
@@ -386,7 +453,7 @@ def _check_sentence_support(
 
     def cited_texts(claim_id: str) -> list[str]:
         return [
-            nodes[e["dst_node_id"]]["payload"].get("text", "")
+            evidence_text(nodes[e["dst_node_id"]]["payload"])
             for e in out.get(claim_id, [])
             if e["edge_type"] == "aggregates" and e["dst_node_id"] in nodes
         ]
