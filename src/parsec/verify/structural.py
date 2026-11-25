@@ -383,10 +383,34 @@ def _check_sentence_support(
     """Re-run the writer's sentence check over the stored claims: the text a
     reader saw against the text of what it cites, from the graph alone."""
     out = _out_edges(edges)
+
+    def cited_texts(claim_id: str) -> list[str]:
+        return [
+            nodes[e["dst_node_id"]]["payload"].get("text", "")
+            for e in out.get(claim_id, [])
+            if e["edge_type"] == "aggregates" and e["dst_node_id"] in nodes
+        ]
+
+    # What a heading may draw on: evidence cited by any claim in the answer.
+    cited_anywhere = [
+        text
+        for nid in sorted(nodes)
+        if nodes[nid]["type"] == "ReportClaim"
+        for text in cited_texts(nid)
+    ]
     for nid, node in nodes.items():
         if node["type"] != "ReportClaim":
             continue
         text = node["payload"].get("text", "")
+        if node["payload"].get("heading"):
+            for problem in check_sentence(text, cited_anywhere):
+                report.violations.append(
+                    Violation(
+                        "sentence-support", nid,
+                        f"heading {text[:80]!r}: {problem} anywhere in the answer",
+                    )
+                )
+            continue
         if node["payload"].get("narrative"):
             if has_checkable_content(text):
                 report.violations.append(
@@ -396,11 +420,7 @@ def _check_sentence_support(
                     )
                 )
             continue
-        cited = [
-            nodes[e["dst_node_id"]]["payload"].get("text", "")
-            for e in out.get(nid, [])
-            if e["edge_type"] == "aggregates" and e["dst_node_id"] in nodes
-        ]
+        cited = cited_texts(nid)
         if not cited:
             continue  # already flagged by claim-path
         for problem in check_sentence(text, cited):

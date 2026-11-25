@@ -72,6 +72,9 @@ class ReportClaimNode(_Node):
     # and repair did not fix it. Absent on verified claims, so their node
     # ids are unchanged.
     unverified: bool = False
+    # A markdown heading (sentence_check >= 1): stored like a narrative
+    # sentence, checked against evidence cited anywhere in the answer.
+    heading: bool = False
 
     @model_validator(mode="after")
     def _non_narrative_needs_refs(self) -> ReportClaimNode:

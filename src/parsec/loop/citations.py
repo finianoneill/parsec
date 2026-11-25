@@ -229,18 +229,21 @@ def write_claims(
     Returns claim count. (Synthesis-tier merges across subagents arrive with
     the gap-fill work; claims aggregate their evidence nodes directly.)
 
-    With sentence_check, narrative sentences are written too (as narrative
-    nodes, no edges) so `parsec verify` can re-check them from the graph
-    alone, and a sentence that failed the citation check carries
-    `unverified: true`. Headings are never written: they are not claims.
+    With sentence_check, everything the reader sees is written, so `parsec
+    verify` can re-check it from the graph alone: narrative sentences and
+    headings as narrative nodes with no edges (a heading also carries
+    `heading: true`), and anything that failed the citation check with
+    `unverified: true`. Only cited sentences are claims — narrative and
+    heading nodes are excluded from every claim count, credence flag and
+    eval metric by their `narrative` field.
     """
     written = 0
     for index, seg in enumerate(check.segments):
-        if seg.structure:
-            continue
-        if seg.narrative:
+        if seg.narrative:  # includes headings
             if sentence_check:
                 payload: dict = {"text": seg.text, "refs": [], "narrative": True}
+                if seg.structure:
+                    payload["heading"] = True
                 if index in check.failing:
                     payload["unverified"] = True
                 dag.add_node(session_id, "ReportClaim", payload)

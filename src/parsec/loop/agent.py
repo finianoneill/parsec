@@ -1771,8 +1771,17 @@ class OrchestratorLoop:
                 structure_lines_narrative=structure, sentence_check=self.sentence_check,
             )
 
+        def remember(text: str, result: CitationCheck) -> None:
+            # What a budget halt falls back to (_best_effort_answer). With the
+            # sentence check on it is the MARKED draft: a repair call that
+            # trips a budget gate never returns, and the reader must still be
+            # shown which sentences failed. The unmarked text stays the one
+            # sent back to the writer.
+            self._latest_draft = mark_unverified(text, result) if self.sentence_check else text
+            self._latest_problems = list(result.problems)
+
         check = run_check(answer)
-        self._latest_problems = list(check.problems)
+        remember(answer, check)
         rounds = 0
         while not check.ok and rounds < MAX_REPAIR_ROUNDS:
             rounds += 1
@@ -1788,15 +1797,13 @@ class OrchestratorLoop:
             self.turns += 1
             answer = resp.text
             check = run_check(answer)
-            self._latest_draft = answer
-            self._latest_problems = list(check.problems)
+            remember(answer, check)
         if self.sentence_check and not check.ok:
             # Repair is exhausted. The answer still ships (as partial), but the
             # reader is shown exactly which sentences could not be defended.
             # Offsets in `check` refer to the unmarked text, which is all the
             # callers use them for; the marked text is what gets emitted.
             answer = mark_unverified(answer, check)
-            self._latest_draft = answer
         return answer, check
 
     # -- gates ---------------------------------------------------------------

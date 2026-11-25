@@ -252,3 +252,52 @@ def test_writer_is_told_the_rule_only_when_it_applies():
     assert prompts.WRITER_SYSTEM_SENTENCE_CHECK.replace(prompts._WRITER_SENTENCE_RULES, "") == (
         prompts.WRITER_SYSTEM
     )
+
+
+# -- review findings ----------------------------------------------------------
+
+
+def test_decimals_after_a_grouped_integer_are_part_of_the_number():
+    assert check_sentence("It is 3,260.9 m.", ["It is 3,260.5 m."])
+    assert check_sentence("It is 3,260.5 m.", ["It is 3260.5 m."]) == []
+    assert sentence_numbers("About 1,234,567.25 in all.") == ["1234567.25"]
+
+
+def test_a_sign_is_part_of_the_number_but_a_hyphen_is_not():
+    assert check_sentence("It fell to -5 degrees.", ["It fell to 5 degrees."])
+    assert check_sentence("It rose to 5 degrees.", ["It fell to -5 degrees."])
+    assert check_sentence("It fell to -5 degrees.", ["A low of −5 degrees."]) == []
+    assert sentence_numbers("COVID-19 in 2019-2020, 10-20 items, (-3) and - 4.") == [
+        "19", "2019", "2020", "10", "20", "-3", "4",
+    ]
+    assert sentence_numbers("A change of -0.0 overall.") == ["0"]
+
+
+def test_short_quotations_are_checked():
+    assert check_sentence('The answer was "no".', ['The answer was "yes".'])
+    assert check_sentence('The answer was "no".', ["They answered no."]) == []
+    assert has_checkable_content('It said "x".')
+
+
+def test_an_unsupported_heading_is_stored_and_caught_by_verify(graph, db, tmp_path):
+    dag, sid, p = graph
+    answer = f"## The 32.6 light-year parsec\nA parsec is about 3.26 light-years. [{p}]"
+    check = check_citations(answer, sid, dag, True, True)
+    assert write_claims(sid, check, dag, sentence_check=True) == 1  # a heading is not a claim
+    stored = [json.loads(r["payload_json"]) for r in dag.nodes_for_session(sid, tier=4)]
+    heading = next(n for n in stored if n.get("heading"))
+    assert heading == {
+        "text": "## The 32.6 light-year parsec", "refs": [], "narrative": True,
+        "heading": True, "unverified": True,
+    }
+    report = verify_session(db, BlobStore(tmp_path / "blobs"), sid, sentence_check=True)
+    details = [v.detail for v in report.violations if v.check == "sentence-support"]
+    assert len(details) == 1 and "heading" in details[0] and "'32.6'" in details[0]
+
+
+def test_a_supported_heading_is_stored_and_passes_verify(graph, db, tmp_path):
+    dag, sid, p = graph
+    answer = f"## 1. The 3.26 light-year parsec\nA parsec is about 3.26 light-years. [{p}]"
+    write_claims(sid, check_citations(answer, sid, dag, True, True), dag, sentence_check=True)
+    report = verify_session(db, BlobStore(tmp_path / "blobs"), sid, sentence_check=True)
+    assert [v for v in report.violations if v.check == "sentence-support"] == []

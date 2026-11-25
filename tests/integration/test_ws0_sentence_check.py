@@ -123,3 +123,27 @@ def test_an_older_session_is_verified_as_recorded_unless_rescored(run_demo, caps
     code, violations = _verify(run, capsys, "--rescore-with", "current")
     assert code != 0 and "'32.6'" in violations[0]["detail"]
     assert run["conn"].execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
+
+
+def test_a_budget_halt_before_repair_still_marks_the_failed_sentence(run_demo, monkeypatch):
+    """The repair call is gated on budget. If the gate trips, the run halts
+    with the draft it has — and that draft must carry the markers, or the
+    reader gets a wrong figure with nothing next to it."""
+    from parsec.errors import BudgetExceeded
+    from parsec.loop.agent import OrchestratorLoop
+
+    real_gate = OrchestratorLoop._writer_gate
+    calls = {"n": 0}
+
+    def gate_trips_on_the_repair_call(self):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1 = the draft, 2 = the repair
+            raise BudgetExceeded("usd", 1.0, 0.5)
+        return real_gate(self)
+
+    monkeypatch.setattr(OrchestratorLoop, "_writer_gate", gate_trips_on_the_repair_call)
+    run = run_demo(["32.6", "3.26"])
+    assert run["status"] == "halted_budget"
+    assert "PARTIAL" in run["answer"] and "'32.6'" in run["answer"]
+    failed = next(line for line in run["answer"].splitlines() if "32.6 light-years" in line and "[premise" in line)
+    assert failed.endswith(UNVERIFIED_TAG)
