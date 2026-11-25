@@ -68,8 +68,8 @@ def _subagent_token_cap(loop, msgs_chars_budget: int) -> int:
     from parsec.loop import compaction, prompts
 
     static = compaction.static_prefix_chars(
-        prompts.SUBAGENT_SYSTEM,
-        [*loop.registry.export_schemas(), prompts.submit_report_schema()],
+        prompts.subagent_system(loop.config),
+        [*loop.registry.export_schemas(loop.config), prompts.submit_report_schema(loop.config)],
     )
     return (static + msgs_chars_budget) // compaction.CHARS_PER_TOKEN
 

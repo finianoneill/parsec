@@ -72,3 +72,57 @@ def test_verify_never_rewrites_recorded_credences(tmp_path, capsys):
         for row in conn.execute("SELECT credence FROM nodes WHERE session_id=?", (session_id,))
     }
     assert values == {0.123}
+
+
+def test_new_sessions_record_behaviour_versions(tmp_path):
+    from parsec.config import BEHAVIOUR_FIELDS, CURRENT_BEHAVIOUR
+    from parsec.store.sessions import SessionStore
+
+    data_dir = tmp_path / "data"
+    assert cli.main(["demo", "--data-dir", str(data_dir)]) == 0
+    conn = open_db(data_dir / "parsec.db")
+    session_id = conn.execute("SELECT session_id FROM sessions").fetchone()["session_id"]
+    raw = SessionStore(conn, RealClock()).get_config_raw(session_id)
+    assert {key: raw[key] for key in CURRENT_BEHAVIOUR} == CURRENT_BEHAVIOUR
+    assert raw["as_of_ts"]
+    assert set(BEHAVIOUR_FIELDS) <= set(raw)
+
+
+def test_recording_from_before_the_registry_still_replays(tmp_path):
+    """Strip the behaviour keys from a recording's stored config and from its
+    SESSION_STARTED event — exactly what a pre-registry recording looks like
+    on disk — and it must still replay byte-identically."""
+    import json
+
+    from parsec.canonical import canonical_json
+    from parsec.config import BEHAVIOUR_FIELDS
+
+    data_dir = tmp_path / "data"
+    assert cli.main(["demo", "--data-dir", str(data_dir)]) == 0
+    conn = open_db(data_dir / "parsec.db")
+    session_id = conn.execute("SELECT session_id FROM sessions").fetchone()["session_id"]
+
+    config = json.loads(
+        conn.execute(
+            "SELECT config_json FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()["config_json"]
+    )
+    for key in BEHAVIOUR_FIELDS:
+        del config[key]
+    conn.execute(
+        "UPDATE sessions SET config_json=? WHERE session_id=?",
+        (canonical_json(config), session_id),
+    )
+    event = conn.execute(
+        "SELECT seq, payload_json FROM events WHERE session_id=? AND event_type='session_started'",
+        (session_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    for key in BEHAVIOUR_FIELDS:
+        del payload["config"][key]
+    conn.execute(
+        "UPDATE events SET payload_json=? WHERE seq=?", (canonical_json(payload), event["seq"])
+    )
+
+    outcome = asyncio.run(run_replay(conn, BlobStore(data_dir / "blobs"), RealClock(), session_id))
+    assert outcome.verified, outcome.first_divergence

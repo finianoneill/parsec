@@ -18,7 +18,17 @@ import sqlite3
 
 from parsec.config import RunConfig
 from parsec.models.gateway import ModelRequest
-from parsec.models.report import SubagentSubmission
+from parsec.models.report import submission_model
+
+# -- Versioned prompt text ---------------------------------------------------
+#
+# Every string and schema below is part of a recorded prompt's bytes, and so
+# of its hash: editing one in place makes every existing recording diverge on
+# replay. They are FROZEN. To change wording or a schema, add a new constant
+# and select it by behaviour version in the accessor functions further down
+# (decomposer_system, subagent_system, writer_system, repair_template,
+# submit_subquestions_schema, submit_report_schema); never edit these.
+# tests/unit/test_prompt_golden.py pins their hashes.
 
 DECOMPOSER_SYSTEM = """You are the scoping phase of a research harness. Produce a research brief for the user's question:
 - scope: 1-3 sentences stating what the research will and will not cover.
@@ -88,8 +98,28 @@ SUBMIT_SUBQUESTIONS_SCHEMA = {
 }
 
 
-def submit_report_schema() -> dict:
-    schema = SubagentSubmission.model_json_schema()
+def decomposer_system(config: RunConfig) -> str:
+    return DECOMPOSER_SYSTEM
+
+
+def subagent_system(config: RunConfig) -> str:
+    return SUBAGENT_SYSTEM
+
+
+def writer_system(config: RunConfig) -> str:
+    return WRITER_SYSTEM
+
+
+def repair_template(config: RunConfig) -> str:
+    return REPAIR_TEMPLATE
+
+
+def submit_subquestions_schema(config: RunConfig) -> dict:
+    return SUBMIT_SUBQUESTIONS_SCHEMA
+
+
+def submit_report_schema(config: RunConfig) -> dict:
+    schema = submission_model(config).model_json_schema()
     schema.pop("title", None)
     schema["additionalProperties"] = False
     return {
@@ -169,13 +199,13 @@ def build_decomposer_request(
     repair's final attempt."""
     tools, messages = apply_cache_strategy(
         config,
-        [SUBMIT_SUBQUESTIONS_SCHEMA],
+        [submit_subquestions_schema(config)],
         messages if messages is not None else [{"role": "user", "content": query}],
     )
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
-        system=_system_block(DECOMPOSER_SYSTEM),
+        system=_system_block(decomposer_system(config)),
         tools=tools,
         messages=messages,
         tool_choice=tool_choice,
@@ -185,11 +215,13 @@ def build_decomposer_request(
 def build_subagent_request(
     config: RunConfig, tools: list[dict], messages: list[dict]
 ) -> ModelRequest:
-    tools, messages = apply_cache_strategy(config, [*tools, submit_report_schema()], messages)
+    tools, messages = apply_cache_strategy(
+        config, [*tools, submit_report_schema(config)], messages
+    )
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
-        system=_system_block(SUBAGENT_SYSTEM),
+        system=_system_block(subagent_system(config)),
         tools=tools,
         messages=messages,
     )
@@ -200,7 +232,7 @@ def build_writer_request(config: RunConfig, messages: list[dict]) -> ModelReques
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,
-        system=_system_block(WRITER_SYSTEM),
+        system=_system_block(writer_system(config)),
         tools=tools,
         messages=messages,
     )

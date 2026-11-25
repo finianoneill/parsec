@@ -57,7 +57,7 @@ from parsec.loop.structured import (
 )
 from parsec.models.events import EventType
 from parsec.models.gateway import ModelResponse
-from parsec.models.report import SubagentSubmission
+from parsec.models.report import SubagentSubmission, submission_model
 from parsec.models.tools import ToolIntent
 from parsec.store.coverage import CoverageLedger
 from parsec.store.dag import DagStore
@@ -871,11 +871,11 @@ class OrchestratorLoop:
         # a writer pass (the next writer/repair call re-arms it).
         self._wall_grace = False
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
-        tool_schemas = self.registry.export_schemas()
+        tool_schemas = self.registry.export_schemas(cfg)
         # The per-phase immutable prefix, counted by the compaction trigger
         # (the old char trigger ignored it and could not react to overflow).
         static_chars = compaction.static_prefix_chars(
-            prompts.SUBAGENT_SYSTEM, [*tool_schemas, prompts.submit_report_schema()]
+            prompts.subagent_system(cfg), [*tool_schemas, prompts.submit_report_schema(cfg)]
         )
         messages: list[dict] = [
             {
@@ -1157,7 +1157,9 @@ class OrchestratorLoop:
             if block.get("name") != "submit_report":
                 continue
             try:
-                submission = SubagentSubmission.model_validate(block.get("input", {}))
+                submission = submission_model(self.config).model_validate(
+                    block.get("input", {})
+                )
             except ValidationError as exc:
                 return None, format_validation_errors(exc)
             # Semantic checks past the schema: findings and conflicts must
@@ -1373,7 +1375,7 @@ class OrchestratorLoop:
     def _writer_estimate(self, messages: list[dict]) -> int:
         # Fresh context each writer round — no prior-usage anchor to floor it.
         return (
-            len(prompts.WRITER_SYSTEM) + compaction.context_chars(messages)
+            len(prompts.writer_system(self.config)) + compaction.context_chars(messages)
         ) // compaction.CHARS_PER_TOKEN
 
     async def _writer_complete(self, messages: list[dict]) -> tuple[ModelResponse, list[dict]]:
@@ -1734,7 +1736,7 @@ class OrchestratorLoop:
             problems = "\n".join(f"- {p}" for p in check.problems)
             writer_messages.append({"role": "assistant", "content": [{"type": "text", "text": answer}]})
             writer_messages.append(
-                {"role": "user", "content": prompts.REPAIR_TEMPLATE.format(problems=problems)}
+                {"role": "user", "content": prompts.repair_template(self.config).format(problems=problems)}
             )
             resp, writer_messages = await self._writer_complete(writer_messages)
             self.turns += 1

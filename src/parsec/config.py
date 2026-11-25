@@ -7,7 +7,7 @@ import time
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -121,6 +121,47 @@ def effort_limits(effort: str, budgets: Budgets) -> EffortLimits:
     )
 
 
+# -- Behaviour versions ------------------------------------------------------
+#
+# A recording replays only under the behaviour it was recorded with: the
+# sentence check adds repair rounds, claim credence decides whether gap-fill
+# dispatches, and prompt or tool-schema wording feeds every prompt hash. So
+# each replay-relevant behaviour carries its own version in the session
+# config, and code branches on that version instead of changing in place.
+#
+# Rules:
+#   - The FIELD default is the legacy value, so a recording whose stored
+#     config predates the field loads (and replays) as legacy.
+#   - New sessions record CURRENT_BEHAVIOUR via new_session_behaviour(); every
+#     place that starts a fresh session must call it.
+#   - A released integer is never redefined. Work merged between releases
+#     records a "<n>-dev" string, which carries no replay guarantee; the
+#     release turns it into the integer.
+BehaviourVersion = int | str
+
+LEGACY_BEHAVIOUR: dict[str, BehaviourVersion] = {
+    "sentence_check": 0,   # 0: citation check tests only that cited ids exist
+    "claim_credence": 1,   # 1: claims noisy-OR their refs; token-set dedup at intake
+    "derivations": 1,      # 1: transform_note exempts a premise's numbers
+    "recency": 1,          # 1: decay keyed on fetch time and newest source
+}
+# What a session started today records. Each correctness change bumps its own
+# entry here, together with the code that reads it.
+CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = dict(LEGACY_BEHAVIOUR)
+
+# Every behaviour key a session config can carry. Stripped from replay
+# projections: a pre-registry recording's SESSION_STARTED event lacks them,
+# and their effects are the prompts, events and answer bytes themselves.
+BEHAVIOUR_FIELDS: tuple[str, ...] = (*LEGACY_BEHAVIOUR, "as_of_ts")
+
+
+def new_session_behaviour(now_iso: str) -> dict[str, Any]:
+    """Config overrides for a session being started now (not replayed or
+    forked — those copy the recording's own values): the current behaviour
+    versions, plus the reference time "now" questions are measured against."""
+    return {**CURRENT_BEHAVIOUR, "as_of_ts": now_iso}
+
+
 class RunConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -178,6 +219,16 @@ class RunConfig(BaseModel):
     #   the answer are structure, never "uncited sentences".
     halt_keeps_draft: bool = True
     structure_lines_narrative: bool = True
+    # Behaviour versions (see LEGACY_BEHAVIOUR above). Defaults are the legacy
+    # values on purpose; new sessions get theirs from new_session_behaviour().
+    sentence_check: BehaviourVersion = LEGACY_BEHAVIOUR["sentence_check"]
+    claim_credence: BehaviourVersion = LEGACY_BEHAVIOUR["claim_credence"]
+    derivations: BehaviourVersion = LEGACY_BEHAVIOUR["derivations"]
+    recency: BehaviourVersion = LEGACY_BEHAVIOUR["recency"]
+    # The session's reference time for "now", fixed at creation so nothing
+    # downstream reads a clock (T4). None on recordings that predate it.
+    # Recorded but not yet read by any behaviour.
+    as_of_ts: str | None = None
     # Politeness 2.0: robots respected by purpose; contact appended to the UA.
     respect_robots: bool = True
     robots_ttl_s: int = 24 * 3600
