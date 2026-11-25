@@ -1,5 +1,7 @@
 """One test per known correctness defect, each asserting the CORRECT
 behaviour and marked as a strict expected failure until its fix lands.
+A test with no marker is a defect that has been fixed (WS0 so far); it stays
+here as that fix's regression test.
 
 These are the "before" half of every remediation change: the bug is pinned
 by a failing test before the fix is written, so the fix is measured rather
@@ -41,7 +43,6 @@ from parsec.verify.credence import compute_credences
 # -- WS0 ----------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="WS0: sentence numbers are not checked against citations")
 def test_ws0_wrong_number_in_a_cited_sentence_is_caught(tmp_path, monkeypatch, capsys):
     """The demo's writer says 32.6 light-years while citing the premise that
     says 3.26. The run must not finish `done`, and `parsec verify` must

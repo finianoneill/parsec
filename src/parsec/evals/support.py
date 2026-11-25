@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from parsec.verify.containment import extract_numbers, extract_quotes
+from parsec.verify.containment import unsupported_numbers, unsupported_quotes
 from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
 
 Grade = Literal["full", "partial", "none"]
@@ -70,13 +70,15 @@ class MechanicalSupportChecker:
 def _hard_mismatch(claim_text: str, evidence_texts: list[str]) -> bool:
     """The exact-match floor (§10.2: never let NLI override it): a number or
     quote in the claim that appears in NO evidence text is a hard fail."""
-    evidence_blob = " ".join(evidence_texts)
-    evidence_numbers = set(extract_numbers(evidence_blob))
-    for num in extract_numbers(claim_text):
-        if num not in evidence_numbers:
-            return True
-    normalized_evidence = " ".join(evidence_blob.split())
-    return any(quote not in normalized_evidence for quote in extract_quotes(claim_text))
+    # The same primitives as the writer's sentence check and `parsec verify`
+    # (verify.containment), so grading cannot disagree with them about what
+    # counts as the same number. One blob, as before: a quotation may span
+    # the join between two spans of one document.
+    evidence_blob = [" ".join(evidence_texts)]
+    return bool(
+        unsupported_numbers(claim_text, evidence_blob)
+        or unsupported_quotes(claim_text, evidence_blob)
+    )
 
 
 class GroundedSupportChecker:

@@ -12,6 +12,11 @@ Walks the persisted Evidence DAG of a session and mechanically checks:
   temporal-order   — stage 2 (M9): ordering findings on `temporal` edges
                      checked against evidence date intervals; definite
                      contradictions are violations
+  sentence-support — (sentence_check >= 1) every number and quotation in a
+                     ReportClaim's text appears in the text of the premises
+                     and findings it cites; a narrative claim carries neither.
+                     The same check the writer's citation check runs, so a
+                     wrong figure cannot pass one and fail the other
 
 Advisory checks (M9, T9 — recorded and surfaced, but they never flip `ok`):
   premise-support  — grounded-NLI tier: does the evidence actually support
@@ -33,7 +38,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from parsec.store.blobs import BlobStore
-from parsec.verify.containment import check_containment
+from parsec.verify.containment import check_containment, check_sentence, has_checkable_content
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
 from parsec.verify.temporal import check_temporal_findings
@@ -102,6 +107,7 @@ def verify_session(
     blobs: BlobStore,
     session_id: str,
     nli_checker: GroundedChecker | None = _DEFAULT_NLI,
+    sentence_check: bool = False,
 ) -> VerificationReport:
     report = VerificationReport()
     # ORDER BY id, not insertion: concurrent subagents (M11) interleave row
@@ -132,6 +138,8 @@ def verify_session(
     _check_corpus_integrity(conn, blobs, nodes, report)
     _check_containment(nodes, edges, report)
     _check_temporal(nodes, edges, report)
+    if sentence_check:
+        _check_sentence_support(nodes, edges, report)
     _check_premise_support(nodes, edges, report, nli_checker)
     _lint_premises(nodes, report)
     _flag_dependent_claims(nodes, edges, report)
@@ -367,6 +375,58 @@ def _check_containment(
             continue  # already flagged by tier-integrity
         for problem in check_containment(node["payload"]["text"], span_texts, transform_note):
             report.violations.append(Violation("containment", nid, problem))
+
+
+def _check_sentence_support(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
+    """Re-run the writer's sentence check over the stored claims: the text a
+    reader saw against the text of what it cites, from the graph alone."""
+    out = _out_edges(edges)
+
+    def cited_texts(claim_id: str) -> list[str]:
+        return [
+            nodes[e["dst_node_id"]]["payload"].get("text", "")
+            for e in out.get(claim_id, [])
+            if e["edge_type"] == "aggregates" and e["dst_node_id"] in nodes
+        ]
+
+    # What a heading may draw on: evidence cited by any claim in the answer.
+    cited_anywhere = [
+        text
+        for nid in sorted(nodes)
+        if nodes[nid]["type"] == "ReportClaim"
+        for text in cited_texts(nid)
+    ]
+    for nid, node in nodes.items():
+        if node["type"] != "ReportClaim":
+            continue
+        text = node["payload"].get("text", "")
+        if node["payload"].get("heading"):
+            for problem in check_sentence(text, cited_anywhere):
+                report.violations.append(
+                    Violation(
+                        "sentence-support", nid,
+                        f"heading {text[:80]!r}: {problem} anywhere in the answer",
+                    )
+                )
+            continue
+        if node["payload"].get("narrative"):
+            if has_checkable_content(text):
+                report.violations.append(
+                    Violation(
+                        "sentence-support", nid,
+                        f"narrative sentence carries a number or quotation: {text[:80]!r}",
+                    )
+                )
+            continue
+        cited = cited_texts(nid)
+        if not cited:
+            continue  # already flagged by claim-path
+        for problem in check_sentence(text, cited):
+            report.violations.append(
+                Violation("sentence-support", nid, f"{problem}: {text[:80]!r}")
+            )
 
 
 def _check_temporal(

@@ -62,7 +62,17 @@ def test_orchestrator_exit(tmp_path, m3_transport, m3_fixtures_path, m3_scripted
             "SELECT tier, COUNT(*) AS n FROM nodes WHERE session_id=? GROUP BY tier", (session_id,)
         )
     }
-    assert tiers == {0: 2, 1: 2, 2: 1, 4: 2}
+    # tier 4: two cited claims plus the one [narrative] sentence, which the
+    # sentence check stores so `parsec verify` can re-check it offline
+    assert tiers == {0: 2, 1: 2, 2: 1, 4: 3}
+    narrative = [
+        json.loads(row["payload_json"])
+        for row in conn.execute(
+            "SELECT payload_json FROM nodes WHERE session_id=? AND tier=4", (session_id,)
+        )
+        if json.loads(row["payload_json"])["narrative"]
+    ]
+    assert [n["text"] for n in narrative] == ["Here is what the sources say."]
 
     for span in conn.execute(
         "SELECT s.* FROM spans s JOIN nodes n ON n.session_id=? AND n.tier=0"

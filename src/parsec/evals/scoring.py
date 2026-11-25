@@ -59,7 +59,9 @@ def score_citation_faithfulness(
     }
     if not claims:
         return None, 0, 0
-    report = verify_session(conn, blobs, session_id)
+    # Evals grade with today's checks, whatever the session recorded: the
+    # sentence check is part of what "faithful" means.
+    report = verify_session(conn, blobs, session_id, sentence_check=True)
     implicated = {v.subject for v in report.violations if v.subject in claims}
     faithful = len(claims) - len(implicated)
     return faithful / len(claims), len(claims), faithful
