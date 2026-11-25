@@ -1331,16 +1331,16 @@ def _eval_compare(args) -> int:
                     f"[{color}]{ld.delta:+d}[/{color}]",
                 )
             console.print(losses)
-        if comparison.only_in_a or comparison.only_in_b:
-            console.print(f"only in A: {comparison.only_in_a}  only in B: {comparison.only_in_b}")
+        for problem in comparison.coverage_problems:
+            console.print(f"[red]not comparable — {problem}[/red]")
         if comparison.advisory_regressions:
             axes = ", ".join(v.axis for v in comparison.advisory_regressions)
             console.print(f"[yellow]advisory axis regressed (never gates): {axes}[/yellow]")
-        if comparison.ok:
-            console.print("[green]no significant regressions[/green]")
-        else:
+        if comparison.regressed_axes:
             axes = ", ".join(v.axis for v in comparison.regressed_axes)
             console.print(f"[red]significant regression on: {axes} (epsilon={args.epsilon})[/red]")
+        elif comparison.ok:
+            console.print("[green]no significant regressions[/green]")
     return EXIT_OK if comparison.ok else EXIT_PARTIAL
 
 
