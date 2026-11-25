@@ -1,0 +1,1 @@
+{"content":[{"id":"tu_4","input":{"url":"https://geo.example.gov/olympus"},"name":"fetch","type":"tool_use"}],"id":"msg_fake_4","model":"fake-model","role":"assistant","stop_reason":"tool_use","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":100,"output_tokens":50}}

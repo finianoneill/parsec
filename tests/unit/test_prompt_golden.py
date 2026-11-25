@@ -1,9 +1,14 @@
-"""Golden hashes for everything that is prompt bytes under LEGACY behaviour.
+"""Golden hashes for everything that is prompt bytes, per RELEASED behaviour.
 
 Replay asserts each request's prompt hash against the recording, so a changed
 system prompt, nudge, or tool schema makes every existing recording diverge.
-These hashes were computed at 366f1f6 — the commit the remediation's frozen
-recordings come from — and must never change.
+One set of hashes per release:
+
+  0.1.0  LEGACY_BEHAVIOUR — computed at 366f1f6, the commit the remediation's
+         first frozen recordings come from
+  0.2.0  sentence_check 1, claim_credence 2, derivations 2, recency 2
+
+Neither set may ever change. A new release adds a set; it does not edit one.
 
 If this test fails you have done one of two things:
   - edited frozen prompt text or a frozen wire model in place. Revert it; add
@@ -22,13 +27,38 @@ from __future__ import annotations
 import pytest
 
 from parsec.canonical import hash_obj, sha256_hex
-from parsec.config import LEGACY_BEHAVIOUR, RunConfig
+from parsec.config import CURRENT_BEHAVIOUR, LEGACY_BEHAVIOUR, RunConfig
 from parsec.loop import prompts
 from parsec.tools.base import ToolRegistry
 from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_broad import SearchBroadTool
 from parsec.tools.search_within import SearchWithinTool
+
+V0_2_0 = {"sentence_check": 1, "claim_credence": 2, "derivations": 2, "recency": 2}
+# Prompts at recency >= 2 carry the session's reference date; pin one.
+AS_OF = "2026-11-25T12:00:00.000+00:00"
+
+GOLDEN_V0_2_0: dict[str, str] = {
+    "FINAL_TURN_NUDGE": "b98d0579a1c0e7e5",
+    "TRUNCATED_NUDGE": "09bd74cad4b5ff0e",
+    "decomposer_system": "c040c4ee84f4e973",
+    "repair_template": "73b4348767811b56",
+    "req:decomposer:full": "b8a1fa5a084f6839",
+    "req:decomposer:system": "5ec416a4d4d8e570",
+    "req:subagent:full": "a2884c9614033190",
+    "req:subagent:system": "0651d11fa8160b53",
+    "req:writer:full": "1348dc5e2e3d0649",
+    "req:writer:system": "2d17ee51ec247043",
+    "subagent_system": "bc597ff611acfaa5",
+    "submit_report": "12d88f46b09b99cc",
+    "submit_subquestions": "8ffd64bbb2415888",
+    "tool:fetch": "9ca6d9c60a91bc43",
+    "tool:record_premises": "0ab8a313710c45c1",
+    "tool:search_broad": "77b5492688f3dc8d",
+    "tool:search_within": "0fde9a7a021cd3b9",
+    "writer_system": "d1c594d98e697d11",
+}
 
 GOLDEN = {
     "decomposer_system": "afd47531f7068481",
@@ -54,9 +84,10 @@ GOLDEN = {
 }
 
 
-def _legacy_config(cache_strategy: str = "system") -> RunConfig:
+def _config(behaviour: dict, cache_strategy: str = "system") -> RunConfig:
     return RunConfig(
-        session_id="s", query="q", model="m", cache_strategy=cache_strategy, **LEGACY_BEHAVIOUR
+        session_id="s", query="q", model="m", cache_strategy=cache_strategy,
+        as_of_ts=AS_OF, **behaviour,
     )
 
 
@@ -70,8 +101,8 @@ def _tool_schemas(config: RunConfig) -> list[dict]:
     return ToolRegistry(tools).export_schemas(config)
 
 
-def _actual() -> dict[str, str]:
-    config = _legacy_config()
+def _actual(behaviour: dict) -> dict[str, str]:
+    config = _config(behaviour)
     out = {
         "decomposer_system": sha256_hex(prompts.decomposer_system(config)),
         "subagent_system": sha256_hex(prompts.subagent_system(config)),
@@ -85,7 +116,7 @@ def _actual() -> dict[str, str]:
     for schema in _tool_schemas(config):
         out[f"tool:{schema['name']}"] = hash_obj(schema)
     for strategy in ("system", "full"):
-        cfg = _legacy_config(strategy)
+        cfg = _config(behaviour, strategy)
         messages = [{"role": "user", "content": "hello"}]
         requests = {
             "decomposer": prompts.build_decomposer_request(cfg, "q"),
@@ -97,13 +128,30 @@ def _actual() -> dict[str, str]:
     return {key: value[:16] for key, value in out.items()}
 
 
-@pytest.mark.parametrize("key", sorted(GOLDEN))
-def test_legacy_prompt_bytes_are_frozen(key):
-    assert _actual()[key] == GOLDEN[key], (
-        f"{key} changed under legacy behaviour — existing recordings will no longer "
-        "replay. See this module's docstring; do not update the hash."
+RELEASES = {"0.1.0": (LEGACY_BEHAVIOUR, GOLDEN), "0.2.0": (V0_2_0, GOLDEN_V0_2_0)}
+
+
+@pytest.mark.parametrize(
+    ("release", "key"), [(r, k) for r, (_, golden) in RELEASES.items() for k in sorted(golden)]
+)
+def test_released_prompt_bytes_are_frozen(release, key):
+    behaviour, golden = RELEASES[release]
+    assert _actual(behaviour)[key] == golden[key], (
+        f"{key} changed under the {release} behaviour versions — recordings made by that "
+        "release will no longer replay. See this module's docstring; do not update the hash."
     )
 
 
-def test_every_prompt_piece_is_pinned():
-    assert set(_actual()) == set(GOLDEN)
+@pytest.mark.parametrize("release", sorted(RELEASES))
+def test_every_prompt_piece_is_pinned(release):
+    behaviour, golden = RELEASES[release]
+    assert set(_actual(behaviour)) == set(golden)
+
+
+def test_the_newest_pinned_release_is_what_new_sessions_record():
+    """If CURRENT_BEHAVIOUR moves on, its bytes need a pinned set of their
+    own before the release that ships them."""
+    assert {k: v for k, v in CURRENT_BEHAVIOUR.items() if not str(v).endswith("-dev")} == (
+        CURRENT_BEHAVIOUR
+    ), "a -dev version is current: fine between releases, never in one"
+    assert CURRENT_BEHAVIOUR == V0_2_0
