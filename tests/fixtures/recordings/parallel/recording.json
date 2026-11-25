@@ -1,0 +1,12 @@
+{
+  "recorded_at_commit": "366f1f6",
+  "sessions": [
+    "frozen-parallel"
+  ],
+  "status": {
+    "frozen-parallel": "done"
+  },
+  "aux": {
+    "queries.json": "queries.json"
+  }
+}

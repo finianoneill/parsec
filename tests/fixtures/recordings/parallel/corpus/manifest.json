@@ -1,0 +1,146 @@
+{
+  "blobs": 41,
+  "format": 1,
+  "tables": {
+    "cache_index": {
+      "columns": [
+        "cache_key",
+        "url",
+        "doc_hash",
+        "fetched_ts",
+        "mode"
+      ],
+      "rows": 3
+    },
+    "coverage": {
+      "columns": [
+        "session_id",
+        "sq_id",
+        "question",
+        "status",
+        "reason",
+        "created_seq",
+        "updated_seq"
+      ],
+      "rows": 3
+    },
+    "documents": {
+      "columns": [
+        "doc_hash",
+        "url",
+        "fetched_ts",
+        "content_type",
+        "status_code",
+        "byte_len",
+        "raw_blob",
+        "text_blob",
+        "meta_json"
+      ],
+      "rows": 3
+    },
+    "edges": {
+      "columns": [
+        "edge_id",
+        "session_id",
+        "src_node_id",
+        "dst_node_id",
+        "edge_type",
+        "payload_json",
+        "created_seq"
+      ],
+      "rows": 6
+    },
+    "events": {
+      "columns": [
+        "seq",
+        "session_id",
+        "idx",
+        "stream_id",
+        "stream_idx",
+        "ts",
+        "actor",
+        "event_type",
+        "payload_json",
+        "parent_seq"
+      ],
+      "rows": 127
+    },
+    "ledger": {
+      "columns": [
+        "entry_id",
+        "session_id",
+        "ts",
+        "category",
+        "amount",
+        "actor",
+        "stream_id",
+        "ref_seq",
+        "note"
+      ],
+      "rows": 37
+    },
+    "nodes": {
+      "columns": [
+        "node_id",
+        "session_id",
+        "tier",
+        "node_type",
+        "payload_json",
+        "credence",
+        "created_seq"
+      ],
+      "rows": 9
+    },
+    "notebook": {
+      "columns": [
+        "session_id",
+        "entry_idx",
+        "ts",
+        "author",
+        "md_text"
+      ],
+      "rows": 4
+    },
+    "robots_cache": {
+      "columns": [
+        "domain",
+        "fetched_ts",
+        "robots_txt"
+      ],
+      "rows": 3
+    },
+    "search_cache": {
+      "columns": [
+        "provider",
+        "query_norm",
+        "fetched_ts",
+        "response_json"
+      ],
+      "rows": 0
+    },
+    "sessions": {
+      "columns": [
+        "session_id",
+        "created_ts",
+        "query",
+        "config_json",
+        "status",
+        "answer_blob",
+        "parent_session_id",
+        "finished_ts"
+      ],
+      "rows": 1
+    },
+    "spans": {
+      "columns": [
+        "span_id",
+        "doc_hash",
+        "char_start",
+        "char_end",
+        "text",
+        "created_seq"
+      ],
+      "rows": 3
+    }
+  }
+}

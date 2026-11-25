@@ -1,0 +1,2 @@
+{"author":"orchestrator","entry_idx":0,"md_text":"**Query:** how far is a parsec in light years\n\n## Plan\n- sq-1: how far is a parsec in light years","session_id":"20261125T213626-a113","ts":"2026-11-25T21:36:26.302+00:00"}
+{"author":"subagent:sq-1","entry_idx":1,"md_text":"## sq-1: how far is a parsec in light years\n**Status:** answered\nPremises: [premise:d7aec1c1668f1b4b], [premise:edb11063dfbe5048]","session_id":"20261125T213626-a113","ts":"2026-11-25T21:36:27.330+00:00"}

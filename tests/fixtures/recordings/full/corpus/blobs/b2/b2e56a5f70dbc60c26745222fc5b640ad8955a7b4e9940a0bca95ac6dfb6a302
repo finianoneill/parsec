@@ -1,0 +1,16 @@
+## Olympus Mons
+Olympus Mons is 21.9 kilometers tall. [premise:7427a08624a566fe]
+That is about 13.6 miles. [finding:54b4302cc47ae5a6]
+It is likely about 600 kilometers wide. [premise:609d851934ab1416]
+One source suggests it is 25 kilometers tall. [premise:c90095b0d8378eb2]
+Mariner 9 discovered it before the Viking orbiters mapped it. [finding:0554b2e242e887d8]
+The sources disagree on its height. [narrative]
+--- end of answer ---
+Harness appendix — machine-generated metadata about the answer above; not part of the answer.
+
+Confidence (computed by the harness):
+- 5 claims: 2 high (conflicting sources) · 1 high · 1 low (conflicting sources; single source) · 1 low
+- "Olympus Mons is 21.9 kilometers tall." — high (conflicting sources) confidence
+- "That is about 13.6 miles." — high (conflicting sources) confidence
+- "One source suggests it is 25 kilometers tall." — low (conflicting sources; single source) confidence
+- "Mariner 9 discovered it before the Viking orbiters mapped it." — low confidence

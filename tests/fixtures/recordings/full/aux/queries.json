@@ -1,0 +1,28 @@
+{
+  "how tall is olympus mons": [
+    {
+      "title": "Olympus Mons facts",
+      "url": "https://geo.example.gov/olympus",
+      "snippet": "Olympus Mons facts"
+    },
+    {
+      "title": "Mars fan blog",
+      "url": "https://marsfan.blogspot.com/olympus",
+      "snippet": "Mars fan blog"
+    }
+  ],
+  "how wide is olympus mons": [
+    {
+      "title": "Mars wire story",
+      "url": "https://news.example.org/mars",
+      "snippet": "Mars wire story"
+    }
+  ],
+  "olympus mons height survey": [
+    {
+      "title": "Altimetry survey",
+      "url": "https://survey.example.gov/mars/olympus",
+      "snippet": "Altimetry survey"
+    }
+  ]
+}

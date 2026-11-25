@@ -1,0 +1,14 @@
+{
+  "recorded_at_commit": "366f1f6",
+  "sessions": [
+    "frozen-refresh-parent",
+    "frozen-refresh-parent-refresh-1"
+  ],
+  "status": {
+    "frozen-refresh-parent": "done",
+    "frozen-refresh-parent-refresh-1": "done"
+  },
+  "aux": {
+    "queries.json": "queries.json"
+  }
+}

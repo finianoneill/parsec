@@ -1,0 +1,1 @@
+{"content":[{"id":"tu_25","input":{"premises":[{"span_refs":["doc:e1560820786e#0-71"],"text":"Olympus Mons is about 600 kilometers wide."}]},"name":"record_premises","type":"tool_use"}],"id":"msg_fake_26","model":"fake-model","role":"assistant","stop_reason":"tool_use","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":100,"output_tokens":50}}

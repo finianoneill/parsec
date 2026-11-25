@@ -1,0 +1,4 @@
+{"created_seq":47,"dst_node_id":"sourcespan:52d914207c4998a1","edge_id":"f5593ddfaaa68f02","edge_type":"extracts","payload_json":{},"session_id":"20261125T213626-a113","src_node_id":"premise:d7aec1c1668f1b4b"}
+{"created_seq":50,"dst_node_id":"sourcespan:614b9e57ca7c987e","edge_id":"4a684b52dd6f3cb3","edge_type":"extracts","payload_json":{},"session_id":"20261125T213626-a113","src_node_id":"premise:edb11063dfbe5048"}
+{"created_seq":66,"dst_node_id":"premise:d7aec1c1668f1b4b","edge_id":"65e7f6e40bd8a559","edge_type":"aggregates","payload_json":{},"session_id":"20261125T213626-a113","src_node_id":"reportclaim:be92415a51e33395"}
+{"created_seq":68,"dst_node_id":"premise:edb11063dfbe5048","edge_id":"462e567211e8bbce","edge_type":"aggregates","payload_json":{},"session_id":"20261125T213626-a113","src_node_id":"reportclaim:1bf46864620477b2"}
