@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from parsec.store.blobs import BlobStore
 from parsec.verify.computations import UNVERIFIED, check_finding, evidence_text
 from parsec.verify.containment import check_containment, check_sentence, has_checkable_content
-from parsec.verify.dating import DATE_SOURCE_AS_OF, check_date_containment
+from parsec.verify.dating import DATE_SOURCE_AS_OF, check_date_containment, stated_years_text
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
 from parsec.verify.temporal import check_temporal_findings
@@ -395,7 +395,9 @@ def _check_observation_dates(
         observed = payload.get("observed_at", "")
         if span is None:
             continue  # already flagged by tier-integrity
-        period, _ = check_date_containment(observed, span["payload"].get("text", ""))
+        period, _ = check_date_containment(
+            observed, span["payload"].get("text", ""), allow_interval=True
+        )
         if period is None:
             report.violations.append(
                 Violation(
@@ -484,9 +486,22 @@ def _check_sentence_support(
     reader saw against the text of what it cites, from the graph alone."""
     out = _out_edges(edges)
 
+    def evidence(node_id: str) -> str:
+        # as the writer's check builds it: text, plus the years of any date
+        # the premise gave and its span states
+        years = stated_years_text(
+            [
+                json.loads(e["payload_json"] or "{}")
+                for e in out.get(node_id, [])
+                if e["edge_type"] == "extracts"
+            ]
+        )
+        text = evidence_text(nodes[node_id]["payload"])
+        return f"{text} {years}" if years else text
+
     def cited_texts(claim_id: str) -> list[str]:
         return [
-            evidence_text(nodes[e["dst_node_id"]]["payload"])
+            evidence(e["dst_node_id"])
             for e in out.get(claim_id, [])
             if e["edge_type"] == "aggregates" and e["dst_node_id"] in nodes
         ]

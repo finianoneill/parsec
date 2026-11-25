@@ -65,14 +65,24 @@ def _normalize_whitespace(text: str) -> str:
     return "\n\n".join(paragraphs)
 
 
+def _media_type(content_type: str | None) -> str:
+    """The bare media type: parameters (charset, profile, ...) dropped."""
+    return (content_type or "").split(";")[0].strip().lower()
+
+
+def _is_pdf(raw: bytes, media_type: str) -> bool:
+    # Sniff the magic bytes too: PDF endpoints often serve
+    # application/octet-stream.
+    return media_type == "application/pdf" or (
+        media_type in ("", "application/octet-stream") and raw[:5] == b"%PDF-"
+    )
+
+
 def extract_text(raw: bytes, content_type: str | None) -> tuple[str, str | None, str | None]:
     """Return (text, title, note)."""
-    ct = (content_type or "").split(";")[0].strip().lower()
-    # PDFs before any charset decoding — they are binary. Sniff the magic
-    # bytes too: PDF endpoints often serve application/octet-stream.
-    if ct == "application/pdf" or (
-        ct in ("", "application/octet-stream") and raw[:5] == b"%PDF-"
-    ):
+    ct = _media_type(content_type)
+    # PDFs before any charset decoding — they are binary.
+    if _is_pdf(raw, ct):
         return _extract_pdf(raw)
     charset = "utf-8"
     if content_type and "charset=" in content_type:
@@ -161,9 +171,11 @@ def extract_published(raw: bytes, content_type: str | None) -> str | None:
     date in the document info. Noisy by nature — template dates and "last
     updated" stamps exist — so it is only the fallback when a premise does
     not state a date its span supports."""
-    kind = (content_type or "").lower()
+    # The same classification extract_text uses, so the two can never read
+    # one response as different kinds of document.
+    kind = _media_type(content_type)
     try:
-        if "pdf" in kind or raw[:5] == b"%PDF-":
+        if _is_pdf(raw, kind):
             import io
 
             from pypdf import PdfReader
@@ -171,7 +183,9 @@ def extract_published(raw: bytes, content_type: str | None) -> str | None:
             created = PdfReader(io.BytesIO(raw)).metadata
             stamp = created.creation_date if created is not None else None
             return stamp.date().isoformat() if stamp is not None else None
-        if "html" in kind or raw.lstrip()[:1] == b"<":
+        if kind in ("text/html", "application/xhtml+xml") or (
+            not kind and raw.lstrip()[:1] == b"<"
+        ):
             import trafilatura
 
             meta = trafilatura.extract_metadata(raw.decode("utf-8", errors="replace"))

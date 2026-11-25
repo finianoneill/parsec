@@ -96,7 +96,7 @@ from parsec.verify.credence import (
     render_tier,
     source_tier,
 )
-from parsec.verify.dating import NOW
+from parsec.verify.dating import NOW, describe_interval, parse_interval, stated_dates
 from parsec.verify.nli import make_grounded_checker
 from parsec.verify.omission import OmissionReport, detect_omissions, extraction_note
 from parsec.verify.structural import verify_session
@@ -590,7 +590,7 @@ class OrchestratorLoop:
 
         outcome = await structured_call(
             complete,
-            [{"role": "user", "content": cfg.query}],
+            [{"role": "user", "content": prompts.decomposer_user_prompt(cfg, cfg.query)}],
             self._brief_model,
             "submit_subquestions",
             "Call submit_subquestions again with a corrected brief.",
@@ -637,7 +637,9 @@ class OrchestratorLoop:
         so gated sessions replay byte-identically."""
         cfg = self.config
         sid = cfg.session_id
-        messages: list[dict] = [{"role": "user", "content": cfg.query}]
+        messages: list[dict] = [
+            {"role": "user", "content": prompts.decomposer_user_prompt(cfg, cfg.query)}
+        ]
         for round_index in range(MAX_BRIEF_ROUNDS):
             self.event_log.append(
                 sid,
@@ -947,7 +949,8 @@ class OrchestratorLoop:
             {
                 "role": "user",
                 "content": prompts.subagent_user_prompt(
-                    sq.sq_id, sq.question, self.brief_scope, sq.target_time
+                    sq.sq_id, sq.question, self.brief_scope, sq.target_time,
+                    prompts.today_of(cfg),
                 ),
             }
         ]
@@ -1103,7 +1106,7 @@ class OrchestratorLoop:
         """One ladder rung (§7); returns (messages, evicted_result_count)."""
         cfg = self.config
         prompt = prompts.subagent_user_prompt(
-            sq.sq_id, sq.question, self.brief_scope, sq.target_time
+            sq.sq_id, sq.question, self.brief_scope, sq.target_time, prompts.today_of(cfg)
         )
         if rung == 1:
             return compaction.evict_tool_results(messages, cfg.evict_keep_last)
@@ -1425,7 +1428,9 @@ class OrchestratorLoop:
             for row in rows
             if row["node_id"] in credence.nodes
         }
-        self._writer_view = (premises, findings, sources, unresolved, confidence)
+        self._writer_view = (
+            premises, findings, sources, unresolved, confidence, self._premise_frames()
+        )
         messages: list[dict] = [self._writer_head()]
         # Proactive degradation (Phase 2): the writer prompt is rebuilt whole
         # from the DAG, so "too big" is knowable before asking — clip
@@ -1461,14 +1466,40 @@ class OrchestratorLoop:
         citation universe is unchanged (degrade, don't die)."""
         if self._writer_view is None:  # harness bug guard
             raise RuntimeError("writer head requested before the writer view was built")
-        premises, findings, sources, unresolved, confidence = self._writer_view
+        premises, findings, sources, unresolved, confidence, frames = self._writer_view
         return {
             "role": "user",
             "content": prompts.writer_user_prompt(
                 self.config.query, premises, findings, sources, unresolved, confidence,
+                frames=frames,
                 max_text_chars=self._WRITER_TEXT_CAPS[self._writer_level],
             ),
         }
+
+    def _premise_frames(self) -> dict[str, str]:
+        """recency >= 2: per premise, the time it is evidence for (when not
+        the present) and the dates its spans state for it — what the writer
+        needs to keep figures from different periods apart. Empty for
+        sessions that record neither, so their prompts are unchanged."""
+        if not self.dated:
+            return {}
+        sid = self.config.session_id
+        dates: dict[str, list[dict]] = {}
+        for e in self.dag.edges_for_session(sid):
+            if e["edge_type"] == "extracts":
+                dates.setdefault(e["src_node_id"], []).append(json.loads(e["payload_json"] or "{}"))
+        frames: dict[str, str] = {}
+        for row in self.dag.nodes_for_session(sid, tier=1):
+            notes: list[str] = []
+            target = parse_interval(json.loads(row["payload_json"]).get("target_time"))
+            if target is not None:
+                notes.append(f"time frame: {describe_interval(target)}")
+            stated = stated_dates(dates.get(row["node_id"], []))
+            if stated:
+                notes.append("observed: " + ", ".join(describe_interval(iv) for iv in stated))
+            if notes:
+                frames[row["node_id"]] = "; ".join(notes)
+        return frames
 
     def _writer_estimate(self, messages: list[dict]) -> int:
         # Fresh context each writer round — no prior-usage anchor to floor it.

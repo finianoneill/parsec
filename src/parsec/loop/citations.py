@@ -28,6 +28,7 @@ from parsec.ids import NODE_REF_RE
 from parsec.store.dag import DagStore
 from parsec.verify.computations import evidence_text
 from parsec.verify.containment import check_sentence, has_checkable_content
+from parsec.verify.dating import stated_years_text
 
 NARRATIVE_TAG = "[narrative]"
 # Appended to a sentence that failed the citation check and could not be
@@ -170,6 +171,19 @@ def check_citations(
     for tier in (1, 2):
         for row in dag.nodes_for_session(session_id, tier=tier):
             known[row["node_id"]] = evidence_text(json.loads(row["payload_json"]))
+    if sentence_check:
+        # A date a premise gave and its span states is evidence for the year:
+        # a sentence may say "in 2019" of a premise whose wording omits it.
+        stated: dict[str, list[dict]] = {}
+        for e in dag.edges_for_session(session_id):
+            if e["edge_type"] == "extracts" and e["src_node_id"] in known:
+                stated.setdefault(e["src_node_id"], []).append(
+                    json.loads(e["payload_json"] or "{}")
+                )
+        for premise_id, payloads in stated.items():
+            years = stated_years_text(payloads)
+            if years:
+                known[premise_id] = f"{known[premise_id]} {years}"
     # Evidence cited anywhere in the answer: what a heading may draw on.
     cited_anywhere = [
         known[ref] for seg in result.segments for ref in seg.refs if ref in known

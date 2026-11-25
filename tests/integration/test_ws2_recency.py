@@ -156,6 +156,21 @@ def test_one_observation_two_time_frames(harness):
         )
     assert "Time frame: the present" in first_prompts["sq-1"]
     assert "Time frame: 2019-01-01 to 2019-12-31" in first_prompts["sq-2"]
+    # every prompt that reasons about time is given the session's own date
+    today = f"Today's date: {SettableClock.today}"
+    assert all(today in first_prompts[stream] for stream in ("orchestrator", "sq-1", "sq-2"))
+    # and the writer can tell the two premises apart: same words, different time frame
+    writer_prompt = blobs.get_text(
+        json.loads(
+            conn.execute(
+                "SELECT payload_json FROM events WHERE session_id='s-paired'"
+                " AND event_type='llm_request' AND stream_id='orchestrator'"
+                " ORDER BY stream_idx DESC LIMIT 1"
+            ).fetchone()["payload_json"]
+        )["request_blob"]
+    )
+    assert "time frame: 2019; observed: 2019" in writer_prompt
+    assert writer_prompt.count("observed: 2019") == 2 and writer_prompt.count("time frame:") == 1
 
     assert cli.main(["verify", "s-paired", "--data-dir", str(harness["data_dir"])]) == 0
     replay = asyncio.run(run_replay(conn, blobs, RealClock(), "s-paired"))

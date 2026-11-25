@@ -457,3 +457,220 @@ def test_publication_date_is_read_from_the_document():
     assert extract_published(html, "text/html") == "2019-06-01"
     assert extract_published(b"Plain text carries no publication date.", "text/plain") is None
     assert extract_published(b"%PDF-1.4 not really a pdf", "application/pdf") is None  # best effort
+
+
+# -- review findings ----------------------------------------------------------
+
+
+def test_a_malformed_explicit_interval_is_not_half_accepted():
+    assert parse_period("2024-02-30/2024-03-01") is None  # not "March 1"
+    assert normalize_target("2024-02-30/2024-03-01") is None
+    assert parse_period("2024-02-01/2024-03-01") == (date(2024, 2, 1), date(2024, 3, 1))
+    assert parse_period("2024-03-01/2024-02-01") is None  # backwards
+    assert parse_period("in 2019") == (date(2019, 1, 1), date(2019, 12, 31))
+
+
+def test_a_stored_date_of_the_wrong_type_is_none_not_a_crash():
+    for bad in (2026, None, ["2019"], {"from": "2019"}, 20.19):
+        assert parse_interval(bad) is None
+        assert parse_period(bad) is None
+        assert check_date_containment(bad, "In 2026.")[0] is None
+
+
+def test_scoring_and_verify_survive_a_damaged_date_on_an_edge(dag, db, config, tmp_path):
+    sid = config.session_id
+    span = _span(dag, sid, "https://unranked.example/a", "The price was 10 dollars in 2026.")
+    premise = dag.add_node(
+        sid, "Premise", {"text": "The price was 10 dollars.", "span_refs": [span[1]], "claim_class": "volatile"}
+    )
+    dag.add_edge(sid, premise, span[0], "extracts", {"date_source": "as_of", "observed_at": 2026})
+
+    node = _score(db, sid).nodes[premise]
+    assert node.undated and node.credence == pytest.approx(0.6 * 0.85 * 0.8)
+    report = verify_session(db, BlobStore(tmp_path / "blobs"), sid, recency=2)
+    assert [v.check for v in report.violations if v.check == "observation-date"] == ["observation-date"]
+
+
+def test_a_model_may_not_date_a_fact_with_a_range(intake):
+    """An interval wide enough encloses any date a span states, and would
+    overlap "now" forever: a 2019 fact that never ages."""
+    span = "The plan cost 10 dollars on 2019-03-05."
+    assert check_date_containment("1900-01-01/2099-12-31", span)[0] is None
+    assert "not a date" in check_date_containment("1900-01-01/2099-12-31", span)[1]
+    assert check_date_containment("2019", span)[0] is not None  # a coarse date is still fine
+    # ...while the harness can still re-check an interval it stored itself
+    assert check_date_containment("2019-01-01/2019-12-31", span, allow_interval=True)[0] is not None
+
+
+async def test_intake_rejects_a_range_as_as_of(intake):
+    record, _, dag, spans, config = intake
+    results = await record(
+        {"text": "The plan cost 10 dollars in 2019.", "span_refs": [spans[BOTH_YEARS]],
+         "as_of": "1900-01-01/2099-12-31"}
+    )
+    assert "not a date the harness can read" in results[0]["error"]
+    assert dag.nodes_for_session(config.session_id, tier=1) == []
+
+
+async def test_re_recording_with_a_date_fills_in_an_undated_edge(intake, event_log):
+    record, edges, _, spans, config = intake
+    draft = {"text": "The plan costs 12 dollars in 2026.", "span_refs": [spans[BOTH_YEARS]]}
+    first = (await record(draft))[0]
+    assert edges(first["premise_id"]) == [{"date_source": "unknown"}]
+
+    def updates() -> list[dict]:
+        return [
+            ev.payload["payload"]
+            for ev in event_log.read(config.session_id)
+            if ev.event_type == EventType.EDGE_UPDATED
+        ]
+
+    again = (await record({**draft, "as_of": "2026"}))[0]
+    assert again["duplicate"] and again["premise_id"] == first["premise_id"]
+    dated = {"observed_at": "2026-01-01/2026-12-31", "date_source": "as_of"}
+    assert edges(first["premise_id"]) == [dated]
+    assert updates() == [dated]  # journaled, so a replay makes the same change
+
+    await record({**draft, "as_of": "2026"})        # an exact retry changes nothing
+    await record({**draft, "as_of": "2019"})        # a stated date is never overwritten
+    assert edges(first["premise_id"]) == [dated] and len(updates()) == 1
+
+
+async def test_a_page_archived_before_dates_were_extracted_is_dated_from_its_bytes(
+    db, blobs, event_log, ledger, sessions, config, clock
+):
+    """A cache hit never re-extracts, and re-fetching identical bytes does
+    not rewrite the stored row — so the date comes from the archived page."""
+    config = config.model_copy(update={**CURRENT_BEHAVIOUR, "as_of_ts": AS_OF})
+    sessions.create(config)
+    documents, spans, dag = DocumentStore(db, clock), SpanStore(db), DagStore(db, event_log)
+    text = "The plan includes support for the whole year, the company said."
+    raw = (
+        '<html><head><meta property="article:published_time" content="2019-06-01T10:00:00Z">'
+        f"</head><body><article><p>{text}</p></article></body></html>"
+    ).encode()
+
+    def archive(extractor_version: str, url: str, body: bytes) -> str:
+        doc_hash = ids.doc_hash(body)
+        blobs.put(body)
+        documents.put_document(
+            doc_hash, url, "text/html", 200, len(body), blobs.put(text),
+            {"title": "T", "extractor_version": extractor_version},  # no "published"
+        )
+        span_id = ids.span_id(doc_hash, 0, len(text))
+        spans.put_spans(doc_hash, [(span_id, 0, len(text), text)])
+        return span_id
+
+    old_span = archive("3", "https://a.example/old", raw)
+    # a row written by the CURRENT extractor that found no date is trusted as dateless
+    new_span = archive("4", "https://a.example/new", raw + b"<!-- other bytes -->")
+
+    registry = ToolRegistry([RecordPremisesTool(dag, spans, documents)])
+    ctx = ToolContext(db, blobs, event_log, ledger, config, clock)
+    for span_id in (old_span, new_span):
+        await registry.dispatch(
+            ToolIntent(tool_use_id="tu", tool_name="record_premises", input={"premises": [
+                {"text": "The plan includes support.", "span_refs": [span_id], "claim_class": "slow"}
+            ]}),
+            ctx,
+        )
+    payloads = [
+        json.loads(e["payload_json"]) for e in dag.edges_for_session(config.session_id)
+    ]
+    assert payloads == [
+        {"observed_at": "2019-06-01/2019-06-01", "date_source": "published"},
+        {"date_source": "unknown"},
+    ]
+    # the stored row itself is untouched: older recordings see what they saw
+    stored = json.loads(db.execute("SELECT meta_json FROM documents WHERE url LIKE '%old'").fetchone()[0])
+    assert "published" not in stored
+
+
+def test_publication_date_uses_the_same_media_type_rules_as_text_extraction():
+    from parsec.retrieval.extract import extract_published
+
+    html = (
+        b'<html><head><meta property="article:published_time" content="2019-06-01T10:00:00Z">'
+        b"</head><body><article><p>The listed price was ten dollars for the basic plan, "
+        b"the company said in a statement.</p></article></body></html>"
+    )
+    # a parameter that merely mentions "pdf" must not send HTML to the PDF reader
+    assert extract_published(html, 'text/html; profile="https://example.org/pdf"') == "2019-06-01"
+    assert extract_published(html, "application/xhtml+xml; charset=utf-8") == "2019-06-01"
+    assert extract_published(html, "application/json") is None  # not a page
+
+
+def test_recency_2_requires_verbatim_premises():
+    with pytest.raises(ValueError, match=r"recency .* requires derivations >= 2"):
+        RunConfig(session_id="s", query="q", recency=2, derivations=1)
+    RunConfig(session_id="s", query="q", recency="2-dev", derivations="2-dev")
+    RunConfig(session_id="s", query="q")  # legacy pair is fine
+
+
+def test_now_and_the_day_it_resolves_to_are_one_time_frame(dag, db, config):
+    """Supersession compares resolved time frames, not the stored wording."""
+    sid = config.session_id
+    today = "2026-11-25/2026-11-25"  # exactly what "now" resolves to under AS_OF
+    old = _premise(
+        dag, sid, "The price is 10 dollars.",
+        [(_span(dag, sid, "https://a.example.gov/x"), "2026-06-01/2026-06-30")],
+    )  # target: now (absent)
+    new = _premise(
+        dag, sid, "The price is 12 dollars.",
+        [(_span(dag, sid, "https://b.example.gov/y"), today)], target=today,
+    )
+    dag.add_edge(sid, new, old, "contradicts", {"note": "moved"})
+    report = _score(db, sid)
+    assert report.nodes[old].superseded_by == new
+
+
+def test_prompts_carry_the_sessions_reference_date():
+    """The model resolves "now" and "last year" against the day credence is
+    scored against, not its own idea of the date."""
+    legacy = RunConfig(session_id="s", query="q", **LEGACY_BEHAVIOUR, as_of_ts=AS_OF)
+    current = legacy.model_copy(update=CURRENT_BEHAVIOUR)
+    assert prompts.today_of(current) == "2026-11-25" and prompts.today_of(legacy) is None
+    assert prompts.decomposer_user_prompt(legacy, "last year's revenue") == "last year's revenue"
+    assert prompts.decomposer_user_prompt(current, "last year's revenue") == (
+        "last year's revenue\n\nToday's date: 2026-11-25"
+    )
+    request = prompts.build_decomposer_request(current, "last year's revenue")
+    assert "Today's date: 2026-11-25" in str(request.messages)
+    assert prompts.subagent_user_prompt("sq-1", "price?", "", "now", "2026-11-25") == (
+        "Subquestion sq-1: price?\nTime frame: the present — what is true now\n"
+        "Today's date: 2026-11-25"
+    )
+
+
+def test_the_writer_is_shown_each_premises_time_frame():
+    row = {"node_id": "premise:abc", "payload_json": json.dumps({"text": "The price was 10 dollars."})}
+    plain = prompts.writer_user_prompt("q?", [row], [], {}, [])
+    assert plain.splitlines()[-1] == "[premise:abc] The price was 10 dollars."
+    noted = prompts.writer_user_prompt(
+        "q?", [row], [], {}, [], frames={"premise:abc": "time frame: 2019; observed: 2019"}
+    )
+    assert noted.splitlines()[-1] == (
+        "[premise:abc] The price was 10 dollars. (time frame: 2019; observed: 2019)"
+    )
+
+
+def test_a_sentence_may_state_the_year_a_premises_span_was_checked_to_state(dag, db, config, tmp_path):
+    from parsec.loop.citations import check_citations, write_claims
+
+    sid = config.session_id
+    span = _span(dag, sid, "https://unranked.example/a", "In 2019 the price was 10 dollars.")
+    dated = _premise(dag, sid, "The price was 10 dollars.", [(span, Y2019)])
+    undated = _premise(dag, sid, "The fee was 10 dollars.", [(span, None)])
+
+    ok = check_citations(f"In 2019 the price was 10 dollars. [{dated}]", sid, dag, sentence_check=True)
+    assert ok.ok
+    # no checked date behind this premise: the year has nothing to rest on
+    bad = check_citations(f"In 2019 the fee was 10 dollars. [{undated}]", sid, dag, sentence_check=True)
+    assert not bad.ok and "'2019'" in bad.problems[0]
+
+    # and `parsec verify` reaches the same two verdicts from the stored graph
+    write_claims(sid, ok, dag, sentence_check=True)
+    write_claims(sid, bad, dag, sentence_check=True)
+    report = verify_session(db, BlobStore(tmp_path / "blobs"), sid, sentence_check=True)
+    found = [v.detail for v in report.violations if v.check == "sentence-support"]
+    assert len(found) == 1 and "fee" in found[0]

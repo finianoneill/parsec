@@ -61,6 +61,24 @@ class DagStore:
         )
         return edge_id
 
+    def update_edge_payload(
+        self, session_id: str, src_node_id: str, dst_node_id: str, edge_type: str, payload: dict
+    ) -> None:
+        """Replace an existing edge's payload, journaled as EDGE_UPDATED so
+        the change is part of the recorded trajectory and replays."""
+        edge_id = ids.edge_id(src_node_id, dst_node_id, edge_type)
+        self.event_log.append(
+            session_id,
+            "harness",
+            EventType.EDGE_UPDATED,
+            {"edge_id": edge_id, "src": src_node_id, "dst": dst_node_id,
+             "edge_type": edge_type, "payload": payload},
+        )
+        self.conn.execute(
+            "UPDATE edges SET payload_json=? WHERE session_id=? AND edge_id=?",
+            (canonical_json(payload), session_id, edge_id),
+        )
+
     def delete_claims(self, session_id: str) -> None:
         """Supersede a rewrite round's ReportClaims (gap-fill loop). The
         node_added/edge_added events stay in the log as the audit trail."""

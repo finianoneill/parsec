@@ -69,9 +69,14 @@ def format_interval(interval: Interval) -> str:
     return f"{interval[0].isoformat()}/{interval[1].isoformat()}"
 
 
-def parse_interval(stored: str | None) -> Interval | None:
-    """Inverse of format_interval (the form stored on edges and premises)."""
-    m = _STORED_RE.fullmatch(stored or "")
+def parse_interval(stored: object) -> Interval | None:
+    """Inverse of format_interval (the form stored on edges and premises).
+    Anything that is not a well-formed interval string — including a stored
+    value of the wrong JSON type — is None, never an exception: a damaged
+    edge must be reportable, not a crash."""
+    if not isinstance(stored, str):
+        return None
+    m = _STORED_RE.fullmatch(stored.strip())
     if not m:
         return None
     try:
@@ -81,14 +86,23 @@ def parse_interval(stored: str | None) -> Interval | None:
     return (lo, hi) if lo <= hi else None
 
 
-def parse_period(text: str | None) -> Interval | None:
+# The explicit interval SHAPE, whether or not its dates are real.
+_INTERVAL_SHAPE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s*/\s*\d{4}-\d{2}-\d{2}")
+
+
+def parse_period(text: object, allow_interval: bool = True) -> Interval | None:
     """One date expression as an interval, or None if the text does not hold
-    exactly one."""
-    if not text:
+    exactly one.
+
+    Text written as an explicit "from/to" interval is parsed strictly: a bad
+    endpoint ("2024-02-30/2024-03-01") is None, not whichever half happens
+    to be a real date. allow_interval=False refuses that form altogether —
+    for dates a model supplies, where an interval is a way to claim an
+    arbitrarily wide span ("1900-01-01/2099-12-31") that any date satisfies."""
+    if not isinstance(text, str) or not text.strip():
         return None
-    stored = parse_interval(text.strip())
-    if stored is not None:
-        return stored
+    if _INTERVAL_SHAPE_RE.fullmatch(text.strip()):
+        return parse_interval(text.strip().replace(" ", "")) if allow_interval else None
     found = text_intervals(text)
     return found[0] if len(found) == 1 else None
 
@@ -102,13 +116,19 @@ def normalize_target(text: str | None) -> str | None:
     return format_interval(period) if period is not None else None
 
 
-def check_date_containment(as_of: str, span_text: str) -> tuple[Interval | None, str | None]:
+def check_date_containment(
+    as_of: object, span_text: str, allow_interval: bool = False
+) -> tuple[Interval | None, str | None]:
     """(interval, problem). An `as_of` is accepted only if the span states
     that date at least as precisely: "2019" is supported by a span saying
     "March 2019"; "March 2019" is not supported by a span saying only "2019".
     Same floor as numbers and quotes: the model may not date a fact with a
-    date the source does not give."""
-    period = parse_period(as_of)
+    date the source does not give.
+
+    A date from a model is one calendar expression — a year, a month, a
+    quarter or a day. allow_interval=True is for re-checking a date the
+    harness itself stored, which is in interval form."""
+    period = parse_period(as_of, allow_interval=allow_interval)
     if period is None:
         return None, (
             f"as_of {as_of!r} is not a date the harness can read; use a year (2019), a month "
@@ -148,3 +168,36 @@ def gap_days(observed: Interval, target: Interval) -> int:
     if target[1] < observed[0]:
         return (observed[0] - target[1]).days
     return 0
+
+
+def describe_interval(interval: Interval) -> str:
+    """An interval the way a person would say it: "2019", a single day, or
+    "from to"."""
+    lo, hi = interval
+    if lo == hi:
+        return lo.isoformat()
+    if (lo.month, lo.day, hi.month, hi.day) == (1, 1, 12, 31) and lo.year == hi.year:
+        return str(lo.year)
+    return f"{lo.isoformat()} to {hi.isoformat()}"
+
+
+def stated_dates(edge_payloads: list[dict]) -> list[Interval]:
+    """The observation dates a premise GAVE and its spans state (as_of), in
+    order, without repeats. Publication dates are excluded: they date the
+    document, and nothing checked them against the text."""
+    seen: list[Interval] = []
+    for payload in edge_payloads:
+        if payload.get("date_source") != DATE_SOURCE_AS_OF:
+            continue
+        interval = parse_interval(payload.get("observed_at"))
+        if interval is not None and interval not in seen:
+            seen.append(interval)
+    return sorted(seen)
+
+
+def stated_years_text(edge_payloads: list[dict]) -> str:
+    """The years of a premise's stated dates, as text the sentence check can
+    read as evidence: a sentence may say "in 2019" of a premise whose span
+    was checked to say so, even when the premise's own wording omits it."""
+    years = sorted({str(d.year) for iv in stated_dates(edge_payloads) for d in iv})
+    return " ".join(years)

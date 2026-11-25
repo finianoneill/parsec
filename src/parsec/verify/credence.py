@@ -301,7 +301,10 @@ def compute_credences(
     # premise -> (claim_class, newest evidence ts): supersession inputs
     premise_class: dict[str, str] = {}
     premise_ts: dict[str, datetime | None] = {}
-    premise_target: dict[str, str] = {}  # recency >= 2: what time each is evidence for
+    # recency >= 2: the RESOLVED time each premise is evidence for. Intervals,
+    # not the stored selector: "now" and the explicit day it resolves to are
+    # the same time frame and must compare equal.
+    premise_target: dict[str, Interval | None] = {}
 
     by_tier: dict[int, list[str]] = {}
     for nid in sorted(nodes, key=lambda n: (nodes[n]["tier"], n)):
@@ -327,7 +330,7 @@ def compute_credences(
                 )
                 premise_class[nid] = node["payload"].get("claim_class", "stable")
                 premise_ts[nid] = newest
-                premise_target[nid] = target_time
+                premise_target[nid] = target
             elif node["type"] == "Premise":
                 report.nodes[nid] = _premise_credence(
                     nid, node, out_edges, span_meta, corpus_dt,
@@ -626,7 +629,7 @@ def _resolve_conflicts(
     report: CredenceReport,
     premise_class: dict[str, str],
     premise_ts: dict,
-    premise_target: dict[str, str] | None = None,
+    premise_target: dict[str, Interval | None] | None = None,
 ) -> None:
     """Apply contradicts edges whose higher endpoint lives at this tier, so
     both sides have base values. Supersession first (mutable + dated evidence:
@@ -690,7 +693,7 @@ def _supersession(
     b: str,
     premise_class: dict[str, str],
     premise_ts: dict,
-    premise_target: dict[str, str] | None = None,
+    premise_target: dict[str, Interval | None] | None = None,
 ) -> tuple[str, str] | None:
     """(winner, loser) when newer evidence supersedes older on a mutable
     claim (M10): both endpoints are premises with dated evidence, the dates
