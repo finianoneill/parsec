@@ -132,7 +132,7 @@ def test_lock_backend_covers_windows_and_refuses_unlocked_writes(tmp_path, monke
 
     class FakeMsvcrt:
         LK_NBLCK, LK_UNLCK = 2, 0
-        failures = [OSError(errno.EACCES, "locked by another process")]
+        failures = [OSError(errno.EACCES, "locked by another process")]  # noqa: RUF012
 
         @staticmethod
         def locking(fd, mode, nbytes):

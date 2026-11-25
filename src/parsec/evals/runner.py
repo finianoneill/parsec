@@ -10,9 +10,9 @@ measurable difference (T4).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from parsec.config import Budgets, CacheMode, Clock, RunConfig
 from parsec.evals.case import FIXTURES_FILE, EvalCase, copy_corpus, load_case
@@ -113,9 +113,9 @@ class EvalRun:
         agg: dict[str, float | None] = {}
         for axis in self.axes():
             values = [
-                r.scores.values[axis]
+                v
                 for r in self.results
-                if r.scores.values.get(axis) is not None
+                if (v := r.scores.values.get(axis)) is not None
             ]
             agg[axis] = round(sum(values) / len(values), 4) if values else None
         return agg
@@ -214,7 +214,7 @@ async def _run_once(
             FetchTool(fetcher, spans),
             RecordPremisesTool(dag, spans, documents),
             SearchWithinTool(spans, EmbeddingCache(conn, HashedNgramEmbedder())),
-            SearchBroadTool(FixtureSearchProvider(config.search_fixtures)),
+            SearchBroadTool(FixtureSearchProvider(case_dir / FIXTURES_FILE)),
         ]
     )
     ctx = ToolContext(conn, blobs, event_log, ledger, config, clock)

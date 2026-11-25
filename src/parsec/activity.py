@@ -70,7 +70,7 @@ class ActivityView:
             get_renderable=self._render, console=console, refresh_per_second=8, transient=True
         )
 
-    def __enter__(self) -> "ActivityView":
+    def __enter__(self) -> ActivityView:
         self._live.start()
         return self
 

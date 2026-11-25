@@ -27,7 +27,10 @@ class SpanStore:
                 )
 
     def get(self, span_id: str) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM spans WHERE span_id=?", (span_id,)).fetchone()
+        row: sqlite3.Row | None = self.conn.execute(
+            "SELECT * FROM spans WHERE span_id=?", (span_id,)
+        ).fetchone()
+        return row
 
     def for_doc(self, doc_hash: str) -> list[sqlite3.Row]:
         return self.conn.execute(

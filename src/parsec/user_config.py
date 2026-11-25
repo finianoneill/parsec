@@ -64,7 +64,7 @@ def load_user_config(
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise SystemExit(f"{path}: invalid JSON ({exc})")
+            raise SystemExit(f"{path}: invalid JSON ({exc})") from exc
         if not isinstance(raw, dict):
             raise SystemExit(f"{path}: expected a JSON object")
         unknown = sorted(set(raw) - _ALLOWED)

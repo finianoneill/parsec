@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -43,9 +43,9 @@ def format_validation_errors(exc: ValidationError) -> list[str]:
     return lines
 
 
-def validate_tool_call(
-    resp: ModelResponse, tool_name: str, model_cls: type[BaseModel]
-) -> tuple[BaseModel | None, dict | None, list[str]]:
+def validate_tool_call[T: BaseModel](
+    resp: ModelResponse, tool_name: str, model_cls: type[T]
+) -> tuple[T | None, dict | None, list[str]]:
     """Find and validate the named tool call in a response.
 
     Returns (instance, tool_use_block, problems): instance is None when the
@@ -91,21 +91,21 @@ def repair_turn(
 
 
 @dataclass
-class StructuredOutcome:
-    value: BaseModel | None
+class StructuredOutcome[T: BaseModel]:
+    value: T | None
     resp: ModelResponse  # the last response (callers may need its transcript)
     problems: list[str]  # empty on success
     repairs: int
 
 
-async def structured_call(
+async def structured_call[T: BaseModel](
     complete: Callable[[list[dict], dict | None], Awaitable[ModelResponse]],
     messages: list[dict],
-    model_cls: type[BaseModel],
+    model_cls: type[T],
     tool_name: str,
     repair_instruction: str,
     max_repairs: int = 1,
-) -> StructuredOutcome:
+) -> StructuredOutcome[T]:
     """Call, validate, repair: per-field errors go back as a tool error and
     the retry pins tool_choice to the expected tool. `complete` is the
     caller's own gateway closure (it owns turn counting and request
@@ -159,9 +159,9 @@ class BriefSubmission(BaseModel):
 # -- prose-JSON structured replies (the judge channel) -----------------------
 
 
-def parse_prose_json(
-    text: str, model_cls: type[BaseModel]
-) -> tuple[BaseModel | None, list[str]]:
+def parse_prose_json[T: BaseModel](
+    text: str, model_cls: type[T]
+) -> tuple[T | None, list[str]]:
     """Validate the first JSON object embedded in a prose reply."""
     m = _JSON_RE.search(text)
     if not m:
@@ -176,12 +176,12 @@ def parse_prose_json(
         return None, format_validation_errors(exc)
 
 
-async def judged_json(
+async def judged_json[T: BaseModel](
     adapter,
     request: ModelRequest,
-    model_cls: type[BaseModel],
+    model_cls: type[T],
     retry_instruction: str,
-) -> BaseModel | None:
+) -> T | None:
     """One validated prose-JSON exchange with a single corrective retry.
     Judge channels are advisory by contract: any failure — malformed reply
     after retry, network error — degrades to None, never raises."""
@@ -195,18 +195,7 @@ async def judged_json(
             max_tokens=request.max_tokens,
             system=request.system,
             tools=request.tools,
-            messages=request.messages
-            + [
-                {"role": "assistant", "content": [{"type": "text", "text": resp.text}]},
-                {
-                    "role": "user",
-                    "content": (
-                        "Your previous reply was invalid:\n"
-                        + "\n".join(f"- {p}" for p in problems)
-                        + f"\n{retry_instruction}"
-                    ),
-                },
-            ],
+            messages=[*request.messages, {"role": "assistant", "content": [{"type": "text", "text": resp.text}]}, {"role": "user", "content": "Your previous reply was invalid:\n" + "\n".join(f"- {p}" for p in problems) + f"\n{retry_instruction}"}],
         )
         value, _ = parse_prose_json((await adapter.complete(retry)).text, model_cls)
         return value

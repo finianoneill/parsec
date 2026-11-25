@@ -21,7 +21,7 @@ span counts are tiny and exactness beats speed here.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from parsec.retrieval.embeddings import cosine
 

@@ -1,3 +1,5 @@
+import itertools
+
 from parsec.retrieval.span_indexer import MAX_CHARS, MIN_CHARS, index_spans
 
 
@@ -28,7 +30,7 @@ def test_oversize_split():
     assert len(spans) > 1
     assert all((e - s) <= MAX_CHARS for s, e in spans)
     # spans tile the paragraph without gaps
-    for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+    for (_s1, e1), (s2, _e2) in itertools.pairwise(spans):
         assert e1 == s2
 
 

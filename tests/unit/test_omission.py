@@ -62,7 +62,7 @@ def test_all_used_is_empty(setup, db, event_log):
 
 
 def test_duplicate_fetches_reported_once(setup, db, event_log):
-    dag, sid, fetched = setup
+    _dag, sid, fetched = setup
     h = "c" * 64
     fetched(h, "https://ignored.example/page")
     fetched(h, "https://ignored.example/page")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from parsec.config import Budgets
 from parsec.gateway.fake_adapter import FakeAdapter, scripted_response
 from parsec.gateway.gateway import ModelGateway
@@ -80,7 +79,7 @@ async def test_token_budget_blocks_remaining_subquestions(tmp_path, db, blobs, e
     assert result.turns == 2  # decomposer + writer
     assert result.coverage == {"sq-1": "blocked", "sq-2": "blocked"}
     rows = CoverageLedger(db, event_log).all("s-tokens")
-    assert all("token budget (200000) exhausted before dispatch" == r["reason"] for r in rows)
+    assert all(r["reason"] == "token budget (200000) exhausted before dispatch" for r in rows)
 
 
 async def test_invalid_decomposition_falls_back_to_whole_query(tmp_path, db, blobs, event_log, ledger, sessions, clock):
@@ -130,7 +129,7 @@ async def test_writer_sees_only_query_evidence_and_gaps(tmp_path, db, blobs, eve
     result = await loop.run()
     assert result.coverage == {"sq-1": "blocked"}
 
-    decomposer_req, subagent_req, writer_req = seen_requests
+    decomposer_req, _subagent_req, writer_req = seen_requests
     assert decomposer_req.system[0]["text"] == DECOMPOSER_SYSTEM
     assert decomposer_req.messages == [{"role": "user", "content": "test query"}]
 

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 Verdict = Literal["supported", "uncertain", "unsupported", "contradicted"]
 
@@ -41,8 +41,7 @@ UNCERTAIN_MIN = 0.4
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS = frozenset(
-    "a an and are as at be by for from had has have in is it its of on or "
-    "that the this to was were will with".split()
+    ["a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "had", "has", "have", "in", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were", "will", "with"]
 )
 # Negators are handled by the parity check, never counted as content.
 _NEGATORS = frozenset({"not", "no", "never", "none", "cannot", "nor", "without"})
@@ -145,7 +144,7 @@ class HHEMChecker:
         self._model = None
         self._lexical = LexicalGroundedChecker()
 
-    def _load(self):
+    def _load(self) -> Any:
         if self._model is None:
             try:
                 from transformers import AutoModelForSequenceClassification

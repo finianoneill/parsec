@@ -185,7 +185,7 @@ def build_decomposer_request(
 def build_subagent_request(
     config: RunConfig, tools: list[dict], messages: list[dict]
 ) -> ModelRequest:
-    tools, messages = apply_cache_strategy(config, tools + [submit_report_schema()], messages)
+    tools, messages = apply_cache_strategy(config, [*tools, submit_report_schema()], messages)
     return ModelRequest(
         model=config.model,
         max_tokens=config.max_tokens_per_call,

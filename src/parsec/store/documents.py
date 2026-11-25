@@ -41,22 +41,25 @@ class DocumentStore:
         )
 
     def get_document(self, doc_hash: str) -> sqlite3.Row | None:
-        return self.conn.execute(
+        row: sqlite3.Row | None = self.conn.execute(
             "SELECT * FROM documents WHERE doc_hash=?", (doc_hash,)
         ).fetchone()
+        return row
 
     def get_document_by_prefix(self, hash12: str) -> sqlite3.Row | None:
-        return self.conn.execute(
+        row: sqlite3.Row | None = self.conn.execute(
             "SELECT * FROM documents WHERE doc_hash LIKE ? || '%'", (hash12,)
         ).fetchone()
+        return row
 
     def cache_lookup(self, cache_key: str) -> sqlite3.Row | None:
-        return self.conn.execute(
+        row: sqlite3.Row | None = self.conn.execute(
             "SELECT ci.*, d.content_type, d.status_code, d.text_blob, d.meta_json"
             " FROM cache_index ci JOIN documents d ON d.doc_hash = ci.doc_hash"
             " WHERE ci.cache_key=?",
             (cache_key,),
         ).fetchone()
+        return row
 
     def cache_put(self, cache_key: str, url: str, doc_hash: str, mode: str) -> None:
         self.conn.execute(

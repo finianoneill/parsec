@@ -22,10 +22,10 @@ from rich.text import Text
 
 from parsec.awake import keep_awake
 from parsec.config import (
+    DEFAULT_MODEL,
     Budgets,
     CacheMode,
     Clock,
-    DEFAULT_MODEL,
     ModelRetry,
     RealClock,
     RunConfig,
@@ -824,6 +824,9 @@ def cmd_verify(args) -> int:
         volatile_half_life_days=session_config.volatile_half_life_days,
         slow_half_life_days=session_config.slow_half_life_days,
         learned_reliability=session_config.learned_reliability,
+        # Read-only: verify inspects a recording, it must never rewrite the
+        # credences the run itself persisted (calibration labels read them).
+        persist=False,
     )
     omissions = detect_omissions(conn, EventLog(conn, clock), args.session_id)
     if args.as_json:
@@ -874,7 +877,7 @@ def cmd_diff(args) -> int:
     from parsec.verify.diff import diff_sessions
 
     clock = RealClock()
-    conn, blobs = _open(args.data_dir)
+    conn, _blobs = _open(args.data_dir)
     store = SessionStore(conn, clock)
     for sid in (args.session_a, args.session_b):
         if store.get(sid) is None:
@@ -1070,16 +1073,16 @@ def cmd_sessions(args) -> int:
     ledger = Ledger(conn, clock)
     if args.sessions_command == "list":
         table = Table("session", "status", "query", "usd", "tokens", "created")
-        for row in store.list():
-            totals = ledger.totals(row["session_id"])
+        for listed in store.list():
+            totals = ledger.totals(listed["session_id"])
             tokens = int(sum(totals.get(c, 0) for c in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")))
             table.add_row(
-                row["session_id"],
-                row["status"],
-                row["query"][:50],
+                listed["session_id"],
+                listed["status"],
+                listed["query"][:50],
                 f"{totals.get('usd', 0.0):.4f}",
                 str(tokens),
-                row["created_ts"],
+                listed["created_ts"],
             )
         console.print(table)
         return EXIT_OK
@@ -1151,7 +1154,7 @@ def cmd_judge(args) -> int:
     from parsec.verify.judge_pass import judge_pass
 
     clock = RealClock()
-    conn, blobs = _open(args.data_dir)
+    conn, _blobs = _open(args.data_dir)
     if SessionStore(conn, clock).get(args.session_id) is None:
         console.print(f"[red]unknown session {args.session_id}[/red]")
         return EXIT_USAGE
@@ -1271,11 +1274,11 @@ def _eval_compare(args) -> int:
         console.print(verdicts)
         if comparison.loss_deltas:
             losses = Table("loss pattern", "category", "before", "after", "Δ")
-            for d in comparison.loss_deltas:
-                color = "red" if d.delta > 0 else "green" if d.delta < 0 else "dim"
+            for ld in comparison.loss_deltas:
+                color = "red" if ld.delta > 0 else "green" if ld.delta < 0 else "dim"
                 losses.add_row(
-                    d.pattern, d.category, str(d.before), str(d.after),
-                    f"[{color}]{d.delta:+d}[/{color}]",
+                    ld.pattern, ld.category, str(ld.before), str(ld.after),
+                    f"[{color}]{ld.delta:+d}[/{color}]",
                 )
             console.print(losses)
         if comparison.only_in_a or comparison.only_in_b:
@@ -1427,7 +1430,7 @@ def cmd_calibrate(args) -> int:
 
 def cmd_notebook(args) -> int:
     clock = RealClock()
-    conn, blobs = _open(args.data_dir)
+    conn, _blobs = _open(args.data_dir)
     if SessionStore(conn, clock).get(args.session_id) is None:
         console.print(f"[red]unknown session {args.session_id}[/red]")
         return EXIT_USAGE
@@ -1437,13 +1440,16 @@ def cmd_notebook(args) -> int:
 
 
 def cmd_spans(args) -> int:
-    conn, blobs = _open(args.data_dir)
+    conn, _blobs = _open(args.data_dir)
     spans = SpanStore(conn)
     row = spans.get(args.span_id)
     if row is None:
         console.print(f"[red]unknown span {args.span_id}[/red]")
         return EXIT_USAGE
     doc = DocumentStore(conn, RealClock()).get_document(row["doc_hash"])
+    if doc is None:
+        console.print(f"[red]span {args.span_id} has no document row[/red]")
+        return EXIT_USAGE
     console.print(f"[bold]{args.span_id}[/bold] — {doc['url']} (fetched {doc['fetched_ts']})")
     console.print(row["text"])
     return EXIT_OK

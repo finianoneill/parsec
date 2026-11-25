@@ -70,7 +70,7 @@ class ReportClaimNode(_Node):
     narrative: bool = False
 
     @model_validator(mode="after")
-    def _non_narrative_needs_refs(self) -> "ReportClaimNode":
+    def _non_narrative_needs_refs(self) -> ReportClaimNode:
         if not self.narrative and not self.refs:
             raise ValueError("non-narrative ReportClaim requires at least one premise/finding ref")
         return self

@@ -9,6 +9,7 @@ sleep on request. Old recordings keep the behaviour they were recorded with.
 from __future__ import annotations
 
 import io
+from datetime import UTC
 
 from rich.console import Console
 
@@ -201,9 +202,9 @@ class _DriftClock:
         self.mono = 0.0
 
     def now_iso(self) -> str:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        return datetime.fromtimestamp(self.wall, tz=timezone.utc).isoformat(timespec="milliseconds")
+        return datetime.fromtimestamp(self.wall, tz=UTC).isoformat(timespec="milliseconds")
 
     def monotonic(self) -> float:
         return self.mono

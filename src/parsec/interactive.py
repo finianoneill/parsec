@@ -8,6 +8,7 @@ scripted one.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import sys
@@ -47,10 +48,8 @@ def _init_history() -> None:
         import readline
     except ImportError:
         return
-    try:
+    with contextlib.suppress(OSError):
         readline.read_history_file(HISTORY_FILE)
-    except OSError:
-        pass
     readline.set_history_length(1000)
 
 
@@ -154,7 +153,7 @@ def _repl(cli, console: Console, data_dir: Path, keyed: bool) -> int:
         except SystemExit as exc:  # argparse errors on bad slash-command args
             if exc.code not in (0, None):
                 console.print("[red]bad arguments[/red] — /help shows usage")
-        except Exception as exc:  # noqa: BLE001 — keep the shell alive
+        except Exception as exc:
             console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
 
 

@@ -29,16 +29,16 @@ QUERY = "at what temperature does water boil"
 SEARX_URL = "http://searx.local"
 
 PAGE = (
-    "<html><head><title>Boiling Point Reference</title></head><body>"
-    "<article><p>Water boils at 100 degrees Celsius at standard atmospheric pressure, "
-    "which is the pressure found at sea level. This value has served as a fixed "
-    "calibration point for thermometers for well over a century and remains the "
-    "reference taught in every introductory chemistry curriculum worldwide.</p>"
-    "<p>At higher altitudes the boiling point decreases measurably; on the summit of "
-    "Mount Everest water boils at only about 70 degrees Celsius, which slows cooking "
-    "and is a standard example of pressure dependence in phase transitions.</p></article>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Boiling Point Reference</title></head><body>"
+    b"<article><p>Water boils at 100 degrees Celsius at standard atmospheric pressure, "
+    b"which is the pressure found at sea level. This value has served as a fixed "
+    b"calibration point for thermometers for well over a century and remains the "
+    b"reference taught in every introductory chemistry curriculum worldwide.</p>"
+    b"<p>At higher altitudes the boiling point decreases measurably; on the summit of "
+    b"Mount Everest water boils at only about 70 degrees Celsius, which slows cooking "
+    b"and is a standard example of pressure dependence in phase transitions.</p></article>"
+    b"</body></html>"
+)
 
 PAGE_URL = "https://example.test/boiling"
 BLOCKED_URL = "https://example.test/blocked/secret"

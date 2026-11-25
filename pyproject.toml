@@ -31,8 +31,12 @@ parsec = "parsec.cli:main"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.17",
+    "mypy==2.4.1",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "pytest-randomly>=5.1.0",
+    "ruff==0.17.6",
 ]
 
 [build-system]
@@ -49,3 +53,37 @@ markers = [
     "live: tests that hit real network/API keys (deselected by default)",
 ]
 addopts = "-m 'not live'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    # No formatter is adopted yet and prompt text lives in long literals whose
+    # bytes feed replay hashes; line length is not enforced until one is.
+    "E501",
+    # En dashes, multiplication signs and box-drawing characters are deliberate.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# Optional `nli` extra: not installed in the default environment.
+module = ["transformers", "transformers.*", "torch", "torch.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["parsec.verify.*", "parsec.store.*", "parsec.gateway.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+# Next ratchet: disallow_any_generics (54 bare dict/list annotations here).

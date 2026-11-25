@@ -113,4 +113,5 @@ def extraction_note(conn: sqlite3.Connection, doc_hash: str) -> str | None:
     ).fetchone()
     if row is None:
         return None
-    return json.loads(row["meta_json"]).get("note")
+    note: str | None = json.loads(row["meta_json"]).get("note")
+    return note

@@ -62,7 +62,7 @@ class PlattScaling:
         return {"method": "platt", "a": round(self.a, 6), "b": round(self.b, 6), "n": self.n}
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "PlattScaling":
+    def from_payload(cls, payload: dict) -> PlattScaling:
         return cls(a=float(payload["a"]), b=float(payload["b"]), n=int(payload["n"]))
 
 
@@ -152,7 +152,7 @@ def tier_ranges(scaling: PlattScaling) -> dict[str, tuple[int, int]]:
     out = {}
     for tier, (lo, hi) in bands.items():
         a, b = scaling.apply(lo), scaling.apply(hi)
-        out[tier] = (int(round(min(a, b) * 100)), int(round(max(a, b) * 100)))
+        out[tier] = (round(min(a, b) * 100), round(max(a, b) * 100))
     return out
 
 

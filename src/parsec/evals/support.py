@@ -27,7 +27,7 @@ Grade = Literal["full", "partial", "none"]
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS = frozenset(
-    "a an and are as at be by for from has have in is it its of on or that the this to was were with".split()
+    ["a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with"]
 )
 OVERLAP_FULL = 0.5
 OVERLAP_PARTIAL = 0.2

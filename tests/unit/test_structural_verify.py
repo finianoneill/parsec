@@ -114,7 +114,7 @@ def test_containment_recheck_flags_bad_premise(graph, db, blobs, event_log, conf
 
 
 def test_illegal_edge_type_combo_flagged(graph, db, blobs):
-    sid, dag, span_node, premise, claim = graph[:5]
+    sid, dag, span_node, _premise, claim = graph[:5]
     dag.add_edge(sid, claim, span_node, "extracts")  # claims may not extract directly (M2+)
     report = verify_session(db, blobs, sid)
     assert any(

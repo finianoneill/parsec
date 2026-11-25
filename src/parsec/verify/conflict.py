@@ -17,8 +17,7 @@ import re
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _STOPWORDS = frozenset(
-    "a an and are as at be by for from had has have in is it its of on or "
-    "that the this to was were will with".split()
+    ["a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "had", "has", "have", "in", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were", "will", "with"]
 )
 _MAX_TERMS = 8
 
@@ -34,7 +33,7 @@ def negation_query(claim_text: str) -> str:
         seen.append(lower)
         if len(seen) >= _MAX_TERMS:
             break
-    return " ".join(seen + ["wrong", "disputed", "contradicting evidence"])
+    return " ".join([*seen, "wrong", "disputed", "contradicting evidence"])
 
 
 def dual_perspective_question(claim_text: str) -> str:

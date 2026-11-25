@@ -32,6 +32,7 @@ from tests.conftest import make_config
 from tests.integration import m3_corpus
 from tests.integration.m14_corpus import SENT_A, SENT_B1, URL_A, URL_B, _parent_script
 
+
 @pytest.fixture
 def m3_transport(monkeypatch):
     """Mock HTTP for the M3 corpus through the CLI's transport seam; returns

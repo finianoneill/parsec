@@ -159,6 +159,8 @@ async def run_replay(
 
     orig_row = sessions.get(original_session_id)
     replay_row = sessions.get(replay_config.session_id)
+    if orig_row is None or replay_row is None:
+        raise KeyError(f"session row missing after replay of {original_session_id}")
     answers_match = (
         orig_row["answer_blob"] is not None
         and orig_row["answer_blob"] == replay_row["answer_blob"]
@@ -167,7 +169,7 @@ async def run_replay(
     first_divergence = None
     if not projections_match:
         for i, (a, b) in enumerate(
-            zip(proj_orig.decode().splitlines(), proj_replay.decode().splitlines())
+            zip(proj_orig.decode().splitlines(), proj_replay.decode().splitlines(), strict=False)
         ):
             if a != b:
                 first_divergence = f"line {i}:\n  original: {a[:300]}\n  replay:   {b[:300]}"

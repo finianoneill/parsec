@@ -38,9 +38,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable
 from urllib.parse import urlsplit
 
 from parsec.verify.syndication import cluster_spans
@@ -276,9 +276,12 @@ def compute_credences(
         )
 
     for nid, node in nodes.items():
-        if node["type"] == "ReportClaim" and not node["payload"].get("narrative"):
-            if report.nodes[nid].credence < stakes_threshold:
-                report.flagged_claims.append(nid)
+        if (
+            node["type"] == "ReportClaim"
+            and not node["payload"].get("narrative")
+            and report.nodes[nid].credence < stakes_threshold
+        ):
+            report.flagged_claims.append(nid)
     report.flagged_claims.sort()
 
     if persist:
@@ -309,7 +312,7 @@ def _premise_credence(
     volatile_penalty: float,
     volatile_half_life_days: float,
     slow_half_life_days: float,
-    embed,
+    embed: Callable[[list[str]], list[list[float]]],
 ) -> NodeCredence:
     """Noisy-OR over independent CONTENT clusters; mutability-classified decay."""
     spans = [
@@ -366,7 +369,7 @@ def _derived_credence(
         return NodeCredence(0.0, frozenset())
     if joint:
         # single derivation path: min of parents, one penalty application
-        raw_parents = [p / pen for p, pen in zip(paths, penalties)]
+        raw_parents = [p / pen for p, pen in zip(paths, penalties, strict=True)]
         credence = min(raw_parents) * min(penalties)
     else:
         credence = noisy_or(sorted(paths))

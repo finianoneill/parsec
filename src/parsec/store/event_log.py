@@ -23,9 +23,9 @@ cross-stream fact that matters: the merge order.
 from __future__ import annotations
 
 import sqlite3
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from typing import Iterator
 
 from parsec.canonical import canonical_json
 from parsec.config import Clock
@@ -54,7 +54,7 @@ class EventLog:
         self.clock = clock
         # Display-only tap (CLI activity view): called after each append with
         # (event_type, payload, stream_id). Best-effort; never affects the log.
-        self.listener = None
+        self.listener: Callable[[EventType, dict, str], None] | None = None
 
     def append(
         self,
@@ -91,11 +91,12 @@ class EventLog:
             ),
         )
         if self.listener is not None:
-            try:
+            with suppress(Exception):
                 self.listener(event_type, payload, stream_id)
-            except Exception:  # noqa: BLE001 — display must never break the log
-                pass
-        return cur.lastrowid
+        seq = cur.lastrowid
+        if seq is None:  # sqlite3 always sets it after an INSERT
+            raise RuntimeError("event insert returned no rowid")
+        return seq
 
     def read(self, session_id: str) -> list[Event]:
         rows = self.conn.execute(

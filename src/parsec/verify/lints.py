@@ -41,9 +41,7 @@ _GENERIC_REFERENT_RE = re.compile(
 )
 # Degree/quantity words that carry no checkable content on their own.
 _VAGUE_TERMS = frozenset(
-    "benefit benefits benefited beneficial improved improves improvement "
-    "improvements significant significantly substantial substantially "
-    "many several some numerous various recently soon".split()
+    ["benefit", "benefits", "benefited", "beneficial", "improved", "improves", "improvement", "improvements", "significant", "significantly", "substantial", "substantially", "many", "several", "some", "numerous", "various", "recently", "soon"]
 )
 _WORD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
 # Sentence boundary: terminator + whitespace + a capital, excluding

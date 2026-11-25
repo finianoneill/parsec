@@ -3,10 +3,10 @@ import asyncio
 import pytest
 
 from parsec import ids
-from parsec.evals.judge import parse_judge_reply
-from parsec.evals.regression import compare_runs
 from parsec.evals.case import EvalCase
+from parsec.evals.judge import parse_judge_reply
 from parsec.evals.metrics import MetricContext, default_metrics, run_metrics
+from parsec.evals.regression import compare_runs
 from parsec.evals.scoring import score_citation_faithfulness, score_coverage
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
@@ -63,13 +63,13 @@ def test_citation_faithfulness_drops_on_corruption(graph, db, blobs):
 
 def test_citation_faithfulness_none_without_claims(db, blobs, sessions, config):
     sessions.create(config)
-    score, total, faithful = score_citation_faithfulness(db, blobs, config.session_id)
+    score, total, _faithful = score_citation_faithfulness(db, blobs, config.session_id)
     assert score is None and total == 0
 
 
 def test_coverage_substring_and_regex(graph, db):
     sid = graph[0]
-    score, hits, misses = score_coverage(
+    score, _hits, misses = score_coverage(
         db, sid, ["100 DEGREES celsius", "re:boils at \\d+", "mount everest"]
     )
     assert abs(score - 2 / 3) < 1e-9
@@ -98,7 +98,7 @@ def test_metric_bundle(graph, db, blobs, event_log, ledger):
     }
     assert scores.to_payload()["claims_total"] == 1
     with pytest.raises(AttributeError):
-        scores.no_such_axis
+        scores.no_such_axis  # noqa: B018 — the attribute access is the test
 
 
 def test_metric_subset_and_unknown_name():

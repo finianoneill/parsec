@@ -7,6 +7,8 @@ All at loop level with scripted adapters, no network.
 
 from __future__ import annotations
 
+import pytest
+
 from parsec import ids
 from parsec.config import Budgets, CacheMode, effort_limits
 from parsec.gateway.fake_adapter import FakeAdapter, scripted_response
@@ -26,7 +28,6 @@ from parsec.tools.fetch import FetchTool
 from parsec.tools.record_premises import RecordPremisesTool
 from parsec.tools.search_within import SearchWithinTool
 from tests.conftest import make_config
-import pytest
 
 DOC_TEXT = "The agency guidance states trials must control the Type I error rate."
 DOC_URL = "https://example.com/guidance-summary"  # default-tier secondary source

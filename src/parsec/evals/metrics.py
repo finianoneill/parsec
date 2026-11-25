@@ -22,8 +22,9 @@ run); the parsec shape keeps the mechanical/advisory split in the type.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Literal, Protocol
+from typing import Literal, Protocol
 
 from parsec.evals.case import EvalCase
 from parsec.evals.judge import judge_synthesis
@@ -106,13 +107,13 @@ class Scores:
         return {**self.values, **self.details}
 
     @classmethod
-    def mean(cls, runs: list["Scores"]) -> "Scores":
+    def mean(cls, runs: list[Scores]) -> Scores:
         """Per-metric mean across runs (None-aware); details from the first
         run, which is what the pre-M15 aggregate did too."""
         first = runs[0]
         merged = []
         for r in first.results:
-            vals = [s.values.get(r.name) for s in runs if s.values.get(r.name) is not None]
+            vals = [v for s in runs if (v := s.values.get(r.name)) is not None]
             value = round(sum(vals) / len(vals), 6) if vals else None
             merged.append(MetricResult(r.name, r.tier, value, dict(r.details)))
         return cls(merged)

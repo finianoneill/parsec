@@ -26,26 +26,26 @@ QUERY = "what temperature does water boil at sea level and on everest"
 SQ = "boiling point of water"
 
 GOLD_PAGE_A = (
-    "<html><head><title>Reference Tables</title></head><body>"
-    "<article><p>Water boils at 100 degrees Celsius at standard atmospheric pressure at "
-    "sea level, the reference value maintained by national metrology institutes and used "
-    "to calibrate laboratory thermometers across every scientific discipline.</p></article>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Reference Tables</title></head><body>"
+    b"<article><p>Water boils at 100 degrees Celsius at standard atmospheric pressure at "
+    b"sea level, the reference value maintained by national metrology institutes and used "
+    b"to calibrate laboratory thermometers across every scientific discipline.</p></article>"
+    b"</body></html>"
+)
 GOLD_PAGE_B = (
-    "<html><head><title>Altitude Physics</title></head><body>"
-    "<article><p>On the summit of Mount Everest water boils at about 70 degrees Celsius "
-    "because atmospheric pressure at that extreme altitude is far below the sea-level "
-    "standard, a canonical example of pressure-dependent phase transitions.</p></article>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Altitude Physics</title></head><body>"
+    b"<article><p>On the summit of Mount Everest water boils at about 70 degrees Celsius "
+    b"because atmospheric pressure at that extreme altitude is far below the sea-level "
+    b"standard, a canonical example of pressure-dependent phase transitions.</p></article>"
+    b"</body></html>"
+)
 DISTRACTOR_PAGE = (
-    "<html><head><title>Kitchen Myths Blog</title></head><body>"
-    "<article><p>In my own kitchen tests water boils at 90 degrees Celsius on a normal "
-    "stove, whatever the textbooks claim, and I have repeated the measurement many times "
-    "with two different thermometers over several enthusiastic weekend afternoons.</p></article>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Kitchen Myths Blog</title></head><body>"
+    b"<article><p>In my own kitchen tests water boils at 90 degrees Celsius on a normal "
+    b"stove, whatever the textbooks claim, and I have repeated the measurement many times "
+    b"with two different thermometers over several enthusiastic weekend afternoons.</p></article>"
+    b"</body></html>"
+)
 
 URL_A = "https://reference.example/tables"
 URL_B = "https://reference.example/altitude"

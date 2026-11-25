@@ -37,9 +37,8 @@ async def recorded(event_log, blobs, ledger, sessions, config):
     with stream_scope("sq-1"):
         await gateway.complete(_req("sq1 first"))
         await gateway.complete(_req("sq1 second"))
-    with stream_scope("sq-2"):
-        with pytest.raises(ModelCallFailed) as exc_info:
-            await gateway.complete(_req("sq2 doomed"))
+    with stream_scope("sq-2"), pytest.raises(ModelCallFailed) as exc_info:
+        await gateway.complete(_req("sq2 doomed"))
     return exc_info.value
 
 
@@ -67,9 +66,8 @@ async def test_replay_serves_per_stream_in_any_arrival_order(recorded, event_log
 
 async def test_recorded_failure_replays_identically(recorded, event_log, blobs, config):
     adapter = ReplayAdapter(event_log, blobs, config.session_id)
-    with stream_scope("sq-2"):
-        with pytest.raises(ModelCallFailed) as exc_info:
-            await adapter.complete(_req("sq2 doomed"))
+    with stream_scope("sq-2"), pytest.raises(ModelCallFailed) as exc_info:
+        await adapter.complete(_req("sq2 doomed"))
     assert exc_info.value.kind == "RuntimeError"
     assert exc_info.value.detail == "boom"
     assert str(exc_info.value) == str(recorded)  # byte-identical failure text
@@ -77,16 +75,17 @@ async def test_recorded_failure_replays_identically(recorded, event_log, blobs, 
 
 async def test_prompt_divergence_names_the_stream(recorded, event_log, blobs, config):
     adapter = ReplayAdapter(event_log, blobs, config.session_id)
-    with stream_scope("sq-1"):
-        with pytest.raises(ReplayDivergence, match="stream sq-1"):
-            await adapter.complete(_req("a different prompt"))
+    with stream_scope("sq-1"), pytest.raises(ReplayDivergence, match="stream sq-1"):
+        await adapter.complete(_req("a different prompt"))
 
 
 async def test_exhausted_stream_diverges(recorded, event_log, blobs, config):
     adapter = ReplayAdapter(event_log, blobs, config.session_id)
-    with stream_scope("sq-9"):
-        with pytest.raises(ReplayDivergence, match="exhausted for stream 'sq-9'"):
-            await adapter.complete(_req("never recorded"))
+    with (
+        stream_scope("sq-9"),
+        pytest.raises(ReplayDivergence, match="exhausted for stream 'sq-9'"),
+    ):
+        await adapter.complete(_req("never recorded"))
 
 
 async def test_fake_adapter_is_stream_keyed():

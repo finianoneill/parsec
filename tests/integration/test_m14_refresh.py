@@ -51,6 +51,7 @@ from tests.integration.m14_corpus import (
     _span,
 )
 
+
 async def test_refresh_carries_stable_and_reresearches_volatile(
     parent, db, blobs, event_log, clock, pages, transport
 ):

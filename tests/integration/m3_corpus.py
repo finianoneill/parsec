@@ -23,24 +23,24 @@ SQ2 = "boiling point on mount everest"
 RAW_DOC_SENTINEL = "212 degrees Fahrenheit"
 
 PAGE_A = (
-    "<html><head><title>Boiling Point</title></head><body>"
-    "<p>Water boils at 100 degrees Celsius (212 degrees Fahrenheit) at standard "
-    "atmospheric pressure of one atmosphere, which is the pressure found at sea level. "
-    "This has been the accepted reference value in thermodynamics for over a century and "
-    "is used to calibrate thermometers worldwide. The Celsius scale itself was originally "
-    "defined with the boiling point of water fixed at one hundred degrees exactly.</p>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Boiling Point</title></head><body>"
+    b"<p>Water boils at 100 degrees Celsius (212 degrees Fahrenheit) at standard "
+    b"atmospheric pressure of one atmosphere, which is the pressure found at sea level. "
+    b"This has been the accepted reference value in thermodynamics for over a century and "
+    b"is used to calibrate thermometers worldwide. The Celsius scale itself was originally "
+    b"defined with the boiling point of water fixed at one hundred degrees exactly.</p>"
+    b"</body></html>"
+)
 
 PAGE_B = (
-    "<html><head><title>Altitude Effects</title></head><body>"
-    "<p>At higher altitudes the boiling point of water decreases because atmospheric "
-    "pressure is lower. In Denver, Colorado, at about 1600 meters of elevation, water "
-    "boils at roughly 95 degrees Celsius. On the summit of Mount Everest water boils at "
-    "only about 70 degrees Celsius, which makes cooking food by boiling significantly "
-    "slower and less effective at extreme elevations.</p>"
-    "</body></html>"
-).encode()
+    b"<html><head><title>Altitude Effects</title></head><body>"
+    b"<p>At higher altitudes the boiling point of water decreases because atmospheric "
+    b"pressure is lower. In Denver, Colorado, at about 1600 meters of elevation, water "
+    b"boils at roughly 95 degrees Celsius. On the summit of Mount Everest water boils at "
+    b"only about 70 degrees Celsius, which makes cooking food by boiling significantly "
+    b"slower and less effective at extreme elevations.</p>"
+    b"</body></html>"
+)
 
 URL_A = "https://example.test/boiling"
 URL_B = "https://example.test/altitude"
