@@ -19,10 +19,10 @@ floor, not this.
 from __future__ import annotations
 
 import json
-import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from parsec.config import behaviour_level
 from parsec.models.report import PREMISE_MAX_CHARS, PremiseDraft
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
@@ -31,28 +31,11 @@ from parsec.tools.base import ToolContext
 from parsec.verify.containment import check_containment, extract_numbers
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, make_grounded_checker
+from parsec.verify.propositions import dup_tokens, near_duplicate
 
 # Near-duplicate gate: the same fact re-recorded in a fresh phrasing
 # fragments corroboration across premise nodes and bloats the writer's
-# context. Token-set Jaccard is deterministic, cheap, and conservative —
-# paraphrases of one sentence clear 0.8; a genuinely different subject does
-# not. Quantities must match EXACTLY on top of the Jaccard: "90 degrees"
-# rephrasing "100 degrees" is a conflict to record, never a duplicate.
-_DUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
-DUP_JACCARD = 0.8
-
-
-def _dup_tokens(text: str) -> frozenset[str]:
-    return frozenset(_DUP_TOKEN_RE.findall(text.lower()))
-
-
-def _near_duplicate(text_a: str, tokens_a: frozenset[str], entry_b: dict) -> bool:
-    a, b = tokens_a, entry_b["tokens"]
-    if not a or not b:
-        return False
-    if len(a & b) / len(a | b) < DUP_JACCARD:
-        return False
-    return set(extract_numbers(text_a)) == entry_b["numbers"]
+# context. What counts as "the same fact" lives in verify.propositions.
 
 
 class LenientPremiseDraft(PremiseDraft):
@@ -116,7 +99,7 @@ class RecordPremisesTool:
                 {
                     "node_id": row["node_id"],
                     "text": payload["text"],
-                    "tokens": _dup_tokens(payload["text"]),
+                    "tokens": dup_tokens(payload["text"]),
                     "numbers": set(extract_numbers(payload["text"])),
                 }
             )
@@ -191,6 +174,8 @@ class RecordPremisesTool:
         results: list[dict] = []
         lines: list[str] = []
         known, span_nodes, attached = self._session_premises(sid)
+        # claim_credence >= 2: word order is part of what a premise says.
+        order_aware = behaviour_level(ctx.config.claim_credence) >= 2
 
         for i, draft in enumerate(input.premises):
             if len(draft.text) > PREMISE_MAX_CHARS:
@@ -229,8 +214,10 @@ class RecordPremisesTool:
             # attach any genuinely new spans to the existing one instead, so
             # corroboration accrues to a single premise rather than
             # fragmenting across paraphrases.
-            tokens = _dup_tokens(draft.text)
-            dup = next((p for p in known if _near_duplicate(draft.text, tokens, p)), None)
+            tokens = dup_tokens(draft.text)
+            dup = next(
+                (p for p in known if near_duplicate(draft.text, tokens, p, order_aware)), None
+            )
             if dup is not None:
                 added = self._corroborate(sid, dup, span_rows, span_nodes, attached)
                 results.append({"index": i, "premise_id": dup["node_id"], "duplicate": True})

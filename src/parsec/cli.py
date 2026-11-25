@@ -831,7 +831,12 @@ def cmd_replay(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    from parsec.verify.credence import annotate, compute_credences, render_tier
+    from parsec.verify.credence import (
+        annotate,
+        compute_credences,
+        credence_settings,
+        render_tier,
+    )
     from parsec.verify.nli import make_grounded_checker
     from parsec.verify.omission import detect_omissions
     from parsec.verify.structural import verify_session
@@ -855,12 +860,10 @@ def cmd_verify(args) -> int:
     credence = compute_credences(
         conn,
         args.session_id,
-        source_tiers=session_config.source_tiers,
-        stakes_threshold=session_config.stakes_threshold,
-        volatile_penalty=session_config.volatile_penalty,
-        volatile_half_life_days=session_config.volatile_half_life_days,
-        slow_half_life_days=session_config.slow_half_life_days,
-        learned_reliability=session_config.learned_reliability,
+        **{
+            **credence_settings(session_config),
+            "claim_credence": behaviour_level(behaviour["claim_credence"]),
+        },
         # Read-only: verify inspects a recording, it must never rewrite the
         # credences the run itself persisted (calibration labels read them).
         persist=False,
@@ -940,6 +943,12 @@ def _render_diff(report) -> None:
         console.print(
             f"[yellow]queries differ — comparing anyway[/yellow]\n"
             f"[dim]A: {escape(report.query_a)}\nB: {escape(report.query_b)}[/dim]"
+        )
+    if report.rescored_under:
+        versions = ", ".join(f"{k} {v}" for k, v in sorted(report.rescored_under.items()))
+        console.print(
+            f"[dim]the sessions were recorded under different credence versions; both are "
+            f"re-scored here under {versions}[/dim]"
         )
     if report.config_skew:
         console.print(

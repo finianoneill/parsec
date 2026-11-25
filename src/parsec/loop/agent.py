@@ -84,6 +84,7 @@ from parsec.verify.credence import (
     CredenceReport,
     annotate,
     compute_credences,
+    credence_settings,
     render_tier,
     source_tier,
 )
@@ -1633,16 +1634,8 @@ class OrchestratorLoop:
     # -- credence & omission -------------------------------------------------
 
     def _compute_credences(self) -> CredenceReport:
-        cfg = self.config
         return compute_credences(
-            self.ctx.conn,
-            cfg.session_id,
-            source_tiers=cfg.source_tiers,
-            stakes_threshold=cfg.stakes_threshold,
-            volatile_penalty=cfg.volatile_penalty,
-            volatile_half_life_days=cfg.volatile_half_life_days,
-            slow_half_life_days=cfg.slow_half_life_days,
-            learned_reliability=cfg.learned_reliability,
+            self.ctx.conn, self.config.session_id, **credence_settings(self.config)
         )
 
     def _annotation(self, credence: CredenceReport, node_id: str) -> str:

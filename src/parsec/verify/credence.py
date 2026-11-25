@@ -25,8 +25,19 @@ On a MUTABLE claim, newer evidence contradicting older evidence
 SUPERSEDES instead: the older node is marked superseded and discounted;
 the newer one is not dragged down by it.
 
-Propagation is unchanged from v1: min(parents) × edge_penalty along one
-derivation path, noisy-OR across independent paths.
+Propagation: a Finding is min(parents) × edge_penalty — one derivation
+over all of them. A report claim depends on the `claim_credence` version:
+
+  level 1 (legacy) — noisy-OR over the cited refs, as if each citation
+      were independent support for one proposition. It is not: a sentence
+      citing two premises usually needs BOTH to be true, and two premises
+      from one span, or a finding cited beside its own parent, are one
+      piece of evidence counted twice (0.6 and 0.6 "corroborating" to 0.84).
+  level 2 — the minimum over the distinct facts the claim requires. Refs
+      that are ancestors of another cited ref are the same evidence and
+      are dropped first; the minimum is the upper bound on a conjunction.
+      Corroboration is counted once, inside the premise, where independent
+      content clusters are actually compared — never again at the claim.
 
 Numbers stay internal (§10.3): render_tier()/annotate() map credence to the
 labels users see — plus, once `parsec calibrate` has run, quantified ranges
@@ -43,6 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import urlsplit
 
+from parsec.config import RunConfig, behaviour_level
 from parsec.verify.syndication import cluster_spans
 
 # Domain suffix -> prior. Longest matching suffix wins; config merges on top.
@@ -69,6 +81,10 @@ EDGE_PENALTY: dict[str, float] = {
     "temporal": 0.9,
     "aggregates": 1.0,  # structural merge, no new inference
 }
+
+# Edges along which a node is DERIVED from its parents: a ref reachable
+# from another cited ref through these is that ref's own evidence.
+DERIVATION_EDGES = frozenset({"deduces", "induces", "temporal", "computes"})
 
 HIGH, MODERATE = 0.8, 0.6
 
@@ -190,6 +206,7 @@ def compute_credences(
     slow_half_life_days: float = SLOW_HALF_LIFE_DAYS,
     learned_reliability: bool = False,
     embed: Callable[[list[str]], list[list[float]]] | None = None,
+    claim_credence: int = 1,
 ) -> CredenceReport:
     """Recompute credence over the whole session graph (§6 stage 3),
     tier-by-tier bottom-up with conflict resolution applied per tier, and
@@ -267,10 +284,16 @@ def compute_credences(
                 premise_class[nid] = node["payload"].get("claim_class", "stable")
                 premise_ts[nid] = _newest_evidence_ts(nid, out_edges, span_meta)
             elif node["type"] == "Finding":
-                report.nodes[nid] = _derived_credence(nid, out_edges, report, joint=True)
+                report.nodes[nid] = _derived_credence(
+                    nid, out_edges, report, joint=True,
+                    propagate_superseded=claim_credence >= 2,
+                )
             elif node["type"] in ("Synthesis", "ReportClaim"):
-                # cited refs are independent supporting paths -> noisy-OR
-                report.nodes[nid] = _derived_credence(nid, out_edges, report, joint=False)
+                if claim_credence >= 2:
+                    report.nodes[nid] = _claim_credence(nid, out_edges, report)
+                else:
+                    # legacy: cited refs as independent supporting paths
+                    report.nodes[nid] = _derived_credence(nid, out_edges, report, joint=False)
         _resolve_conflicts(
             tier_level, conflict_pairs, nodes, report, premise_class, premise_ts
         )
@@ -345,8 +368,84 @@ def _premise_credence(
     return NodeCredence(credence, domains, stale=stale)
 
 
+def credence_settings(config: RunConfig) -> dict:
+    """compute_credences keyword arguments for a session's config — every
+    knob and behaviour version that decides a credence, in one place, so the
+    run loop, `parsec verify` and `parsec diff` cannot score a session
+    three different ways."""
+    return {
+        "source_tiers": config.source_tiers,
+        "stakes_threshold": config.stakes_threshold,
+        "volatile_penalty": config.volatile_penalty,
+        "volatile_half_life_days": config.volatile_half_life_days,
+        "slow_half_life_days": config.slow_half_life_days,
+        "learned_reliability": config.learned_reliability,
+        "claim_credence": behaviour_level(config.claim_credence),
+    }
+
+
+def _ancestors(nid: str, out_edges: dict) -> set[str]:
+    """Everything `nid` is derived from, walking derivation edges down."""
+    seen: set[str] = set()
+    stack = [nid]
+    while stack:
+        for e in out_edges.get(stack.pop(), []):
+            parent = e["dst_node_id"]
+            if e["edge_type"] in DERIVATION_EDGES and parent not in seen:
+                seen.add(parent)
+                stack.append(parent)
+    return seen
+
+
+def required_refs(refs: list[str], out_edges: dict) -> list[str]:
+    """The distinct facts a claim citing `refs` requires: duplicates removed,
+    and any ref that another cited ref is derived from removed too — citing
+    a finding and its own parent premise is citing one line of evidence."""
+    distinct = sorted(set(refs))
+    derived_from = {ref: _ancestors(ref, out_edges) for ref in distinct}
+    return [
+        ref
+        for ref in distinct
+        if not any(ref in derived_from[other] for other in distinct if other != ref)
+    ]
+
+
+def _claim_credence(nid: str, out_edges: dict, report: CredenceReport) -> NodeCredence:
+    """claim_credence >= 2: c(claim) = min over required refs of their
+    already-adjusted credence (conflict, supersession and age discounts
+    included — nothing is recomputed from raw priors). Flags are an OR over
+    EVERY cited ref, pruned ones too, and domains their union, so the
+    rendered provenance never hides something a citation carried."""
+    cited = sorted(
+        {
+            e["dst_node_id"]
+            for e in out_edges.get(nid, [])
+            if e["edge_type"] != "contradicts" and e["dst_node_id"] in report.nodes
+        }
+    )
+    if not cited:
+        return NodeCredence(0.0, frozenset())
+    required = required_refs(cited, out_edges)
+    parents = [report.nodes[ref] for ref in cited]
+    domains: set[str] = set()
+    for parent in parents:
+        domains.update(parent.domains)
+    superseded = sorted(p.superseded_by for p in parents if p.superseded_by)
+    return NodeCredence(
+        min(report.nodes[ref].credence for ref in required),
+        frozenset(domains),
+        conflicted=any(p.conflicted for p in parents),
+        stale=any(p.stale for p in parents),
+        superseded_by=superseded[0] if superseded else None,
+    )
+
+
 def _derived_credence(
-    nid: str, out_edges: dict, report: CredenceReport, joint: bool
+    nid: str,
+    out_edges: dict,
+    report: CredenceReport,
+    joint: bool,
+    propagate_superseded: bool = False,
 ) -> NodeCredence:
     """joint=True: one derivation over all parents (min × penalty).
     joint=False: each ref is an independent path (noisy-OR of per-path values).
@@ -355,10 +454,13 @@ def _derived_credence(
     domains: set[str] = set()
     penalties: list[float] = []
     conflicted = stale = False
+    superseded: list[str] = []
     for e in out_edges.get(nid, []):
         if e["edge_type"] == "contradicts" or e["dst_node_id"] not in report.nodes:
             continue
         parent = report.nodes[e["dst_node_id"]]
+        if propagate_superseded and parent.superseded_by:
+            superseded.append(parent.superseded_by)
         penalty = EDGE_PENALTY.get(e["edge_type"], 0.9)
         paths.append(parent.credence * penalty)
         penalties.append(penalty)
@@ -373,7 +475,10 @@ def _derived_credence(
         credence = min(raw_parents) * min(penalties)
     else:
         credence = noisy_or(sorted(paths))
-    return NodeCredence(credence, frozenset(domains), conflicted=conflicted, stale=stale)
+    return NodeCredence(
+        credence, frozenset(domains), conflicted=conflicted, stale=stale,
+        superseded_by=min(superseded) if superseded else None,
+    )
 
 
 def _resolve_conflicts(
@@ -434,6 +539,7 @@ def _resolve_conflicts(
         report.nodes[nid] = NodeCredence(
             conflict_discount(nc.credence, disbelief), nc.domains,
             disbelief=disbelief, conflicted=True, stale=nc.stale,
+            superseded_by=nc.superseded_by,  # inherited from a parent, if any
         )
 
 
