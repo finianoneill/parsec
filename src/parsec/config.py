@@ -155,6 +155,10 @@ CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
     # 2: a claim is as credible as the weakest distinct fact it cites (no
     # corroboration from citing more refs); intake dedup respects word order.
     "claim_credence": "2-dev",
+    # 2: premises are verbatim (no transform_note); a derived figure is a
+    # `computes` finding the harness recomputes; a finding's numbers must
+    # come from its premises.
+    "derivations": "2-dev",
 }
 
 

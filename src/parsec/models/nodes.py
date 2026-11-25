@@ -21,6 +21,7 @@ class EdgeType(StrEnum):
     DEDUCES = "deduces"
     INDUCES = "induces"
     TEMPORAL = "temporal"
+    COMPUTES = "computes"
     AGGREGATES = "aggregates"
     CONTRADICTS = "contradicts"
 
@@ -51,7 +52,11 @@ class FindingNode(_Node):
     TIER: ClassVar[int] = 2
     text: str
     premise_ids: list[str] = Field(min_length=1)
-    edge_type: Literal["deduces", "induces", "temporal"]
+    edge_type: Literal["deduces", "induces", "temporal", "computes"]
+    # computes only (derivations >= 2): the typed operation and whether the
+    # harness could recompute it ("verified") or not ("unverified").
+    operation: dict | None = None
+    status: Literal["verified", "unverified"] | None = None
 
 
 class SynthesisNode(_Node):

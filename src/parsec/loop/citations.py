@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 from parsec.ids import NODE_REF_RE
 from parsec.store.dag import DagStore
+from parsec.verify.computations import evidence_text
 from parsec.verify.containment import check_sentence, has_checkable_content
 
 NARRATIVE_TAG = "[narrative]"
@@ -168,7 +169,7 @@ def check_citations(
     known: dict[str, str] = {}
     for tier in (1, 2):
         for row in dag.nodes_for_session(session_id, tier=tier):
-            known[row["node_id"]] = json.loads(row["payload_json"]).get("text", "")
+            known[row["node_id"]] = evidence_text(json.loads(row["payload_json"]))
     # Evidence cited anywhere in the answer: what a heading may draw on.
     cited_anywhere = [
         known[ref] for seg in result.segments for ref in seg.refs if ref in known

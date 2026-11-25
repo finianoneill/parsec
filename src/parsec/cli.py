@@ -856,6 +856,7 @@ def cmd_verify(args) -> int:
         conn, blobs, args.session_id,
         nli_checker=make_grounded_checker(session_config.nli_checker),
         sentence_check=behaviour_level(behaviour["sentence_check"]) >= 1,
+        derivations=behaviour_level(behaviour["derivations"]),
     )
     credence = compute_credences(
         conn,

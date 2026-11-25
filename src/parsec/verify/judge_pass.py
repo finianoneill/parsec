@@ -68,7 +68,13 @@ async def judge_pass(
     judgments: list[EdgeJudgment] = []
     findings = sorted(
         (nid, p) for nid, p in payloads.items()
-        if nid.startswith("finding:") and p.get("edge_type") in ("deduces", "induces")
+        if nid.startswith("finding:")
+        and (
+            p.get("edge_type") in ("deduces", "induces")
+            # a derivation the harness could not recompute is exactly what
+            # the advisory judge is for
+            or p.get("status") == "unverified"
+        )
     )
     for finding_id, payload in findings:
         premises = [
