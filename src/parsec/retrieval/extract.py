@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 
-EXTRACTOR_VERSION = "3"
+EXTRACTOR_VERSION = "4"  # 4: publication date extracted into document meta
 _MIN_TRAFILATURA_CHARS = 40  # below this, trust the fallback more than main-content detection
 
 _SKIP_TAGS = {"script", "style", "noscript", "template", "head"}
@@ -65,14 +65,24 @@ def _normalize_whitespace(text: str) -> str:
     return "\n\n".join(paragraphs)
 
 
+def _media_type(content_type: str | None) -> str:
+    """The bare media type: parameters (charset, profile, ...) dropped."""
+    return (content_type or "").split(";")[0].strip().lower()
+
+
+def _is_pdf(raw: bytes, media_type: str) -> bool:
+    # Sniff the magic bytes too: PDF endpoints often serve
+    # application/octet-stream.
+    return media_type == "application/pdf" or (
+        media_type in ("", "application/octet-stream") and raw[:5] == b"%PDF-"
+    )
+
+
 def extract_text(raw: bytes, content_type: str | None) -> tuple[str, str | None, str | None]:
     """Return (text, title, note)."""
-    ct = (content_type or "").split(";")[0].strip().lower()
-    # PDFs before any charset decoding — they are binary. Sniff the magic
-    # bytes too: PDF endpoints often serve application/octet-stream.
-    if ct == "application/pdf" or (
-        ct in ("", "application/octet-stream") and raw[:5] == b"%PDF-"
-    ):
+    ct = _media_type(content_type)
+    # PDFs before any charset decoding — they are binary.
+    if _is_pdf(raw, ct):
         return _extract_pdf(raw)
     charset = "utf-8"
     if content_type and "charset=" in content_type:
@@ -153,3 +163,34 @@ def _stdlib_title(decoded: str) -> str | None:
     parser.feed(decoded)
     parser.close()
     return " ".join("".join(parser.title_parts).split()) or None
+
+
+def extract_published(raw: bytes, content_type: str | None) -> str | None:
+    """The document's own publication date as "YYYY-MM-DD", or None. HTML:
+    trafilatura's metadata (meta tags, JSON-LD, <time>); PDF: the creation
+    date in the document info. Noisy by nature — template dates and "last
+    updated" stamps exist — so it is only the fallback when a premise does
+    not state a date its span supports."""
+    # The same classification extract_text uses, so the two can never read
+    # one response as different kinds of document.
+    kind = _media_type(content_type)
+    try:
+        if _is_pdf(raw, kind):
+            import io
+
+            from pypdf import PdfReader
+
+            created = PdfReader(io.BytesIO(raw)).metadata
+            stamp = created.creation_date if created is not None else None
+            return stamp.date().isoformat() if stamp is not None else None
+        if kind in ("text/html", "application/xhtml+xml") or (
+            not kind and raw.lstrip()[:1] == b"<"
+        ):
+            import trafilatura
+
+            meta = trafilatura.extract_metadata(raw.decode("utf-8", errors="replace"))
+            value = meta.date if meta is not None else None
+            return value[:10] if isinstance(value, str) and len(value) >= 10 else None
+    except Exception:
+        return None
+    return None

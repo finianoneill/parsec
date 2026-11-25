@@ -188,7 +188,7 @@ async def _run_once(
     session_id = f"eval-{case.case_id}-r{run_index + 1}"
 
     config = RunConfig(
-        **new_session_behaviour(clock.now_iso()),
+        **new_session_behaviour(case.as_of or clock.now_iso()),
         session_id=session_id,
         query=case.query,
         model=model,

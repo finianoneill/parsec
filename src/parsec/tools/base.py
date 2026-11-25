@@ -9,7 +9,7 @@ enters model context, with an explicit marker when truncation occurred.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ValidationError
@@ -31,6 +31,10 @@ class ToolContext:
     ledger: Ledger
     config: RunConfig
     clock: Clock
+    # recency >= 2: the time each subquestion asks about, by stream (sq id) —
+    # "now" or a stored interval. The loop fills it in at dispatch; a tool
+    # reads its own stream's entry. Empty for sessions that predate it.
+    stream_targets: dict[str, str] = field(default_factory=dict)
 
 
 class Tool(Protocol):

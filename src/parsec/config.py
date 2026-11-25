@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from parsec import __version__ as _PARSEC_VERSION
 from parsec.canonical import sha256_hex
@@ -159,6 +159,9 @@ CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
     # `computes` finding the harness recomputes; a finding's numbers must
     # come from its premises.
     "derivations": "2-dev",
+    # 2: decay runs on when each observation was made, measured against the
+    # time the subquestion asks about (as_of_ts for "now") — not fetch time.
+    "recency": "2-dev",
 }
 
 
@@ -327,6 +330,18 @@ class RunConfig(BaseModel):
     # trigger ignored system + tool schemas and could not react to a real
     # overflow). Unread; retained so pre-Phase-2 session configs still load.
     max_context_chars: int = 60_000
+
+    @model_validator(mode="after")
+    def _behaviour_versions_are_a_supported_combination(self) -> RunConfig:
+        # Observation dating was built on verbatim premises: the dated
+        # premise contract has no transform_note. Refuse the one combination
+        # where the tool schema and the containment check would disagree.
+        if behaviour_level(self.recency) >= 2 and behaviour_level(self.derivations) < 2:
+            raise ValueError(
+                f"recency {self.recency!r} requires derivations >= 2 "
+                f"(got derivations {self.derivations!r})"
+            )
+        return self
 
     def to_json_dict(self) -> dict:
         return self.model_dump(mode="json")

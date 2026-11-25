@@ -23,15 +23,27 @@ import json
 from pydantic import BaseModel, ConfigDict, Field
 
 from parsec.config import RunConfig, behaviour_level
-from parsec.models.report import PREMISE_MAX_CHARS, PremiseDraft, PremiseDraftV2
+from parsec.models.report import PREMISE_MAX_CHARS, PremiseDraft, PremiseDraftV2, PremiseDraftV3
+from parsec.retrieval.extract import extract_published
+from parsec.store.blobs import BlobStore
 from parsec.store.dag import DagStore
 from parsec.store.documents import DocumentStore
+from parsec.store.event_log import CURRENT_STREAM
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext
 from parsec.verify.containment import (
     check_containment,
     check_premise_verbatim,
     extract_numbers,
+)
+from parsec.verify.dating import (
+    DATE_SOURCE_AS_OF,
+    DATE_SOURCE_PUBLISHED,
+    DATE_SOURCE_UNKNOWN,
+    NOW,
+    check_date_containment,
+    format_interval,
+    published_interval,
 )
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, make_grounded_checker
@@ -72,6 +84,22 @@ class RecordPremisesInputV2(BaseModel):
     premises: list[LenientPremiseDraftV2] = Field(min_length=1, max_length=20)
 
 
+class LenientPremiseDraftV3(PremiseDraftV3):
+    """One atomic premise, stated exactly as its spans state it."""
+
+    # recency >= 2: adds as_of. Length checked per premise by run().
+    text: str = Field(min_length=1)
+
+
+class RecordPremisesInputV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    premises: list[LenientPremiseDraftV3] = Field(min_length=1, max_length=20)
+
+
+AnyPremiseDraft = LenientPremiseDraft | LenientPremiseDraftV2 | LenientPremiseDraftV3
+
+
 class RecordPremisesTool:
     name = "record_premises"
     description = (
@@ -102,7 +130,16 @@ class RecordPremisesTool:
         "like go in submit_report as computes findings",
     )
 
+    # recency >= 2 (which presumes derivations >= 2: there is no dated draft
+    # with a transform_note).
+    description_dated = description_verbatim + (
+        " If the span states WHEN the fact held, give that date as as_of — it decides how "
+        "the fact is weighed against the time the question asks about."
+    )
+
     def spec_for(self, config: RunConfig) -> tuple[str, type[BaseModel]]:
+        if behaviour_level(config.recency) >= 2:
+            return self.description_dated, RecordPremisesInputV3
         if behaviour_level(config.derivations) >= 2:
             return self.description_verbatim, RecordPremisesInputV2
         return self.description, self.input_model
@@ -115,6 +152,7 @@ class RecordPremisesTool:
         # reconstructs the identical advisory behavior. Cached per tool.
         self._nli: GroundedChecker | None = None
         self._nli_name: str | None = None
+        self._published_cache: dict[str, str | None] = {}
 
     def _checker(self, ctx: ToolContext) -> GroundedChecker | None:
         name = ctx.config.nli_checker
@@ -137,6 +175,7 @@ class RecordPremisesTool:
                     "text": payload["text"],
                     "tokens": dup_tokens(payload["text"]),
                     "numbers": set(extract_numbers(payload["text"])),
+                    "target": payload.get("target_time") or NOW,
                 }
             )
         span_nodes = {
@@ -170,6 +209,44 @@ class RecordPremisesTool:
             )
         return span_nodes[ref]
 
+    def _published(self, doc_hash: str, blobs: BlobStore) -> str | None:
+        """A document's publication date. Documents archived before dates
+        were extracted have none in their stored metadata, and a cache hit or
+        an identical-byte re-fetch never rewrites that row — so for those the
+        date is read from the archived bytes instead. It is a pure function
+        of bytes that never change, so a replay computes the same date."""
+        if doc_hash in self._published_cache:
+            return self._published_cache[doc_hash]
+        doc = self.documents.get_document(doc_hash)
+        published: str | None = None
+        if doc is not None:
+            meta = json.loads(doc["meta_json"])
+            published = meta.get("published")
+            extracted_with = str(meta.get("extractor_version", "0"))
+            predates = not extracted_with.isdigit() or int(extracted_with) < 4
+            if published is None and predates and "outcome" not in meta:
+                try:
+                    published = extract_published(blobs.get(doc["raw_blob"]), doc["content_type"])
+                except OSError:
+                    published = None  # raw bytes gone: corpus-integrity reports that
+        self._published_cache[doc_hash] = published
+        return published
+
+    def _observation(self, row, as_of: str | None, blobs: BlobStore) -> dict:
+        """recency >= 2: when the fact was observed, as far as THIS span can
+        say — the payload of the premise's edge to it. The premise's own
+        as_of if this span states it; else the document's publication date;
+        else unknown. Dated per edge because one span can support two
+        premises about different years."""
+        if as_of:
+            period, _ = check_date_containment(as_of, row["text"])
+            if period is not None:
+                return {"observed_at": format_interval(period), "date_source": DATE_SOURCE_AS_OF}
+        day = published_interval(self._published(row["doc_hash"], blobs))
+        if day is not None:
+            return {"observed_at": format_interval(day), "date_source": DATE_SOURCE_PUBLISHED}
+        return {"date_source": DATE_SOURCE_UNKNOWN}
+
     def _corroborate(
         self,
         sid: str,
@@ -177,6 +254,9 @@ class RecordPremisesTool:
         span_rows: list,
         span_nodes: dict[str, str],
         attached: dict[str, set[str]],
+        as_of: str | None = None,
+        dated: bool = False,
+        blobs: BlobStore | None = None,
     ) -> int:
         """Attach a near-duplicate's NEW spans to the existing premise as
         extracts edges — but only if the existing premise's text survives the
@@ -184,6 +264,8 @@ class RecordPremisesTool:
         (the new spans corroborate the recorded wording, not the paraphrase).
         Returns how many spans were attached."""
         already = attached.setdefault(dup["node_id"], set())
+        if dated and as_of and blobs is not None:
+            self._fill_in_dates(sid, dup["node_id"], span_rows, span_nodes, already, as_of)
         new_rows = [
             r for r in span_rows
             if span_nodes.get(r["span_id"]) is None or span_nodes[r["span_id"]] not in already
@@ -199,13 +281,54 @@ class RecordPremisesTool:
         for row in new_rows:
             node = self._span_node(sid, row, span_nodes)
             if node not in already:
-                self.dag.add_edge(sid, dup["node_id"], node, "extracts", None)
+                # A corroborating span carries its own observation date.
+                payload = (
+                    self._observation(row, as_of, blobs) if dated and blobs is not None else None
+                )
+                self.dag.add_edge(
+                    sid, dup["node_id"], node, "extracts", payload, log_payload=dated
+                )
                 already.add(node)
                 added += 1
         return added
 
+    def _fill_in_dates(
+        self,
+        sid: str,
+        premise_id: str,
+        span_rows: list,
+        span_nodes: dict[str, str],
+        already: set[str],
+        as_of: str,
+    ) -> None:
+        """A premise re-recorded WITH a date its span states gets that date
+        on the existing edge, when the edge had only a publication date or
+        none. A date the premise already gave is never overwritten, so an
+        exact retry changes nothing."""
+        for row in span_rows:
+            node = span_nodes.get(row["span_id"])
+            if node is None or node not in already:
+                continue
+            period, _ = check_date_containment(as_of, row["text"])
+            if period is None:
+                continue
+            stored = self.dag.conn.execute(
+                "SELECT payload_json FROM edges WHERE session_id=? AND src_node_id=?"
+                " AND dst_node_id=? AND edge_type='extracts'",
+                (sid, premise_id, node),
+            ).fetchone()
+            current = json.loads(stored["payload_json"] or "{}") if stored is not None else {}
+            if stored is None or current.get("date_source") == DATE_SOURCE_AS_OF:
+                continue
+            self.dag.update_edge_payload(
+                sid, premise_id, node, "extracts",
+                {**current, "observed_at": format_interval(period), "date_source": DATE_SOURCE_AS_OF},
+            )
+
     async def run(
-        self, input: RecordPremisesInput | RecordPremisesInputV2, ctx: ToolContext
+        self,
+        input: RecordPremisesInput | RecordPremisesInputV2 | RecordPremisesInputV3,
+        ctx: ToolContext,
     ) -> tuple[dict, str]:
         sid = ctx.config.session_id
         checker = self._checker(ctx)
@@ -216,8 +339,12 @@ class RecordPremisesTool:
         order_aware = behaviour_level(ctx.config.claim_credence) >= 2
         # derivations >= 2: premises are verbatim, with no transform_note.
         verbatim = behaviour_level(ctx.config.derivations) >= 2
+        # recency >= 2: every premise records the time its subquestion asks
+        # about, and every edge to a span records when the fact was observed.
+        dated = behaviour_level(ctx.config.recency) >= 2
+        target = ctx.stream_targets.get(CURRENT_STREAM.get(), NOW) if dated else None
 
-        drafts: list[LenientPremiseDraft | LenientPremiseDraftV2] = list(input.premises)
+        drafts: list[AnyPremiseDraft] = list(input.premises)
         for i, draft in enumerate(drafts):
             if len(draft.text) > PREMISE_MAX_CHARS:
                 error = (
@@ -248,6 +375,13 @@ class RecordPremisesTool:
                 problems += check_premise_verbatim(draft.text, span_texts)
             else:
                 problems += check_containment(draft.text, span_texts, transform_note)
+            as_of = getattr(draft, "as_of", None) if dated else None
+            if as_of:
+                # Same floor as numbers: a date the model gives must be a
+                # date some cited span states.
+                checks = [check_date_containment(as_of, text) for text in span_texts]
+                if not any(period is not None for period, _ in checks):
+                    problems.append(next(problem for _, problem in checks if problem))
             if problems:
                 error = "; ".join(problems)
                 results.append({"index": i, "error": error})
@@ -260,10 +394,22 @@ class RecordPremisesTool:
             # fragmenting across paraphrases.
             tokens = dup_tokens(draft.text)
             dup = next(
-                (p for p in known if near_duplicate(draft.text, tokens, p, order_aware)), None
+                (
+                    p
+                    for p in known
+                    # the same words about a different time frame are a
+                    # different premise: evidence for "now" is not evidence
+                    # for "in 2019"
+                    if (not dated or p["target"] == target)
+                    and near_duplicate(draft.text, tokens, p, order_aware)
+                ),
+                None,
             )
             if dup is not None:
-                added = self._corroborate(sid, dup, span_rows, span_nodes, attached)
+                added = self._corroborate(
+                    sid, dup, span_rows, span_nodes, attached,
+                    as_of=as_of, dated=dated, blobs=ctx.blobs,
+                )
                 results.append({"index": i, "premise_id": dup["node_id"], "duplicate": True})
                 lines.append(
                     f"[{dup['node_id']}] already recorded (near-duplicate of: {dup['text']}) "
@@ -274,18 +420,26 @@ class RecordPremisesTool:
 
             for row in span_rows:
                 self._span_node(sid, row, span_nodes)
-            premise_id = self.dag.add_node(
-                sid,
-                "Premise",
-                {
-                    "text": draft.text,
-                    "span_refs": draft.span_refs,
-                    "claim_class": draft.claim_class,
-                },
-            )
+            premise_payload: dict = {
+                "text": draft.text,
+                "span_refs": draft.span_refs,
+                "claim_class": draft.claim_class,
+            }
+            if dated and target != NOW:
+                # Only a premise about some OTHER time says so: "now" is the
+                # absence of the field. A premise about the present therefore
+                # keeps the id it always had, and premises recorded before
+                # target times existed read, correctly, as being about now.
+                premise_payload["target_time"] = target
+            premise_id = self.dag.add_node(sid, "Premise", premise_payload)
             edge_payload = {"transform_note": transform_note} if transform_note else None
+            rows_by_ref = {r["span_id"]: r for r in span_rows}
             for ref in draft.span_refs:
-                self.dag.add_edge(sid, premise_id, span_nodes[ref], "extracts", edge_payload)
+                if dated:
+                    edge_payload = self._observation(rows_by_ref[ref], as_of, ctx.blobs)
+                self.dag.add_edge(
+                    sid, premise_id, span_nodes[ref], "extracts", edge_payload, log_payload=dated
+                )
                 attached.setdefault(premise_id, set()).add(span_nodes[ref])
             known.append(
                 {
@@ -293,6 +447,7 @@ class RecordPremisesTool:
                     "text": draft.text,
                     "tokens": tokens,
                     "numbers": set(extract_numbers(draft.text)),
+                    "target": target,
                 }
             )
             result: dict = {"index": i, "premise_id": premise_id}

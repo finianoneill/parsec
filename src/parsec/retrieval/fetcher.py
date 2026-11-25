@@ -143,7 +143,7 @@ class Fetcher:
         )
 
     async def _live_fetch(self, canonical_url: str, cache_key: str) -> FetchedDoc:
-        from parsec.retrieval.extract import EXTRACTOR_VERSION, extract_text
+        from parsec.retrieval.extract import EXTRACTOR_VERSION, extract_published, extract_text
 
         if self.robots is not None:
             decision = await self.robots.check(canonical_url)
@@ -184,6 +184,9 @@ class Fetcher:
         meta = {"title": title, "extractor_version": EXTRACTOR_VERSION}
         if note:
             meta["note"] = note
+        published = extract_published(raw, content_type)
+        if published:
+            meta["published"] = published
         self.documents.put_document(
             doc_hash, canonical_url, content_type, resp.status_code, len(raw), text_blob, meta
         )

@@ -172,8 +172,12 @@ class _SessionGraph:
     credence: CredenceReport
 
 
+# Behaviour versions that change how a stored graph is SCORED.
+_SCORING_VERSIONS = ("claim_credence", "recency")
+
+
 def _load(
-    conn: sqlite3.Connection, session_id: str, embed: Embed, claim_credence: int | None = None
+    conn: sqlite3.Connection, session_id: str, embed: Embed, levels: dict[str, int] | None = None
 ) -> _SessionGraph:
     row = conn.execute(
         "SELECT query, config_json FROM sessions WHERE session_id=?", (session_id,)
@@ -203,9 +207,7 @@ def _load(
         if e["edge_type"] != "contradicts":
             evidence_of.setdefault(e["src_node_id"], []).append(e["dst_node_id"])
 
-    settings = credence_settings(config)
-    if claim_credence is not None:
-        settings["claim_credence"] = claim_credence
+    settings = credence_settings(config) | (levels or {})
     credence = compute_credences(conn, session_id, persist=False, embed=embed, **settings)
     return _SessionGraph(session_id, row["query"], config, claims, premises, spans, evidence_of, credence)
 
@@ -368,9 +370,12 @@ def diff_sessions(
         embed = EmbeddingCache(conn, HashedNgramEmbedder()).embed
 
     # Compare like with like: score both sessions under the newer of the two
-    # claim-credence versions they were recorded with.
-    levels = [
-        behaviour_level(RunConfig.model_validate(json.loads(row["config_json"])).claim_credence)
+    # versions they were recorded with, for every version that changes
+    # scoring. (A session recorded before observation dates existed has
+    # none, so under recency 2 its mutable facts read as "date unknown" on
+    # both sides alike — which is the point: the same rule, both sessions.)
+    recorded = [
+        RunConfig.model_validate(json.loads(row["config_json"]))
         for sid in (session_a, session_b)
         if (
             row := conn.execute(
@@ -379,10 +384,16 @@ def diff_sessions(
         )
         is not None
     ]
-    level = max(levels) if levels else None
-    rescored = {"claim_credence": level} if level is not None and len(set(levels)) > 1 else None
-    a = _load(conn, session_a, embed, level)
-    b = _load(conn, session_b, embed, level)
+    levels: dict[str, int] = {}
+    rescored: dict[str, int] = {}
+    for version in _SCORING_VERSIONS:
+        seen = [behaviour_level(getattr(config, version)) for config in recorded]
+        if seen:
+            levels[version] = max(seen)
+            if len(set(seen)) > 1:
+                rescored[version] = max(seen)
+    a = _load(conn, session_a, embed, levels)
+    b = _load(conn, session_b, embed, levels)
 
     claims: list[ClaimDelta] = []
     matches, a_only, b_only = _match_claims(a, b, embed)
@@ -433,7 +444,7 @@ def diff_sessions(
         query_a=a.query,
         query_b=b.query,
         config_skew=_credence_config(a.config) != _credence_config(b.config),
-        rescored_under=rescored,
+        rescored_under=rescored or None,
         claims=claims,
         documents=_document_deltas(a, b),
     )

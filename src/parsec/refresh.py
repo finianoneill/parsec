@@ -87,6 +87,9 @@ class RefreshSeed:
     questions: tuple[str, ...]        # plan order; sq-N ids re-derive by position
     carried: dict[str, CarriedSq]     # sq_id -> evidence to carry forward
     research_reasons: dict[str, str]  # sq_id -> why it re-runs
+    # recency >= 2: the parent's target time per question ("now" or an
+    # interval); empty when the parent predates target times.
+    target_times: tuple[str, ...] = ()
 
 
 def derive_seed(
@@ -173,6 +176,11 @@ def derive_seed(
         scope=scope,
         effort=effort,
         questions=tuple(item["question"] for item in planned),
+        target_times=(
+            tuple(item["target_time"] for item in planned)
+            if all("target_time" in item for item in planned)
+            else ()
+        ),
         carried=carried,
         research_reasons=research_reasons,
     )

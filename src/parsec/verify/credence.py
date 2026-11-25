@@ -16,6 +16,19 @@ Root prior per Premise = f(source_tier, corroboration, mutability):
     `stable` never. Age is clock-free: report time is the newest evidence
     timestamp in the corpus, both recorded — replay-identical (T4).
 
+Recency depends on the `recency` version:
+
+  level 1 (legacy) — age is the gap between a premise's NEWEST source and
+      the newest fetch in the corpus. In a live run everything is fetched
+      within minutes, so nothing ever decays, and one fresh mention makes a
+      pile of old sources look fresh.
+  level 2 — each supporting span is decayed on its own, by the gap between
+      when the fact was OBSERVED (the date on the premise's edge to that
+      span) and the time the subquestion asks about (the premise's target
+      time; "now" is the session's recorded as_of_ts). Then spans are
+      clustered and combined as before. An observation with no date takes a
+      flat penalty and the label "date unknown".
+
 Conflict-aware aggregation (M10): `contradicts` edges finally participate.
 Each side's independent support becomes belief b; opposing support becomes
 disbelief d; final credence = b(1-d)/(1-b·d) — degrades to plain noisy-OR
@@ -51,10 +64,17 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from urllib.parse import urlsplit
 
 from parsec.config import RunConfig, behaviour_level
+from parsec.verify.dating import (
+    NOW,
+    Interval,
+    gap_days,
+    parse_interval,
+    target_interval,
+)
 from parsec.verify.syndication import cluster_spans
 
 # Domain suffix -> prior. Longest matching suffix wins; config merges on top.
@@ -94,6 +114,10 @@ UNVERIFIED_DERIVATION_CAP = 0.5
 
 VOLATILE_HALF_LIFE_DAYS = 30.0
 SLOW_HALF_LIFE_DAYS = 365.0
+# recency >= 2: flat factors for an observation with no date. Placeholders
+# until `parsec calibrate` can fit them — kept internal, never shown.
+UNDATED_SLOW_FACTOR = 0.95
+UNDATED_VOLATILE_FACTOR = 0.8  # on top of the volatile floor
 
 
 def render_tier(credence: float) -> str:
@@ -159,6 +183,7 @@ class NodeCredence:
     superseded_by: str | None = None  # newer evidence replaced this mutable fact
     stale: bool = False             # mutable and decayed with evidence age
     unverified: bool = False        # rests on a derivation the harness could not recompute
+    undated: bool = False           # mutable, and no supporting observation has a date
 
     @property
     def single_source(self) -> bool:
@@ -187,6 +212,8 @@ def annotate(nc: NodeCredence, ranges: dict[str, tuple[int, int]] | None = None)
         parts.append("single source")
     if nc.stale:
         parts.append("possibly stale")
+    if nc.undated:
+        parts.append("date unknown")
     if nc.unverified:
         parts.append("unverified derivation")
     return f"{label} ({'; '.join(parts)})" if parts else label
@@ -214,6 +241,8 @@ def compute_credences(
     learned_reliability: bool = False,
     embed: Callable[[list[str]], list[list[float]]] | None = None,
     claim_credence: int = 1,
+    recency: int = 1,
+    as_of_ts: str | None = None,
 ) -> CredenceReport:
     """Recompute credence over the whole session graph (§6 stage 3),
     tier-by-tier bottom-up with conflict resolution applied per tier, and
@@ -236,7 +265,7 @@ def compute_credences(
     out_edges: dict[str, list[dict]] = {}
     conflict_pairs: set[tuple[str, str]] = set()
     for row in conn.execute(
-        "SELECT src_node_id, dst_node_id, edge_type FROM edges WHERE session_id=?",
+        "SELECT src_node_id, dst_node_id, edge_type, payload_json FROM edges WHERE session_id=?",
         (session_id,),
     ):
         out_edges.setdefault(row["src_node_id"], []).append(dict(row))
@@ -272,6 +301,10 @@ def compute_credences(
     # premise -> (claim_class, newest evidence ts): supersession inputs
     premise_class: dict[str, str] = {}
     premise_ts: dict[str, datetime | None] = {}
+    # recency >= 2: the RESOLVED time each premise is evidence for. Intervals,
+    # not the stored selector: "now" and the explicit day it resolves to are
+    # the same time frame and must compare equal.
+    premise_target: dict[str, Interval | None] = {}
 
     by_tier: dict[int, list[str]] = {}
     for nid in sorted(nodes, key=lambda n: (nodes[n]["tier"], n)):
@@ -283,6 +316,21 @@ def compute_credences(
             if node["type"] == "SourceSpan":
                 m = span_meta[nid]
                 report.nodes[nid] = NodeCredence(m["credence"], frozenset([m["domain"]]))
+            elif node["type"] == "Premise" and recency >= 2:
+                target_time = node["payload"].get("target_time") or NOW
+                # "now" is the session's recorded reference time; a session
+                # with none (re-scored from before as_of_ts) falls back to
+                # the newest fetch, the old model's notion of now.
+                target = target_interval(target_time, as_of_ts) or (
+                    (corpus_dt.date(), corpus_dt.date()) if corpus_dt else None
+                )
+                report.nodes[nid], newest = _premise_credence_dated(
+                    nid, node, out_edges, span_meta, target,
+                    volatile_penalty, volatile_half_life_days, slow_half_life_days, embed,
+                )
+                premise_class[nid] = node["payload"].get("claim_class", "stable")
+                premise_ts[nid] = newest
+                premise_target[nid] = target
             elif node["type"] == "Premise":
                 report.nodes[nid] = _premise_credence(
                     nid, node, out_edges, span_meta, corpus_dt,
@@ -308,7 +356,7 @@ def compute_credences(
                     # legacy: cited refs as independent supporting paths
                     report.nodes[nid] = _derived_credence(nid, out_edges, report, joint=False)
         _resolve_conflicts(
-            tier_level, conflict_pairs, nodes, report, premise_class, premise_ts
+            tier_level, conflict_pairs, nodes, report, premise_class, premise_ts, premise_target
         )
 
     for nid, node in nodes.items():
@@ -381,6 +429,81 @@ def _premise_credence(
     return NodeCredence(credence, domains, stale=stale)
 
 
+def _observation_factor(
+    claim_class: str,
+    observed: Interval | None,
+    target: Interval | None,
+    volatile_penalty: float,
+    volatile_half_life_days: float,
+    slow_half_life_days: float,
+) -> tuple[float, bool, bool]:
+    """(factor on the span's prior, decayed with age?, undated?) for one
+    observation of a fact of this mutability class."""
+    if claim_class not in ("volatile", "slow"):
+        return 1.0, False, False
+    floor = volatile_penalty if claim_class == "volatile" else 1.0
+    if observed is None or target is None:
+        flat = UNDATED_VOLATILE_FACTOR if claim_class == "volatile" else UNDATED_SLOW_FACTOR
+        return floor * flat, False, True
+    gap = gap_days(observed, target)
+    half_life = volatile_half_life_days if claim_class == "volatile" else slow_half_life_days
+    return floor * 0.5 ** (gap / half_life), gap > 0, False
+
+
+def _premise_credence_dated(
+    nid: str,
+    node: dict,
+    out_edges: dict,
+    span_meta: dict,
+    target: Interval | None,
+    volatile_penalty: float,
+    volatile_half_life_days: float,
+    slow_half_life_days: float,
+    embed: Callable[[list[str]], list[list[float]]],
+) -> tuple[NodeCredence, datetime | None]:
+    """recency >= 2. Decay each observation by its own distance from the
+    target time, THEN cluster and combine — so three 2019 sources are three
+    old observations whatever a fourth, recent one says. Returns the
+    credence and the premise's newest observation date (for supersession)."""
+    claim_class = node["payload"].get("claim_class", "stable")
+    spans: list[dict] = []
+    for e in out_edges.get(nid, []):
+        if e["edge_type"] != "extracts" or e["dst_node_id"] not in span_meta:
+            continue
+        observed = parse_interval(json.loads(e["payload_json"] or "{}").get("observed_at"))
+        factor, decayed, undated = _observation_factor(
+            claim_class, observed, target,
+            volatile_penalty, volatile_half_life_days, slow_half_life_days,
+        )
+        meta = span_meta[e["dst_node_id"]]
+        spans.append(
+            {
+                "domain": meta["domain"], "text": meta["text"],
+                "credence": meta["credence"] * factor,
+                "observed": observed, "decayed": decayed, "undated": undated,
+            }
+        )
+    if not spans:
+        return NodeCredence(0.0, frozenset()), None
+    spans.sort(key=lambda m: (m["domain"], m["text"]))
+    clusters = cluster_spans(spans, embed)
+    strengths = sorted(max(spans[i]["credence"] for i in cluster) for cluster in clusters)
+    domains = frozenset(min(spans[i]["domain"] for i in cluster) for cluster in clusters)
+    dated = [m["observed"] for m in spans if m["observed"] is not None]
+    newest = max((iv[1] for iv in dated), default=None)
+    return (
+        NodeCredence(
+            noisy_or(strengths),
+            domains,
+            # stale: nothing was observed at the time asked about
+            stale=bool(dated) and all(m["decayed"] for m in spans if m["observed"] is not None),
+            # date unknown: a mutable fact with no dated observation at all
+            undated=all(m["undated"] for m in spans),
+        ),
+        datetime.combine(newest, time.min) if newest is not None else None,
+    )
+
+
 def credence_settings(config: RunConfig) -> dict:
     """compute_credences keyword arguments for a session's config — every
     knob and behaviour version that decides a credence, in one place, so the
@@ -394,6 +517,8 @@ def credence_settings(config: RunConfig) -> dict:
         "slow_half_life_days": config.slow_half_life_days,
         "learned_reliability": config.learned_reliability,
         "claim_credence": behaviour_level(config.claim_credence),
+        "recency": behaviour_level(config.recency),
+        "as_of_ts": config.as_of_ts,
     }
 
 
@@ -451,6 +576,7 @@ def _claim_credence(nid: str, out_edges: dict, report: CredenceReport) -> NodeCr
         stale=any(p.stale for p in parents),
         superseded_by=superseded[0] if superseded else None,
         unverified=any(p.unverified for p in parents),
+        undated=any(p.undated for p in parents),
     )
 
 
@@ -467,7 +593,7 @@ def _derived_credence(
     paths: list[float] = []
     domains: set[str] = set()
     penalties: list[float] = []
-    conflicted = stale = False
+    conflicted = stale = undated = False
     superseded: list[str] = []
     for e in out_edges.get(nid, []):
         if e["edge_type"] == "contradicts" or e["dst_node_id"] not in report.nodes:
@@ -481,6 +607,7 @@ def _derived_credence(
         domains.update(parent.domains)
         conflicted = conflicted or parent.conflicted
         stale = stale or parent.stale
+        undated = undated or parent.undated
     if not paths:
         return NodeCredence(0.0, frozenset())
     if joint:
@@ -491,7 +618,7 @@ def _derived_credence(
         credence = noisy_or(sorted(paths))
     return NodeCredence(
         credence, frozenset(domains), conflicted=conflicted, stale=stale,
-        superseded_by=min(superseded) if superseded else None,
+        superseded_by=min(superseded) if superseded else None, undated=undated,
     )
 
 
@@ -502,6 +629,7 @@ def _resolve_conflicts(
     report: CredenceReport,
     premise_class: dict[str, str],
     premise_ts: dict,
+    premise_target: dict[str, Interval | None] | None = None,
 ) -> None:
     """Apply contradicts edges whose higher endpoint lives at this tier, so
     both sides have base values. Supersession first (mutable + dated evidence:
@@ -521,7 +649,7 @@ def _resolve_conflicts(
 
     superseded_by: dict[str, str] = {}
     for a, b in pairs:
-        winner_loser = _supersession(a, b, premise_class, premise_ts)
+        winner_loser = _supersession(a, b, premise_class, premise_ts, premise_target or {})
         if winner_loser is None:
             continue
         winner, loser = winner_loser
@@ -544,6 +672,7 @@ def _resolve_conflicts(
                 nc.credence * discount, nc.domains,
                 disbelief=snapshot.get(winner, 0.0),
                 superseded_by=winner, stale=nc.stale, unverified=nc.unverified,
+                undated=nc.undated,
             )
             continue
         live = sorted(o for o in opponents[nid] if o not in superseded_by)
@@ -555,16 +684,26 @@ def _resolve_conflicts(
             disbelief=disbelief, conflicted=True, stale=nc.stale,
             superseded_by=nc.superseded_by,  # inherited from a parent, if any
             unverified=nc.unverified,
+            undated=nc.undated,
         )
 
 
 def _supersession(
-    a: str, b: str, premise_class: dict[str, str], premise_ts: dict
+    a: str,
+    b: str,
+    premise_class: dict[str, str],
+    premise_ts: dict,
+    premise_target: dict[str, Interval | None] | None = None,
 ) -> tuple[str, str] | None:
     """(winner, loser) when newer evidence supersedes older on a mutable
     claim (M10): both endpoints are premises with dated evidence, the dates
     differ, and at least one side is mutable. Else None -> symmetric conflict."""
     if a not in premise_class or b not in premise_class:
+        return None
+    targets = premise_target or {}
+    if targets.get(a) != targets.get(b):
+        # Evidence about different times does not supersede: "10 in 2019"
+        # is not made obsolete by "12 now".
         return None
     ts_a, ts_b = premise_ts.get(a), premise_ts.get(b)
     if ts_a is None or ts_b is None or ts_a == ts_b:

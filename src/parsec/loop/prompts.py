@@ -124,7 +124,7 @@ def _writer_system(sentence_rules: bool, claim_rules: bool) -> str:
 
 WRITER_SYSTEM_SENTENCE_CHECK = _writer_system(sentence_rules=True, claim_rules=False)
 
-SUBMIT_SUBQUESTIONS_SCHEMA = {
+SUBMIT_SUBQUESTIONS_SCHEMA: dict = {
     "name": "submit_subquestions",
     "description": "Submit the research brief: scope, effort estimate, and decomposition.",
     "input_schema": {
@@ -151,14 +151,59 @@ SUBMIT_SUBQUESTIONS_SCHEMA = {
 }
 
 
+# recency >= 2: the brief says what time each subquestion asks about, and
+# the subagent dates what it records. Additions to the frozen text only.
+_DECOMPOSER_SUBQUESTIONS_RULE = (
+    "Do not add subquestions the user did not ask about.\n"
+)
+_DECOMPOSER_TARGET_RULE = (
+    "- target_times: one entry per subquestion, in the same order — \"now\" when the "
+    "subquestion asks about the present state of things, or the period it asks about when it "
+    "names one (\"2019\", \"March 2025\", \"Q3 2025\"). Evidence is weighed by how close "
+    "its date is to this time, so a question about the past must say so.\n"
+)
+assert DECOMPOSER_SYSTEM.count(_DECOMPOSER_SUBQUESTIONS_RULE) == 1
+DECOMPOSER_SYSTEM_TARGET_TIMES = DECOMPOSER_SYSTEM.replace(
+    _DECOMPOSER_SUBQUESTIONS_RULE, _DECOMPOSER_SUBQUESTIONS_RULE + _DECOMPOSER_TARGET_RULE
+)
+SUBMIT_SUBQUESTIONS_SCHEMA_TARGET_TIMES = {
+    **SUBMIT_SUBQUESTIONS_SCHEMA,
+    "input_schema": {
+        **SUBMIT_SUBQUESTIONS_SCHEMA["input_schema"],
+        "properties": {
+            **SUBMIT_SUBQUESTIONS_SCHEMA["input_schema"]["properties"],
+            "target_times": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "One per subquestion, same order: \"now\", or the period that "
+                    "subquestion asks about (e.g. \"2019\", \"March 2025\")"
+                ),
+            },
+        },
+    },
+}
+_SUBAGENT_DATING_RULE = (
+    "\n- Your subquestion states the time frame it asks about. When a span says WHEN a fact "
+    "held, set as_of on that premise to the date as the span gives it (a year, a month and "
+    "year, a quarter or a full date); the harness checks it appears in the span. Leave as_of "
+    "out when the span gives no date — never guess one."
+)
+
+
 def decomposer_system(config: RunConfig) -> str:
+    if behaviour_level(config.recency) >= 2:
+        return DECOMPOSER_SYSTEM_TARGET_TIMES
     return DECOMPOSER_SYSTEM
 
 
 def subagent_system(config: RunConfig) -> str:
+    text = SUBAGENT_SYSTEM
     if behaviour_level(config.derivations) >= 2:
-        return SUBAGENT_SYSTEM_DERIVATIONS
-    return SUBAGENT_SYSTEM
+        text = SUBAGENT_SYSTEM_DERIVATIONS
+    if behaviour_level(config.recency) >= 2:
+        text += _SUBAGENT_DATING_RULE
+    return text
 
 
 def writer_system(config: RunConfig) -> str:
@@ -175,6 +220,8 @@ def repair_template(config: RunConfig) -> str:
 
 
 def submit_subquestions_schema(config: RunConfig) -> dict:
+    if behaviour_level(config.recency) >= 2:
+        return SUBMIT_SUBQUESTIONS_SCHEMA_TARGET_TIMES
     return SUBMIT_SUBQUESTIONS_SCHEMA
 
 
@@ -260,7 +307,9 @@ def build_decomposer_request(
     tools, messages = apply_cache_strategy(
         config,
         [submit_subquestions_schema(config)],
-        messages if messages is not None else [{"role": "user", "content": query}],
+        messages
+        if messages is not None
+        else [{"role": "user", "content": decomposer_user_prompt(config, query)}],
     )
     return ModelRequest(
         model=config.model,
@@ -298,12 +347,47 @@ def build_writer_request(config: RunConfig, messages: list[dict]) -> ModelReques
     )
 
 
-def subagent_user_prompt(sq_id: str, question: str, scope: str = "") -> str:
+def today_of(config: RunConfig) -> str | None:
+    """The session's recorded reference date ("YYYY-MM-DD") for prompts, at
+    recency >= 2. The model must resolve "now", "last year" and "recent"
+    against the same day credence is scored against — its own sense of the
+    date is whatever it was trained with."""
+    if behaviour_level(config.recency) >= 2 and config.as_of_ts:
+        return config.as_of_ts[:10]
+    return None
+
+
+def decomposer_user_prompt(config: RunConfig, query: str) -> str:
+    """The decomposer's first message: the query, plus today's date when
+    the session has target times to resolve against it."""
+    today = today_of(config)
+    return f"{query}\n\nToday's date: {today}" if today else query
+
+
+def subagent_user_prompt(
+    sq_id: str,
+    question: str,
+    scope: str = "",
+    target_time: str | None = None,
+    today: str | None = None,
+) -> str:
     """The brief's scope rides in the FIRST user message only (M12): it never
-    mutates mid-session, so the subagent's prompt prefix stays cache-stable."""
+    mutates mid-session, so the subagent's prompt prefix stays cache-stable.
+    target_time (recency >= 2; None for sessions that predate it) adds the
+    time frame the subquestion asks about, and `today` the date "now" means."""
+    prompt = f"Subquestion {sq_id}: {question}"
+    if target_time is not None:
+        frame = (
+            "the present — what is true now"
+            if target_time == "now"
+            else target_time.replace("/", " to ")
+        )
+        prompt += f"\nTime frame: {frame}"
+    if today is not None:
+        prompt += f"\nToday's date: {today}"
     if scope:
-        return f"Research brief: {scope}\n\nSubquestion {sq_id}: {question}"
-    return f"Subquestion {sq_id}: {question}"
+        return f"Research brief: {scope}\n\n{prompt}"
+    return prompt
 
 
 def writer_user_prompt(
@@ -313,6 +397,7 @@ def writer_user_prompt(
     sources: dict[str, str],
     unresolved: list[tuple[str, str, str]],  # (sq_id, question, "status: reason")
     confidence: dict[str, str] | None = None,  # node_id -> annotation, e.g. "high" / "low (single source)"
+    frames: dict[str, str] | None = None,  # premise node_id -> time note (recency >= 2)
     max_text_chars: int | None = None,  # Phase 2 degradation: clip evidence TEXT, never ids/sources
 ) -> str:
     """The writer's entire view of the world: query + distilled evidence + gaps.
@@ -336,6 +421,10 @@ def writer_user_prompt(
         notes = [f"source: {url}"] if url else []
         if row["node_id"] in confidence:
             notes.append(f"confidence: {confidence[row['node_id']]}")
+        if frames and row["node_id"] in frames:
+            # What time the premise is evidence for and when it was observed:
+            # two premises can share their wording and differ only in this.
+            notes.append(frames[row["node_id"]])
         suffix = f" ({'; '.join(notes)})" if notes else ""
         lines.append(f"[{row['node_id']}] {clip(payload['text'])}{suffix}")
     if findings:

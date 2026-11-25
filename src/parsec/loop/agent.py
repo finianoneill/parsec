@@ -62,6 +62,7 @@ from parsec.loop.citations import (
 from parsec.loop.states import AgentState, StateMachine
 from parsec.loop.structured import (
     BriefSubmission,
+    BriefSubmissionV2,
     format_validation_errors,
     structured_call,
     validate_tool_call,
@@ -95,6 +96,7 @@ from parsec.verify.credence import (
     render_tier,
     source_tier,
 )
+from parsec.verify.dating import NOW, describe_interval, parse_interval, stated_dates
 from parsec.verify.nli import make_grounded_checker
 from parsec.verify.omission import OmissionReport, detect_omissions, extraction_note
 from parsec.verify.structural import verify_session
@@ -119,6 +121,9 @@ _APPROVALS = frozenset({"approve", "approved", "ok", "yes", "y", "lgtm"})
 class Subquestion:
     sq_id: str
     question: str
+    # recency >= 2: the time this subquestion asks about — "now" or a stored
+    # interval. None for sessions that predate target times.
+    target_time: str | None = None
 
 
 @dataclass
@@ -130,6 +135,8 @@ class Brief:
     scope: str
     effort: str  # quick | standard | deep
     questions: list[str]
+    # recency >= 2: one target time per question; None = all "now".
+    target_times: list[str] | None = None
 
 
 @dataclass
@@ -280,6 +287,9 @@ class OrchestratorLoop:
         # WS3: findings' numbers are checked, and `computes` findings are
         # recomputed, when the session records derivations >= 2.
         self.derivations = behaviour_level(config.derivations)
+        # WS2: subquestions carry a target time and premises are dated.
+        self.dated = behaviour_level(config.recency) >= 2
+        self._brief_model = BriefSubmissionV2 if self.dated else BriefSubmission
         # Optional progress hook for the live CLI view; called with snapshots.
         self.reporter: Callable[[dict], None] | None = None
 
@@ -367,6 +377,7 @@ class OrchestratorLoop:
                     self.ctx.conn, self.blobs, sid, nli_checker=self.nli_checker,
                     sentence_check=self.sentence_check,
                     derivations=self.derivations,
+                    recency=2 if self.dated else 1,
                 )
                 self.event_log.append(
                     sid, "harness", EventType.VERIFICATION_COMPLETED, vreport.to_payload()
@@ -499,7 +510,9 @@ class OrchestratorLoop:
             # M14.2: the parent already scoped this question — reuse its
             # recorded brief verbatim, spending zero model calls on planning.
             seed = self.refresh_seed
-            brief = Brief(seed.scope, seed.effort, list(seed.questions))
+            brief = Brief(
+                seed.scope, seed.effort, list(seed.questions), list(seed.target_times) or None
+            )
             note = f"refresh: brief seeded from {seed.parent_session_id}"
         elif self._gate():
             brief = Brief("", "deep", [cfg.query])
@@ -513,15 +526,25 @@ class OrchestratorLoop:
         # WS-F.4: the effort estimate becomes harness-enforced dispatch caps.
         self.effort_limits = effort_limits(brief.effort, cfg.budgets)
         questions = brief.questions[: self.effort_limits.max_subquestions]
-        subquestions = [Subquestion(f"sq-{i + 1}", q) for i, q in enumerate(questions)]
+        targets: list[str | None] = [None] * len(questions)
+        if self.dated:
+            # A brief without target times (the budget fallback, a seed from
+            # a parent that predates them) asks about now.
+            given = brief.target_times or []
+            targets = [given[i] if i < len(given) else NOW for i in range(len(questions))]
+        subquestions = [
+            Subquestion(f"sq-{i + 1}", q, targets[i]) for i, q in enumerate(questions)
+        ]
 
-        brief_payload = {
+        brief_payload: dict = {
             "scope": brief.scope,
             "effort": brief.effort,
             "subquestions": questions,
             "limits": self.effort_limits.model_dump(),
             "gated": cfg.brief_gate,
         }
+        if self.dated:
+            brief_payload["target_times"] = targets
         if self.refresh_seed is not None:
             brief_payload["seeded_from"] = self.refresh_seed.parent_session_id
         self.event_log.append(sid, "harness", EventType.RESEARCH_BRIEF, brief_payload)
@@ -529,7 +552,13 @@ class OrchestratorLoop:
             sid,
             "harness",
             EventType.SUBQUESTIONS_PLANNED,
-            {"subquestions": [{"sq_id": s.sq_id, "question": s.question} for s in subquestions]},
+            {
+                "subquestions": [
+                    {"sq_id": s.sq_id, "question": s.question}
+                    | ({"target_time": s.target_time} if self.dated else {})
+                    for s in subquestions
+                ]
+            },
         )
         for s in subquestions:
             self.coverage.create(sid, s.sq_id, s.question)
@@ -561,8 +590,8 @@ class OrchestratorLoop:
 
         outcome = await structured_call(
             complete,
-            [{"role": "user", "content": cfg.query}],
-            BriefSubmission,
+            [{"role": "user", "content": prompts.decomposer_user_prompt(cfg, cfg.query)}],
+            self._brief_model,
             "submit_subquestions",
             "Call submit_subquestions again with a corrected brief.",
             max_repairs=MAX_REPAIR_ROUNDS,
@@ -574,7 +603,7 @@ class OrchestratorLoop:
                 if outcome.repairs
                 else ""
             )
-            return Brief(sub.scope, sub.effort, sub.subquestions), note, outcome.resp
+            return self._brief_from(sub), note, outcome.resp
         detail = "; ".join(outcome.problems)
         return (
             Brief("", "deep", [cfg.query]),
@@ -582,12 +611,16 @@ class OrchestratorLoop:
             outcome.resp,
         )
 
+    @staticmethod
+    def _brief_from(sub: BriefSubmission) -> Brief:
+        return Brief(sub.scope, sub.effort, sub.subquestions, getattr(sub, "target_times", None))
+
     def _parse_brief(self, resp: ModelResponse) -> tuple[Brief, str]:
         """Single-shot validation for brief-gate revision rounds: the user
         is at the gate to steer again, so no automated repair is spent."""
-        sub, _, problems = validate_tool_call(resp, "submit_subquestions", BriefSubmission)
+        sub, _, problems = validate_tool_call(resp, "submit_subquestions", self._brief_model)
         if sub is not None:
-            return Brief(sub.scope, sub.effort, sub.subquestions), ""
+            return self._brief_from(sub), ""
         detail = "; ".join(problems)
         return (
             Brief("", "deep", [self.config.query]),
@@ -604,7 +637,9 @@ class OrchestratorLoop:
         so gated sessions replay byte-identically."""
         cfg = self.config
         sid = cfg.session_id
-        messages: list[dict] = [{"role": "user", "content": cfg.query}]
+        messages: list[dict] = [
+            {"role": "user", "content": prompts.decomposer_user_prompt(cfg, cfg.query)}
+        ]
         for round_index in range(MAX_BRIEF_ROUNDS):
             self.event_log.append(
                 sid,
@@ -616,7 +651,8 @@ class OrchestratorLoop:
                     "subquestions": brief.questions,
                     "proposal": round_index,
                     "status": "proposed",
-                },
+                }
+                | ({"target_times": brief.target_times} if self.dated else {}),
             )
             self.current_brief = brief
             try:
@@ -899,6 +935,9 @@ class OrchestratorLoop:
         # not leak into gap-fill or coverage-retry subagents dispatched after
         # a writer pass (the next writer/repair call re-arms it).
         self._wall_grace = False
+        if sq.target_time is not None:
+            # What record_premises stamps on premises this stream records.
+            self.ctx.stream_targets[sq.sq_id] = sq.target_time
         self.event_log.append(sid, actor, EventType.SUBAGENT_STARTED, {"sq_id": sq.sq_id})
         tool_schemas = self.registry.export_schemas(cfg)
         # The per-phase immutable prefix, counted by the compaction trigger
@@ -909,7 +948,10 @@ class OrchestratorLoop:
         messages: list[dict] = [
             {
                 "role": "user",
-                "content": prompts.subagent_user_prompt(sq.sq_id, sq.question, self.brief_scope),
+                "content": prompts.subagent_user_prompt(
+                    sq.sq_id, sq.question, self.brief_scope, sq.target_time,
+                    prompts.today_of(cfg),
+                ),
             }
         ]
         recorded_premises: list[str] = []  # premise IDs this subagent recorded
@@ -1063,7 +1105,9 @@ class OrchestratorLoop:
     ) -> tuple[list[dict], int]:
         """One ladder rung (§7); returns (messages, evicted_result_count)."""
         cfg = self.config
-        prompt = prompts.subagent_user_prompt(sq.sq_id, sq.question, self.brief_scope)
+        prompt = prompts.subagent_user_prompt(
+            sq.sq_id, sq.question, self.brief_scope, sq.target_time, prompts.today_of(cfg)
+        )
         if rung == 1:
             return compaction.evict_tool_results(messages, cfg.evict_keep_last)
         if rung == 2:
@@ -1384,7 +1428,9 @@ class OrchestratorLoop:
             for row in rows
             if row["node_id"] in credence.nodes
         }
-        self._writer_view = (premises, findings, sources, unresolved, confidence)
+        self._writer_view = (
+            premises, findings, sources, unresolved, confidence, self._premise_frames()
+        )
         messages: list[dict] = [self._writer_head()]
         # Proactive degradation (Phase 2): the writer prompt is rebuilt whole
         # from the DAG, so "too big" is knowable before asking — clip
@@ -1420,14 +1466,40 @@ class OrchestratorLoop:
         citation universe is unchanged (degrade, don't die)."""
         if self._writer_view is None:  # harness bug guard
             raise RuntimeError("writer head requested before the writer view was built")
-        premises, findings, sources, unresolved, confidence = self._writer_view
+        premises, findings, sources, unresolved, confidence, frames = self._writer_view
         return {
             "role": "user",
             "content": prompts.writer_user_prompt(
                 self.config.query, premises, findings, sources, unresolved, confidence,
+                frames=frames,
                 max_text_chars=self._WRITER_TEXT_CAPS[self._writer_level],
             ),
         }
+
+    def _premise_frames(self) -> dict[str, str]:
+        """recency >= 2: per premise, the time it is evidence for (when not
+        the present) and the dates its spans state for it — what the writer
+        needs to keep figures from different periods apart. Empty for
+        sessions that record neither, so their prompts are unchanged."""
+        if not self.dated:
+            return {}
+        sid = self.config.session_id
+        dates: dict[str, list[dict]] = {}
+        for e in self.dag.edges_for_session(sid):
+            if e["edge_type"] == "extracts":
+                dates.setdefault(e["src_node_id"], []).append(json.loads(e["payload_json"] or "{}"))
+        frames: dict[str, str] = {}
+        for row in self.dag.nodes_for_session(sid, tier=1):
+            notes: list[str] = []
+            target = parse_interval(json.loads(row["payload_json"]).get("target_time"))
+            if target is not None:
+                notes.append(f"time frame: {describe_interval(target)}")
+            stated = stated_dates(dates.get(row["node_id"], []))
+            if stated:
+                notes.append("observed: " + ", ".join(describe_interval(iv) for iv in stated))
+            if notes:
+                frames[row["node_id"]] = "; ".join(notes)
+        return frames
 
     def _writer_estimate(self, messages: list[dict]) -> int:
         # Fresh context each writer round — no prior-usage anchor to floor it.
@@ -1487,7 +1559,16 @@ class OrchestratorLoop:
             },
         )
         self.coverage.create(sid, sq_id, question)
-        await self._run_subagent(Subquestion(sq_id, question))
+        # The gap-fill looks for evidence about the same time the weak
+        # premise is evidence for.
+        target = self._premise_target(target_id) if self.dated else None
+        await self._run_subagent(Subquestion(sq_id, question, target))
+
+    def _premise_target(self, premise_id: str) -> str:
+        for row in self.dag.nodes_for_session(self.config.session_id, tier=1):
+            if row["node_id"] == premise_id:
+                return str(json.loads(row["payload_json"]).get("target_time") or NOW)
+        return NOW
 
     def _failed_primary_sources(self) -> list[dict]:
         """Fetches of PRIMARY-tier sources that yielded no citable text:
@@ -1597,7 +1678,9 @@ class OrchestratorLoop:
             {"sq_id": sq_id, "kind": "coverage", "target_sq": row["sq_id"], "reason": reason},
         )
         self.coverage.create(sid, sq_id, question)
-        await self._run_subagent(Subquestion(sq_id, question))
+        # A retry asks about the same time as the subquestion it retries.
+        target = self.ctx.stream_targets.get(row["sq_id"], NOW) if self.dated else None
+        await self._run_subagent(Subquestion(sq_id, question, target))
         retry = {r["sq_id"]: r for r in self.coverage.all(sid)}[sq_id]
         if retry["status"] == "answered":
             self.coverage.set_status(sid, row["sq_id"], "answered", f"recovered by {sq_id}")
@@ -1732,6 +1815,7 @@ class OrchestratorLoop:
                 or nc.conflicted
                 or bool(nc.superseded_by)
                 or nc.stale
+                or nc.undated
             )
             if not worth_itemizing:
                 continue

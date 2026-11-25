@@ -18,6 +18,7 @@ class EventType(StrEnum):
     SPAN_INDEXED = "span_indexed"
     NODE_ADDED = "node_added"
     EDGE_ADDED = "edge_added"
+    EDGE_UPDATED = "edge_updated"  # recency >= 2: an edge's observation date was filled in
     BUDGET_DEBIT = "budget_debit"
     RESEARCH_BRIEF = "research_brief"  # M12: persisted scoping artifact (scope, effort, subquestions)
     REFRESH_SEEDED = "refresh_seeded"  # M14.2: carried-forward vs re-researched split, with reasons
