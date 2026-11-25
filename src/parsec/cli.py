@@ -366,6 +366,20 @@ def build_parser() -> argparse.ArgumentParser:
     ev_make.add_argument("--fixtures", type=Path, required=True, help="Search fixtures used for the recording")
     ev_make.add_argument("--out", type=Path, required=True, help="New case directory")
     ev_make.add_argument("--case-id", default=None)
+    ev_exp = ev_sub.add_parser(
+        "export-case",
+        help="Write a case's corpus as text (JSONL tables + blobs) so it can be committed",
+    )
+    ev_exp.add_argument("case_dir", type=Path)
+    ev_exp.add_argument("--data-dir", type=Path, default=None, help="Source (default: <case_dir>/data)")
+    ev_exp.add_argument("--out", type=Path, default=None, help="Destination (default: <case_dir>/corpus)")
+    ev_exp.add_argument("--force", action="store_true", help="Replace an existing text corpus")
+    ev_imp = ev_sub.add_parser(
+        "import-case", help="Rebuild a case's data/ (SQLite + blobs) from its text corpus"
+    )
+    ev_imp.add_argument("case_dir", type=Path)
+    ev_imp.add_argument("--corpus", type=Path, default=None, help="Source (default: <case_dir>/corpus)")
+    ev_imp.add_argument("--data-dir", type=Path, default=None, help="Destination (default: <case_dir>/data)")
 
     cal = sub.add_parser(
         "calibrate",
@@ -1185,7 +1199,32 @@ def cmd_eval(args) -> int:
         return _eval_compare(args)
     if args.eval_command == "analyze":
         return _eval_analyze(args)
+    if args.eval_command in ("export-case", "import-case"):
+        return _eval_port_case(args)
     return _eval_make_case(args)
+
+
+def _eval_port_case(args) -> int:
+    from parsec.evals.case import CORPUS_DIR, DATA_DIR
+    from parsec.store.portable import PortableCorpusError, export_corpus, import_corpus
+
+    try:
+        if args.eval_command == "export-case":
+            source = args.data_dir or args.case_dir / DATA_DIR
+            dest = args.out or args.case_dir / CORPUS_DIR
+            summary = export_corpus(source, dest, force=args.force)
+        else:
+            source = args.corpus or args.case_dir / CORPUS_DIR
+            dest = args.data_dir or args.case_dir / DATA_DIR
+            summary = import_corpus(source, dest)
+    except PortableCorpusError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return EXIT_USAGE
+    console.print(
+        f"{source} → {dest}: {summary.rows} rows across "
+        f"{sum(1 for n in summary.tables.values() if n)} tables, {summary.blobs} blobs"
+    )
+    return EXIT_OK
 
 
 def _eval_run(args) -> int:
