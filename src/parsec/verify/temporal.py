@@ -18,6 +18,7 @@ date (definitely out of order), so granularity mismatches ("2020" vs
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 
@@ -105,10 +106,29 @@ def _premise_interval(pid: str, nodes: dict, out_edges: dict) -> Interval | None
         return None
     found = extract_date_intervals(node["payload"].get("text", ""))
     if not found:
+        # recency >= 2: the date the premise itself gave for the fact (and
+        # the harness found in the span). Publication dates are not used —
+        # when a page was published is not when the event happened.
+        for e in out_edges.get(pid, []):
+            payload = json.loads(e.get("payload_json") or "{}")
+            if e["edge_type"] == "extracts" and payload.get("date_source") == "as_of":
+                interval = _stored_interval(payload.get("observed_at", ""))
+                if interval is not None:
+                    found.append(interval)
+    if not found:
         for e in out_edges.get(pid, []):
             if e["edge_type"] == "extracts" and e["dst_node_id"] in nodes:
                 found += extract_date_intervals(nodes[e["dst_node_id"]]["payload"].get("text", ""))
     return envelope(found)
+
+
+def _stored_interval(observed_at: str) -> Interval | None:
+    """An edge's stored "YYYY-MM-DD/YYYY-MM-DD" as an Interval."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})/(\d{4})-(\d{2})-(\d{2})", observed_at)
+    if not m:
+        return None
+    y1, m1, d1, y2, m2, d2 = (int(g) for g in m.groups())
+    return (y1, m1, d1), (y2, m2, d2)
 
 
 def check_temporal_findings(

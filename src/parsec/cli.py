@@ -857,6 +857,7 @@ def cmd_verify(args) -> int:
         nli_checker=make_grounded_checker(session_config.nli_checker),
         sentence_check=behaviour_level(behaviour["sentence_check"]) >= 1,
         derivations=behaviour_level(behaviour["derivations"]),
+        recency=behaviour_level(behaviour["recency"]),
     )
     credence = compute_credences(
         conn,
@@ -864,6 +865,7 @@ def cmd_verify(args) -> int:
         **{
             **credence_settings(session_config),
             "claim_credence": behaviour_level(behaviour["claim_credence"]),
+            "recency": behaviour_level(behaviour["recency"]),
         },
         # Read-only: verify inspects a recording, it must never rewrite the
         # credences the run itself persisted (calibration labels read them).
@@ -902,7 +904,7 @@ def cmd_verify(args) -> int:
                 f"[yellow]{len(credence.flagged_claims)} claims below the stakes threshold[/yellow]"
             )
         for nid, nc in sorted(credence.nodes.items()):
-            if nc.conflicted or nc.superseded_by or nc.stale:
+            if nc.conflicted or nc.superseded_by or nc.stale or nc.undated or nc.unverified:
                 console.print(f"[yellow]{annotate(nc)}:[/yellow] {nid}")
         for dom, provenance in sorted(credence.source_reliability.items()):
             console.print(f"[dim]reliability {dom}: {provenance}[/dim]")

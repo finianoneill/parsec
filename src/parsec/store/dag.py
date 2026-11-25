@@ -34,14 +34,26 @@ class DagStore:
         )
         return node_id
 
-    def add_edge(self, session_id: str, src_node_id: str, dst_node_id: str, edge_type: str, payload: dict | None = None) -> str:
+    def add_edge(
+        self,
+        session_id: str,
+        src_node_id: str,
+        dst_node_id: str,
+        edge_type: str,
+        payload: dict | None = None,
+        log_payload: bool = False,
+    ) -> str:
+        """log_payload journals the payload in the EDGE_ADDED event, so it is
+        part of the recorded trajectory replay compares. Off by default —
+        and it must stay off for edges that older recordings wrote payloads
+        on without journaling them (transform notes, conflict notes), or
+        their event projections would no longer match. Callers that add a
+        NEW kind of payload turn it on (recency >= 2 observation dates)."""
         edge_id = ids.edge_id(src_node_id, dst_node_id, edge_type)
-        seq = self.event_log.append(
-            session_id,
-            "harness",
-            EventType.EDGE_ADDED,
-            {"edge_id": edge_id, "src": src_node_id, "dst": dst_node_id, "edge_type": edge_type},
-        )
+        event: dict = {"edge_id": edge_id, "src": src_node_id, "dst": dst_node_id, "edge_type": edge_type}
+        if log_payload and payload:
+            event["payload"] = payload
+        seq = self.event_log.append(session_id, "harness", EventType.EDGE_ADDED, event)
         self.conn.execute(
             "INSERT OR IGNORE INTO edges (edge_id, session_id, src_node_id, dst_node_id, edge_type, payload_json, created_seq)"
             " VALUES (?,?,?,?,?,?,?)",

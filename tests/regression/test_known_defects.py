@@ -15,11 +15,10 @@ Workstreams (see the remediation design brief):
        word order
   WS3  any transform_note exempts every number in a premise
 
-Not here yet: the WS2 recency cases (a 2019 observation asked about "now"
-versus "in 2019"). Their inputs — an observation date on a premise, a target
-time on a subquestion — do not exist in today's schema, so a test for them
-would be a guess at an interface. They land with that change. The WS3
-end-to-end unit conversion lives in tests/integration/test_ws3_computations.py.
+Two fixes are covered end to end elsewhere, because they need a full run:
+the WS2 recency pair (one 2019 observation asked about "now" and about
+"2019") in tests/integration/test_ws2_recency.py, and the WS3 unit
+conversion in tests/integration/test_ws3_computations.py.
 """
 
 from __future__ import annotations

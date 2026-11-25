@@ -26,7 +26,14 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from parsec.models.gateway import ModelRequest, ModelResponse
 
@@ -201,3 +208,38 @@ async def judged_json[T: BaseModel](
         return value
     except Exception:
         return None
+
+
+class BriefSubmissionV2(BriefSubmission):
+    """recency >= 2: each subquestion also says what time it asks about."""
+
+    # One entry per subquestion: "now", or the period the question names.
+    # Absent = every subquestion asks about now.
+    target_times: list[str] | None = None
+
+    @field_validator("target_times")
+    @classmethod
+    def _normalize_targets(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        from parsec.verify.dating import normalize_target
+
+        normalized = []
+        for i, raw in enumerate(v):
+            target = normalize_target(raw)
+            if target is None:
+                raise ValueError(
+                    f"target_times[{i}] {raw!r} is not a time frame: use \"now\", a year "
+                    "(2019), a month and year (March 2025), a quarter (Q3 2025) or a date"
+                )
+            normalized.append(target)
+        return normalized
+
+    @model_validator(mode="after")
+    def _one_target_per_subquestion(self) -> BriefSubmissionV2:
+        if self.target_times is not None and len(self.target_times) != len(self.subquestions):
+            raise ValueError(
+                f"target_times has {len(self.target_times)} entries for "
+                f"{len(self.subquestions)} subquestions; give exactly one per subquestion"
+            )
+        return self

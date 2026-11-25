@@ -18,6 +18,9 @@ Walks the persisted Evidence DAG of a session and mechanically checks:
   computation      — (derivations >= 2) every `computes` operation is
                      re-run with exact decimal arithmetic: operands must be
                      numbers their premises state, and the output must match
+  observation-date — (recency >= 2) a date a premise gave for a fact
+                     (`as_of`) is stated, at least as precisely, by the span
+                     it is attached to
   sentence-support — (sentence_check >= 1) every number and quotation in a
                      ReportClaim's text appears in the text of the premises
                      and findings it cites; a narrative claim carries neither.
@@ -50,6 +53,7 @@ from dataclasses import dataclass, field
 from parsec.store.blobs import BlobStore
 from parsec.verify.computations import UNVERIFIED, check_finding, evidence_text
 from parsec.verify.containment import check_containment, check_sentence, has_checkable_content
+from parsec.verify.dating import DATE_SOURCE_AS_OF, check_date_containment
 from parsec.verify.lints import lint_premise
 from parsec.verify.nli import GroundedChecker, LexicalGroundedChecker
 from parsec.verify.temporal import check_temporal_findings
@@ -121,6 +125,7 @@ def verify_session(
     nli_checker: GroundedChecker | None = _DEFAULT_NLI,
     sentence_check: bool = False,
     derivations: int = 1,
+    recency: int = 1,
 ) -> VerificationReport:
     report = VerificationReport()
     # ORDER BY id, not insertion: concurrent subagents (M11) interleave row
@@ -152,6 +157,8 @@ def verify_session(
     _check_containment(nodes, edges, report, verbatim=derivations >= 2)
     if derivations >= 2:
         _check_findings(nodes, report)
+    if recency >= 2:
+        _check_observation_dates(nodes, edges, report)
     _check_temporal(nodes, edges, report)
     if sentence_check:
         _check_sentence_support(nodes, edges, report)
@@ -344,7 +351,7 @@ def _flag_dependent_claims(
         and v.check
         in (
             "corpus-integrity", "containment", "tier-integrity", "temporal-order",
-            "finding-support", "computation",
+            "finding-support", "computation", "observation-date",
         )
     }
     if not violated:
@@ -371,6 +378,32 @@ def _flag_dependent_claims(
                     )
                 else:
                     queue.append(src)
+
+
+def _check_observation_dates(
+    nodes: dict[str, dict], edges: list[dict], report: VerificationReport
+) -> None:
+    """recency >= 2: re-run the date check intake ran. A date sourced from
+    the premise must still be found in the span on the other end of the edge."""
+    for e in edges:
+        if e["edge_type"] != "extracts":
+            continue
+        payload = json.loads(e["payload_json"] or "{}")
+        if payload.get("date_source") != DATE_SOURCE_AS_OF:
+            continue
+        span = nodes.get(e["dst_node_id"])
+        observed = payload.get("observed_at", "")
+        if span is None:
+            continue  # already flagged by tier-integrity
+        period, _ = check_date_containment(observed, span["payload"].get("text", ""))
+        if period is None:
+            report.violations.append(
+                Violation(
+                    "observation-date", e["src_node_id"],
+                    f"premise is dated {observed} but its span {span['payload'].get('span_id')} "
+                    "does not state that date",
+                )
+            )
 
 
 def _check_findings(nodes: dict[str, dict], report: VerificationReport) -> None:

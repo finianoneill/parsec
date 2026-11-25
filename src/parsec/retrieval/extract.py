@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 
-EXTRACTOR_VERSION = "3"
+EXTRACTOR_VERSION = "4"  # 4: publication date extracted into document meta
 _MIN_TRAFILATURA_CHARS = 40  # below this, trust the fallback more than main-content detection
 
 _SKIP_TAGS = {"script", "style", "noscript", "template", "head"}
@@ -153,3 +153,30 @@ def _stdlib_title(decoded: str) -> str | None:
     parser.feed(decoded)
     parser.close()
     return " ".join("".join(parser.title_parts).split()) or None
+
+
+def extract_published(raw: bytes, content_type: str | None) -> str | None:
+    """The document's own publication date as "YYYY-MM-DD", or None. HTML:
+    trafilatura's metadata (meta tags, JSON-LD, <time>); PDF: the creation
+    date in the document info. Noisy by nature — template dates and "last
+    updated" stamps exist — so it is only the fallback when a premise does
+    not state a date its span supports."""
+    kind = (content_type or "").lower()
+    try:
+        if "pdf" in kind or raw[:5] == b"%PDF-":
+            import io
+
+            from pypdf import PdfReader
+
+            created = PdfReader(io.BytesIO(raw)).metadata
+            stamp = created.creation_date if created is not None else None
+            return stamp.date().isoformat() if stamp is not None else None
+        if "html" in kind or raw.lstrip()[:1] == b"<":
+            import trafilatura
+
+            meta = trafilatura.extract_metadata(raw.decode("utf-8", errors="replace"))
+            value = meta.date if meta is not None else None
+            return value[:10] if isinstance(value, str) and len(value) >= 10 else None
+    except Exception:
+        return None
+    return None

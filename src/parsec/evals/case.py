@@ -70,6 +70,11 @@ class EvalCase(BaseModel):
     # Gap-fill rounds during eval runs; default 0 so a case's expected call
     # sequence stays fixed. Raise per case to eval the gap-fill loop itself.
     max_gap_rounds: int = 0
+    # The reference time for "now" in this case's runs (ISO date or
+    # timestamp). A frozen corpus needs a frozen "now": without one, each run
+    # measures evidence age against the day it happens to execute, and the
+    # same case scores differently next month.
+    as_of: str | None = None
     notes: str = ""
 
 

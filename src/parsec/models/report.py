@@ -104,6 +104,20 @@ class PremiseDraftV2(BaseModel):
     claim_class: Literal["stable", "slow", "volatile"] = "stable"
 
 
+class PremiseDraftV3(PremiseDraftV2):
+    """One atomic premise, stated exactly as its spans state it."""
+
+    # recency >= 2 (docstring above is sent to the model; this is not).
+    as_of: str | None = Field(
+        default=None,
+        description=(
+            "When the fact held, IF the cited span states that date: a year ('2019'), a month "
+            "and year ('March 2025'), a quarter ('Q3 2025') or a full date ('2025-03-01'). "
+            "The harness checks the date appears in the span. Omit it when the span gives no date."
+        ),
+    )
+
+
 class Operand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

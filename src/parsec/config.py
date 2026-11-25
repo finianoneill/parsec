@@ -159,6 +159,9 @@ CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
     # `computes` finding the harness recomputes; a finding's numbers must
     # come from its premises.
     "derivations": "2-dev",
+    # 2: decay runs on when each observation was made, measured against the
+    # time the subquestion asks about (as_of_ts for "now") — not fetch time.
+    "recency": "2-dev",
 }
 
 
