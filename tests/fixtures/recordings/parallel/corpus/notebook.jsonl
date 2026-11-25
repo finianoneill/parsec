@@ -1,0 +1,4 @@
+{"author":"orchestrator","entry_idx":0,"md_text":"**Query:** olympus mons height, width and mapping\n\n## Plan\n- sq-1: how tall is olympus mons\n- sq-2: how wide is olympus mons\n- sq-3: when was olympus mons mapped","session_id":"frozen-parallel","ts":"2026-11-25T21:36:27.390+00:00"}
+{"author":"subagent:sq-3","entry_idx":1,"md_text":"## sq-3: when was olympus mons mapped\n**Status:** answered\nPremises: [premise:e6a0d241e81fb556]","session_id":"frozen-parallel","ts":"2026-11-25T21:36:28.018+00:00"}
+{"author":"subagent:sq-2","entry_idx":2,"md_text":"## sq-2: how wide is olympus mons\n**Status:** answered\nPremises: [premise:609d851934ab1416]","session_id":"frozen-parallel","ts":"2026-11-25T21:36:28.019+00:00"}
+{"author":"subagent:sq-1","entry_idx":3,"md_text":"## sq-1: how tall is olympus mons\n**Status:** answered\nPremises: [premise:9f0ba51fa6190b5a]","session_id":"frozen-parallel","ts":"2026-11-25T21:36:28.019+00:00"}

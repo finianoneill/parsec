@@ -1,0 +1,1 @@
+{"results":[{"index":0,"premise_id":"premise:51d8d1ca77efa208","support":{"checker":"lexical-nli-v1","score":0.5714,"unsupported_terms":["13","6","mil"],"verdict":"uncertain"}}]}

@@ -1,0 +1,6 @@
+{"created_seq":40,"dst_node_id":"sourcespan:05ee615e7fd3641a","edge_id":"b5aefd0de18a0844","edge_type":"extracts","payload_json":{},"session_id":"frozen-parallel","src_node_id":"premise:e6a0d241e81fb556"}
+{"created_seq":72,"dst_node_id":"sourcespan:576fc1fbe5c7e280","edge_id":"600d11ed0a1f14e6","edge_type":"extracts","payload_json":{},"session_id":"frozen-parallel","src_node_id":"premise:609d851934ab1416"}
+{"created_seq":92,"dst_node_id":"sourcespan:765529545fa83f5d","edge_id":"23e164a4022cb0be","edge_type":"extracts","payload_json":{},"session_id":"frozen-parallel","src_node_id":"premise:9f0ba51fa6190b5a"}
+{"created_seq":117,"dst_node_id":"premise:9f0ba51fa6190b5a","edge_id":"0da6615905897b5f","edge_type":"aggregates","payload_json":{},"session_id":"frozen-parallel","src_node_id":"reportclaim:6379c90bf154338d"}
+{"created_seq":119,"dst_node_id":"premise:609d851934ab1416","edge_id":"1e25a385e186be20","edge_type":"aggregates","payload_json":{},"session_id":"frozen-parallel","src_node_id":"reportclaim:ebe8ba909039ecfd"}
+{"created_seq":121,"dst_node_id":"premise:e6a0d241e81fb556","edge_id":"91a1096d2614b5ce","edge_type":"aggregates","payload_json":{},"session_id":"frozen-parallel","src_node_id":"reportclaim:06cdb24f011156c4"}

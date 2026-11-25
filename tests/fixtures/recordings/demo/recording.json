@@ -1,0 +1,12 @@
+{
+  "recorded_at_commit": "366f1f6",
+  "sessions": [
+    "20261125T213626-a113"
+  ],
+  "status": {
+    "20261125T213626-a113": "done"
+  },
+  "aux": {
+    "demo_search_fixtures.json": "data/demo_search_fixtures.json"
+  }
+}

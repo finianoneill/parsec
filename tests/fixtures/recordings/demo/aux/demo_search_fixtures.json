@@ -1,0 +1,14 @@
+{
+  "how far is a parsec in light years": [
+    {
+      "title": "Stellar Parallax and the Parsec",
+      "url": "https://demo.parsec.invalid/parallax",
+      "snippet": "One parsec equals about 3.26 light-years."
+    },
+    {
+      "title": "Units: Parsec",
+      "url": "https://demo.parsec.invalid/unit",
+      "snippet": "Parallax of one arcsecond; coined 1913."
+    }
+  ]
+}
