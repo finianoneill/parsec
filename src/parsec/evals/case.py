@@ -8,6 +8,11 @@ A case is a self-contained directory:
       data/
         parsec.db    — recorded corpus: documents, cache index, spans
         blobs/       — content-addressed raw bytes + extracted text
+      corpus/        — the same corpus as text (JSONL tables + blobs), the
+                       form a case is committed in: `data/` is binary and
+                       gitignored. `parsec eval export-case` writes it,
+                       `import-case` rebuilds `data/` from it, and a case
+                       with only `corpus/` runs as-is.
 
 Eval runs never touch the case in place: the corpus is copied to a scratch
 directory (SQLite's file-copy forkability, §8) and executed in replay cache
@@ -30,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 CASE_FILE = "case.json"
 FIXTURES_FILE = "queries.json"
 DATA_DIR = "data"
+CORPUS_DIR = "corpus"
 
 
 class Nugget(BaseModel):
@@ -84,9 +90,19 @@ def discover_cases(root: Path) -> list[Path]:
 
 
 def copy_corpus(case_dir: Path, workdir: Path) -> Path:
-    """Fork the frozen corpus by file copy into a scratch data dir."""
+    """Fork the frozen corpus into a scratch data dir: by file copy when the
+    case has a built `data/`, else by importing its committed text corpus."""
     dest = workdir / DATA_DIR
-    shutil.copytree(case_dir / DATA_DIR, dest)
+    # A data/ with no database is a leftover (a failed import, a bare blob
+    # dir), not a built corpus: fall through to the committed text form.
+    if (case_dir / DATA_DIR / "parsec.db").is_file():
+        shutil.copytree(case_dir / DATA_DIR, dest)
+    elif (case_dir / CORPUS_DIR).is_dir():
+        from parsec.store.portable import import_corpus
+
+        import_corpus(case_dir / CORPUS_DIR, dest)
+    else:
+        raise FileNotFoundError(f"case {case_dir} has neither {DATA_DIR}/ nor {CORPUS_DIR}/")
     return dest
 
 

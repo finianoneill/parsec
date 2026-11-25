@@ -224,6 +224,8 @@ Two decision points can pause a live run for your input, both built on the same 
 | `parsec fork <session> --at-call N` | Rewind to model-call N and branch live (`--steer "…"` to redirect the branch) |
 | `parsec judge <session>` | Advisory judge pass (different model family) over `deduces`/`induces` derivations |
 | `parsec eval make-case <session>` | Snapshot a recorded session into a frozen eval case |
+| `parsec eval export-case <case_dir>` | Write a case's corpus as text (`corpus/`: JSONL tables + blobs) so it can be committed; `data/` is binary and gitignored |
+| `parsec eval import-case <case_dir>` | Rebuild a case's `data/` from its text corpus (a case with only `corpus/` also runs as-is) |
 | `parsec eval run <cases> --out r.json` | Score cases on every registered metric (citation faithfulness, coverage, nugget recall, claim support, advisory synthesis judge; `--metrics` picks a subset) and diagnose each case's losses |
 | `parsec eval compare a.json b.json` | Paired-difference diff of two results files plus the loss-taxonomy delta; exits 3 when a *mechanical* axis regresses beyond epsilon |
 | `parsec eval analyze r.json` | Why each case lost points: loss patterns by category (retrieval / extraction / writing / verification / coverage / harness / case), per case |

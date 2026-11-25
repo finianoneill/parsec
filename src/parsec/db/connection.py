@@ -14,13 +14,17 @@ def open_db(path: Path | str) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, isolation_level=None)  # autocommit; explicit txns via helper
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    schema = resources.files("parsec.db").joinpath("schema.sql").read_text(encoding="utf-8")
-    conn.executescript(schema)
-    _migrate(conn)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        schema = resources.files("parsec.db").joinpath("schema.sql").read_text(encoding="utf-8")
+        conn.executescript(schema)
+        _migrate(conn)
+    except BaseException:
+        conn.close()  # never leak a handle on a half-initialised database
+        raise
     return conn
 
 
