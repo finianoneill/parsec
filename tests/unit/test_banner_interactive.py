@@ -17,16 +17,35 @@ def test_banner_renders_wordmark_and_tagline():
 
 
 def test_banner_gradient_spans_indigo_to_cyan():
+    """Asserted on the styles render_banner() produces, not on ANSI bytes.
+
+    rich caches a Style's escape codes from the first console that renders
+    it, without keying on that console's colour system. Any earlier test that
+    printed the banner through a 256-colour console (the CLI's own, under
+    FORCE_COLOR without COLORTERM=truecolor) therefore left downgraded codes
+    behind, and a byte-level assertion here failed depending on test order
+    and environment."""
+    wordmark = [line for line in render_banner() if "█" in line.plain]
+    assert wordmark
+    for line in wordmark:
+        colours = [str(span.style) for span in line.spans]
+        assert len(colours) == len(line.plain)  # one colour per character
+        assert colours[0] == "#a5b4fc"  # indigo at the left edge
+        assert len(set(colours)) > 10  # a gradient, not a flat fill
+        # ends toward cyan: red falls and stays below blue all the way across
+        reds = [int(c[1:3], 16) for c in colours]
+        blues = [int(c[5:7], 16) for c in colours]
+        assert reds == sorted(reds, reverse=True) and reds[-1] < reds[0] - 60
+        assert all(blue > red for red, blue in zip(reds[1:], blues[1:], strict=True))
+
+
+def test_print_banner_emits_colour_on_a_colour_terminal():
     buf = io.StringIO()
-    # no_color=False: rich honours NO_COLOR from the environment even on a
-    # forced terminal, which made this test fail on any machine that sets it.
     console = Console(
         file=buf, force_terminal=True, color_system="truecolor", width=120, no_color=False
     )
     print_banner(console)
-    out = buf.getvalue()
-    assert "\x1b[38;2;165;180;252" in out  # #a5b4fc at the left edge
-    assert "\x1b[38;2;" in out
+    assert "\x1b[" in buf.getvalue()  # styled at all; exact codes are rich's business
 
 
 def test_no_args_enters_interactive_and_exits_on_eof(tmp_path, monkeypatch, capsys):

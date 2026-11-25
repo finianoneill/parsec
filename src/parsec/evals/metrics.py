@@ -40,6 +40,10 @@ from parsec.store.event_log import EventLog
 from parsec.store.ledger import Ledger
 
 Tier = Literal["mechanical", "advisory"]
+# Which way is better. A regression gate that assumes "higher" for every
+# metric reports an improving error score (Brier, ECE) as a regression, so
+# each metric states its own direction and the manifest carries it.
+Direction = Literal["higher", "lower"]
 
 
 @dataclass
@@ -70,6 +74,7 @@ class MetricResult:
 class Metric(Protocol):
     name: str
     tier: Tier
+    direction: Direction
 
     async def score(self, ctx: MetricContext) -> MetricResult: ...
 
@@ -166,7 +171,10 @@ async def run_metrics(metrics: list[Metric], ctx: MetricContext) -> Scores:
 
 
 def manifest(metrics: Iterable[Metric]) -> list[dict]:
-    return [{"name": m.name, "tier": m.tier} for m in metrics]
+    return [
+        {"name": m.name, "tier": m.tier, "direction": getattr(m, "direction", "higher")}
+        for m in metrics
+    ]
 
 
 # --- built-ins --------------------------------------------------------------
@@ -179,6 +187,7 @@ class CitationFaithfulness:
 
     name = "citation_faithfulness"
     tier: Tier = "mechanical"
+    direction: Direction = "higher"
 
     async def score(self, ctx: MetricContext) -> MetricResult:
         value, total, faithful = score_citation_faithfulness(ctx.conn, ctx.blobs, ctx.session_id)
@@ -193,6 +202,7 @@ class Coverage:
 
     name = "coverage"
     tier: Tier = "mechanical"
+    direction: Direction = "higher"
 
     async def score(self, ctx: MetricContext) -> MetricResult:
         value, hits, misses = score_coverage(ctx.conn, ctx.session_id, ctx.case.must_find)
@@ -207,6 +217,7 @@ class NuggetRecall:
 
     name = "nugget_recall"
     tier: Tier = "mechanical"
+    direction: Direction = "higher"
 
     async def score(self, ctx: MetricContext) -> MetricResult:
         value, hits, misses, contra = score_nuggets(ctx.conn, ctx.session_id, ctx.case.nuggets)
@@ -225,6 +236,7 @@ class ClaimSupport:
 
     name = "claim_support"
     tier: Tier = "mechanical"
+    direction: Direction = "higher"
 
     async def score(self, ctx: MetricContext) -> MetricResult:
         value, details = score_claim_support(ctx.conn, ctx.session_id, ctx.support_checker)
@@ -240,6 +252,7 @@ class SynthesisJudge:
 
     name = "synthesis"
     tier: Tier = "advisory"
+    direction: Direction = "higher"
 
     def __init__(self, adapter: ModelAdapter | None = None, model: str = ""):
         self.adapter = adapter

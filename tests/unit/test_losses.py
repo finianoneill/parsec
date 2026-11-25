@@ -315,7 +315,10 @@ def test_axes_discovered_from_manifest_union():
     b = _results("b", {"c1": {"nugget_recall": 1.0, "resilience": 0.1}}, manifest_b)
     comparison = compare_runs(a, b)
     assert [v.axis for v in comparison.verdicts] == ["nugget_recall", "resilience"]
-    assert comparison.ok  # None -> score is not a regression
+    assert comparison.regressed_axes == []  # None -> score is not a regression...
+    # ...but a metric only one run measured means the runs are not comparable
+    assert comparison.metrics_only_in_b == ["resilience"]
+    assert not comparison.ok
 
 
 def test_legacy_results_without_manifest_still_gate_on_synthesis_as_advisory():

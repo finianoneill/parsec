@@ -149,4 +149,6 @@ def test_compare_case_sets():
     comparison = compare_runs(a, b)
     assert comparison.only_in_a == ["gone"]
     assert comparison.only_in_b == ["new"]
-    assert comparison.ok
+    # a case that disappears must fail the comparison, never pass it silently
+    assert not comparison.ok
+    assert comparison.regressed_axes == []

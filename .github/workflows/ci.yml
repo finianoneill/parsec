@@ -1,0 +1,82 @@
+name: CI
+
+# Keyless and offline by construction: no job here has access to a secret,
+# and the suite runs against scripted models and a recorded web. Live evals
+# (which need API keys and cost money) do not belong in this workflow.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # --locked: fail if uv.lock is out of date, so the tool versions that
+      # ran here are exactly the pinned ones (ruff and mypy results vary by
+      # version).
+      - run: uv sync --locked --python 3.12
+      - run: uv run --locked ruff check src tests
+      - run: uv run --locked mypy
+
+  test:
+    name: Tests (py${{ matrix.python }}, colour ${{ matrix.colour }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+        colour: ["on", "off"]
+    steps:
+      - uses: actions/checkout@v4
+      # Terminal-colour settings have broken tests before (rich honours
+      # NO_COLOR even on a forced terminal), so both are exercised. Exactly
+      # one variable is set: an empty NO_COLOR still counts as set for some
+      # tools, so the other is left out of the environment entirely.
+      - name: Set terminal colour mode
+        run: |
+          if [ "${{ matrix.colour }}" = "off" ]; then
+            echo "NO_COLOR=1" >> "$GITHUB_ENV"
+          else
+            echo "FORCE_COLOR=1" >> "$GITHUB_ENV"
+          fi
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --python ${{ matrix.python }}
+      # pytest-randomly shuffles test order on every run and prints the seed
+      # in the header; rerun a failure with `-p randomly -p no:cacheprovider
+      # --randomly-seed=<seed>`. The suite includes the frozen-recording
+      # replays (tests/integration/test_frozen_recordings.py) and the
+      # known-defect cases (tests/regression/).
+      - run: uv run --locked pytest -ra
+
+  order-independence:
+    name: Tests in five fixed random orders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --python 3.12
+      - name: Run the suite under seeds 1-5
+        run: |
+          for seed in 1 2 3 4 5; do
+            echo "::group::seed $seed"
+            uv run --locked pytest -q -p randomly --randomly-seed="$seed"
+            echo "::endgroup::"
+          done
