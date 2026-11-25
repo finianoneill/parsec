@@ -371,7 +371,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write a case's corpus as text (JSONL tables + blobs) so it can be committed",
     )
     ev_exp.add_argument("case_dir", type=Path)
-    ev_exp.add_argument("--data-dir", type=Path, default=None, help="Source (default: <case_dir>/data)")
+    # dest is NOT data_dir on these two commands: a configured data_dir (user
+    # config) is installed as the default of every option with that dest, and
+    # it must never stand in for a case's own data/.
+    ev_exp.add_argument(
+        "--data-dir", dest="case_data_dir", type=Path, default=None,
+        help="Source (default: <case_dir>/data)",
+    )
     ev_exp.add_argument("--out", type=Path, default=None, help="Destination (default: <case_dir>/corpus)")
     ev_exp.add_argument("--force", action="store_true", help="Replace an existing text corpus")
     ev_imp = ev_sub.add_parser(
@@ -379,7 +385,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ev_imp.add_argument("case_dir", type=Path)
     ev_imp.add_argument("--corpus", type=Path, default=None, help="Source (default: <case_dir>/corpus)")
-    ev_imp.add_argument("--data-dir", type=Path, default=None, help="Destination (default: <case_dir>/data)")
+    ev_imp.add_argument(
+        "--data-dir", dest="case_data_dir", type=Path, default=None,
+        help="Destination (default: <case_dir>/data)",
+    )
 
     cal = sub.add_parser(
         "calibrate",
@@ -1210,12 +1219,12 @@ def _eval_port_case(args) -> int:
 
     try:
         if args.eval_command == "export-case":
-            source = args.data_dir or args.case_dir / DATA_DIR
+            source = args.case_data_dir or args.case_dir / DATA_DIR
             dest = args.out or args.case_dir / CORPUS_DIR
             summary = export_corpus(source, dest, force=args.force)
         else:
             source = args.corpus or args.case_dir / CORPUS_DIR
-            dest = args.data_dir or args.case_dir / DATA_DIR
+            dest = args.case_data_dir or args.case_dir / DATA_DIR
             summary = import_corpus(source, dest)
     except PortableCorpusError as exc:
         console.print(f"[red]{exc}[/red]")

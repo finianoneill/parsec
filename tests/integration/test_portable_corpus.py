@@ -220,3 +220,125 @@ def test_cli_export_then_import(recorded, tmp_path, capsys):
     )
     assert _dump(rebuilt) == before
     assert "blobs" in capsys.readouterr().out
+
+
+def test_configured_data_dir_never_replaces_a_cases_own_data(recorded, tmp_path, capsys):
+    """User config installs `data_dir` as the default of every --data-dir
+    option; for these two commands that would export (or build into) the
+    user's main database instead of the case's."""
+    from parsec import user_config
+
+    elsewhere = tmp_path / "configured-elsewhere"
+    user_config.USER_CONFIG.write_text(json.dumps({"data_dir": str(elsewhere)}))
+
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    recorded.rename(case_dir / "data")
+    assert cli.main(["eval", "export-case", str(case_dir)]) == cli.EXIT_OK
+    assert (case_dir / "corpus" / "sessions.jsonl").is_file()
+
+    (case_dir / "data").rename(tmp_path / "set-aside")
+    assert cli.main(["eval", "import-case", str(case_dir)]) == cli.EXIT_OK
+    assert (case_dir / "data" / "parsec.db").is_file()
+    assert not elsewhere.exists()
+
+
+def test_leftover_data_dir_without_a_database_falls_back_to_the_corpus(recorded, tmp_path):
+    case_dir = tmp_path / "case"
+    export_corpus(recorded, case_dir / "corpus")
+    (case_dir / "data" / "blobs").mkdir(parents=True)  # what a failed import used to leave
+    forked = copy_corpus(case_dir, tmp_path / "work")
+    assert _dump(forked) == _dump(recorded)
+
+
+def test_failed_forced_export_keeps_the_previous_corpus(recorded, tmp_path):
+    corpus = tmp_path / "corpus"
+    export_corpus(recorded, corpus)
+    before = _files(corpus)
+
+    victim = next(p for p in (recorded / "blobs").glob("*/*"))
+    original = victim.read_bytes()
+    victim.write_bytes(original + b"x")
+    with pytest.raises(PortableCorpusError, match="content hash"):
+        export_corpus(recorded, corpus, force=True)
+    assert _files(corpus) == before
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".corpus")] == []
+
+    # once the source is repaired, the forced export goes through
+    victim.write_bytes(original)
+    export_corpus(recorded, corpus, force=True)
+    assert _files(corpus) == before
+
+
+def test_export_reads_all_tables_in_one_transaction(recorded, tmp_path, monkeypatch):
+    """Every table must come from the same snapshot; assert the reads happen
+    inside a single open transaction and that it is released afterwards."""
+    from parsec.store import portable
+
+    states: list[bool] = []
+    real_columns = portable._columns
+
+    def spying_columns(conn, table):
+        states.append(conn.in_transaction)
+        return real_columns(conn, table)
+
+    monkeypatch.setattr(portable, "_columns", spying_columns)
+    export_corpus(recorded, tmp_path / "corpus")
+    assert len(states) == len(PORTABLE_TABLES) and all(states)
+
+
+def test_failed_import_removes_everything_it_created(recorded, tmp_path, monkeypatch):
+    from parsec.store import portable
+
+    corpus = tmp_path / "corpus"
+    export_corpus(recorded, corpus)
+
+    # a failure inside database initialisation, after the file exists
+    def failing_open_db(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"")
+        raise OSError("disk full")
+
+    target = tmp_path / "rebuilt"
+    with monkeypatch.context() as patch:
+        patch.setattr(portable, "open_db", failing_open_db)
+        with pytest.raises(OSError, match="disk full"):
+            import_corpus(corpus, target)
+    assert not target.exists()
+
+    # into a directory that already existed: it stays, minus what we added
+    target.mkdir()
+    (target / "keep.txt").write_text("mine")
+    with monkeypatch.context() as patch:
+        patch.setattr(portable, "open_db", failing_open_db)
+        with pytest.raises(OSError):
+            import_corpus(corpus, target)
+    assert sorted(p.name for p in target.iterdir()) == ["keep.txt"]
+
+    # and the retry succeeds
+    import_corpus(corpus, target)
+    assert _dump(target) == _dump(recorded)
+
+
+def test_open_db_closes_its_connection_when_initialisation_fails(tmp_path, monkeypatch):
+    import sqlite3
+
+    from parsec.db import connection
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    def boom(conn):
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(connection.sqlite3, "connect", tracking_connect)
+    monkeypatch.setattr(connection, "_migrate", boom)
+    with pytest.raises(RuntimeError, match="migration failed"):
+        connection.open_db(tmp_path / "parsec.db")
+    with pytest.raises(sqlite3.ProgrammingError):  # closed handles refuse use
+        opened[0].execute("SELECT 1")

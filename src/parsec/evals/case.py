@@ -93,7 +93,9 @@ def copy_corpus(case_dir: Path, workdir: Path) -> Path:
     """Fork the frozen corpus into a scratch data dir: by file copy when the
     case has a built `data/`, else by importing its committed text corpus."""
     dest = workdir / DATA_DIR
-    if (case_dir / DATA_DIR).is_dir():
+    # A data/ with no database is a leftover (a failed import, a bare blob
+    # dir), not a built corpus: fall through to the committed text form.
+    if (case_dir / DATA_DIR / "parsec.db").is_file():
         shutil.copytree(case_dir / DATA_DIR, dest)
     elif (case_dir / CORPUS_DIR).is_dir():
         from parsec.store.portable import import_corpus

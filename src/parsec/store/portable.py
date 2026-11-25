@@ -163,44 +163,71 @@ def _copy_blobs(src_root: Path, dst_root: Path) -> int:
     return count
 
 
+def _is_corpus(path: Path) -> bool:
+    return (path / MANIFEST_FILE).is_file()
+
+
 def export_corpus(data_dir: Path, corpus_dir: Path, force: bool = False) -> CorpusSummary:
-    """Write `data_dir` (parsec.db + blobs/) as a text corpus at `corpus_dir`."""
+    """Write `data_dir` (parsec.db + blobs/) as a text corpus at `corpus_dir`.
+
+    The corpus is built in a sibling staging directory and moved into place
+    only once every table, every blob and the manifest are written, so a
+    failed export leaves whatever was at `corpus_dir` exactly as it was."""
     db_path = data_dir / DB_FILE
     if not db_path.is_file():
         raise PortableCorpusError(f"no database at {db_path}")
     if corpus_dir.exists():
         if not force:
             raise PortableCorpusError(f"{corpus_dir} already exists (pass force to replace it)")
-        if not (corpus_dir / MANIFEST_FILE).is_file() and any(corpus_dir.iterdir()):
+        if not _is_corpus(corpus_dir) and any(corpus_dir.iterdir()):
             # Never delete a directory that does not look like one of ours.
             raise PortableCorpusError(f"{corpus_dir} is not a parsec corpus; not replacing it")
-        shutil.rmtree(corpus_dir)
-    corpus_dir.mkdir(parents=True)
 
-    # open_db applies pending column migrations, so every export is written
-    # against the current schema whatever version recorded the data.
-    conn = open_db(db_path)
+    corpus_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = corpus_dir.parent / f".{corpus_dir.name}.exporting"
+    if staging.exists():
+        shutil.rmtree(staging)  # debris from an export that was killed
+    staging.mkdir()
     try:
-        _check_schema_is_covered(conn)
-        manifest_tables: dict[str, dict] = {}
-        for table in PORTABLE_TABLES:
-            columns = _columns(conn, table)
-            rows = conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-            manifest_tables[table] = {"rows": len(rows), "columns": columns}
-            if not rows:
-                continue
-            with (corpus_dir / f"{table}.jsonl").open("w", encoding="utf-8", newline="\n") as f:
-                for row in rows:
-                    line = {col: _encode_value(col, row[col]) for col in columns}
-                    f.write(canonical_json(line) + "\n")
-    finally:
-        conn.close()
+        # open_db applies pending column migrations, so every export is
+        # written against the current schema whatever version recorded the data.
+        conn = open_db(db_path)
+        try:
+            _check_schema_is_covered(conn)
+            manifest_tables: dict[str, dict] = {}
+            # One read transaction: every table is read from the same
+            # snapshot, so a session committing mid-export cannot leave
+            # events in the corpus without their session row.
+            conn.execute("BEGIN")
+            try:
+                for table in PORTABLE_TABLES:
+                    columns = _columns(conn, table)
+                    rows = conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                    manifest_tables[table] = {"rows": len(rows), "columns": columns}
+                    if not rows:
+                        continue
+                    path = staging / f"{table}.jsonl"
+                    with path.open("w", encoding="utf-8", newline="\n") as f:
+                        for row in rows:
+                            line = {col: _encode_value(col, row[col]) for col in columns}
+                            f.write(canonical_json(line) + "\n")
+            finally:
+                conn.execute("ROLLBACK")  # read-only: nothing to commit
+        finally:
+            conn.close()
 
-    blobs = _copy_blobs(data_dir / BLOBS_DIR, corpus_dir / BLOBS_DIR)
-    manifest = {"format": FORMAT_VERSION, "tables": manifest_tables, "blobs": blobs}
-    (corpus_dir / MANIFEST_FILE).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+        blobs = _copy_blobs(data_dir / BLOBS_DIR, staging / BLOBS_DIR)
+        manifest = {"format": FORMAT_VERSION, "tables": manifest_tables, "blobs": blobs}
+        (staging / MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    if corpus_dir.exists():
+        shutil.rmtree(corpus_dir)
+    staging.rename(corpus_dir)
     return CorpusSummary({t: m["rows"] for t, m in manifest_tables.items()}, blobs)
 
 
@@ -249,21 +276,25 @@ def _read_rows(path: Path, table: str, known_columns: list[str]) -> tuple[list[s
 
 def import_corpus(corpus_dir: Path, data_dir: Path) -> CorpusSummary:
     """Rebuild a data directory (parsec.db + blobs/) from a text corpus.
-    Refuses to write into a data directory that already has a database."""
+    Refuses to write into a data directory that already has a database; on
+    any failure it removes what it created, so a retry starts clean."""
     manifest = _read_manifest(corpus_dir)
     db_path = data_dir / DB_FILE
     if db_path.exists():
         raise PortableCorpusError(f"{db_path} already exists; import needs an empty data dir")
-
-    blobs = _copy_blobs(corpus_dir / BLOBS_DIR, data_dir / BLOBS_DIR)
-    if blobs != manifest.get("blobs"):
-        raise PortableCorpusError(
-            f"manifest lists {manifest.get('blobs')} blobs, corpus has {blobs}"
-        )
+    blob_root = data_dir / BLOBS_DIR
+    made_data_dir = not data_dir.exists()
+    made_blob_root = not blob_root.exists()
 
     counts: dict[str, int] = {}
-    conn = open_db(db_path)
+    conn: sqlite3.Connection | None = None
     try:
+        blobs = _copy_blobs(corpus_dir / BLOBS_DIR, blob_root)
+        if blobs != manifest.get("blobs"):
+            raise PortableCorpusError(
+                f"manifest lists {manifest.get('blobs')} blobs, corpus has {blobs}"
+            )
+        conn = open_db(db_path)
         with transaction(conn):
             for table in PORTABLE_TABLES:
                 expected = manifest["tables"].get(table, {}).get("rows", 0)
@@ -290,10 +321,16 @@ def import_corpus(corpus_dir: Path, data_dir: Path) -> CorpusSummary:
                 "SELECT span_id, text FROM spans ORDER BY rowid"
             )
     except BaseException:
-        conn.close()
-        # Leave nothing half-built behind: a later import must start clean.
+        if conn is not None:
+            conn.close()
+        # Covers a failure inside open_db too (it creates the file before the
+        # schema runs). Remove only what this call created.
         for leftover in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
             leftover.unlink(missing_ok=True)
+        if made_data_dir:
+            shutil.rmtree(data_dir, ignore_errors=True)
+        elif made_blob_root:
+            shutil.rmtree(blob_root, ignore_errors=True)
         raise
     conn.close()
     return CorpusSummary(counts, blobs)
