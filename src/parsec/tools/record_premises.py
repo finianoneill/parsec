@@ -335,8 +335,9 @@ class RecordPremisesTool:
         results: list[dict] = []
         lines: list[str] = []
         known, span_nodes, attached = self._session_premises(sid)
-        # claim_credence >= 2: word order is part of what a premise says.
-        order_aware = behaviour_level(ctx.config.claim_credence) >= 2
+        # Which "same proposition" test intake applies (verify.propositions):
+        # 2 adds word order, 3 requires identical content words.
+        dedup_level = behaviour_level(ctx.config.claim_credence)
         # derivations >= 2: premises are verbatim, with no transform_note.
         verbatim = behaviour_level(ctx.config.derivations) >= 2
         # recency >= 2: every premise records the time its subquestion asks
@@ -401,7 +402,7 @@ class RecordPremisesTool:
                     # different premise: evidence for "now" is not evidence
                     # for "in 2019"
                     if (not dated or p["target"] == target)
-                    and near_duplicate(draft.text, tokens, p, order_aware)
+                    and near_duplicate(draft.text, tokens, p, level=dedup_level)
                 ),
                 None,
             )

@@ -1,7 +1,7 @@
 """One test per known correctness defect, each asserting the CORRECT
 behaviour and marked as a strict expected failure until its fix lands.
-The WS0, WS1 and WS3 defects are fixed, so their tests carry no marker and
-stay as regression tests. The G1 tests below are still expected failures.
+Every defect listed here is now fixed, so no test carries the marker; each
+stays as its fix's regression test.
 
 These are the "before" half of every remediation change: the bug is pinned
 by a failing test before the fix is written, so the fix is measured rather
@@ -43,7 +43,7 @@ from parsec.store.documents import DocumentStore
 from parsec.store.spans import SpanStore
 from parsec.tools.base import ToolContext, ToolRegistry
 from parsec.tools.record_premises import RecordPremisesTool
-from parsec.verify.credence import compute_credences
+from parsec.verify.credence import compute_credences, credence_settings
 
 # -- WS0 ----------------------------------------------------------------------
 
@@ -284,7 +284,6 @@ DIFFERENT_FACTS = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason="G1: fixed by the level-3 matcher (claim_credence 3)")
 @pytest.mark.parametrize("kind", sorted(DIFFERENT_FACTS))
 async def test_g1_different_facts_are_not_merged_at_intake(kind, intake_over, config):
     first, second = DIFFERENT_FACTS[kind]
@@ -315,7 +314,6 @@ async def test_g1_the_same_fact_reworded_only_in_articles_and_case_still_merges(
     assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="G1: fixed by the level-3 matcher (claim_credence 3)")
 async def test_g1_an_article_swap_in_a_short_sentence_merges(intake_over, config):
     """"The" for "A" changes nothing a premise says. In a five-word sentence
     the article is a large enough share of the tokens that the level-2
@@ -330,3 +328,25 @@ async def test_g1_an_article_swap_in_a_short_sentence_merges(intake_over, config
     assert not any("error" in r for r in results), results
     assert results[1].get("duplicate") and results[1]["premise_id"] == results[0]["premise_id"]
     assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+
+
+async def test_g1_contradicting_sources_can_be_recorded_as_a_conflict(intake_over, db, config):
+    """What the merge used to make impossible. "Rose" and "fell" are two
+    premises, so a conflict can be declared between them — and then neither
+    is believed as it would be alone. Merged, the second source's span was
+    attached to the first premise and RAISED its credence."""
+    rose, fell = DIFFERENT_FACTS["antonym"]
+    record, dag, (rose_span, fell_span) = intake_over(f"{rose}\n\n{fell}")
+    results = await record(
+        {"text": rose, "span_refs": [rose_span]}, {"text": fell, "span_refs": [fell_span]}
+    )
+    p_rose, p_fell = (r["premise_id"] for r in results)
+    sid = config.session_id
+    settings = credence_settings(config.model_copy(update=CURRENT_BEHAVIOUR))
+    alone = compute_credences(db, sid, **settings).nodes[p_rose].credence
+
+    dag.add_edge(sid, p_rose, p_fell, "contradicts", {"note": "opposite directions"})
+    report = compute_credences(db, sid, **settings)
+    for premise in (p_rose, p_fell):
+        assert report.nodes[premise].conflicted
+        assert report.nodes[premise].credence < alone

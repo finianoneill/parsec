@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 — unreleased
+
+### Fixed
+
+- **Intake merged premises that said different things.** Two premises were
+  treated as one fact when their words overlapped by 80%, so one changed word
+  in a sentence of any length passed: "is safe" merged with "is not safe",
+  "rose 12 percent" with "fell 12 percent", "approved by the FDA" with
+  "approved by the EMA", and a swapped subject and object once the sentence was
+  long enough. The second source's text was then attached to the first premise
+  as corroboration, raising its credence on evidence that said the opposite,
+  and no conflict could be recorded because only one premise existed. Two
+  premises are now the same fact only when they state the same numbers and
+  their words are identical, in order, apart from articles, case and
+  punctuation. A genuine paraphrase is kept as a separate premise, which
+  under-counts corroboration: the safe direction. (`claim_credence` 3)
+
 ## 0.2.0 — the correctness release
 
 Every sentence and number parsec shows a reader can now be defended
