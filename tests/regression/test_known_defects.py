@@ -313,3 +313,20 @@ async def test_g1_the_same_fact_reworded_only_in_articles_and_case_still_merges(
     )
     assert results[1].get("duplicate") and results[1]["premise_id"] == results[0]["premise_id"]
     assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+
+
+@pytest.mark.xfail(strict=True, reason="G1: fixed by the level-3 matcher (claim_credence 3)")
+async def test_g1_an_article_swap_in_a_short_sentence_merges(intake_over, config):
+    """"The" for "A" changes nothing a premise says. In a five-word sentence
+    the article is a large enough share of the tokens that the level-2
+    overlap test splits the pair; level 3 compares content words only."""
+    record, dag, (first_span, second_span) = intake_over(
+        "The Calder bridge is green.\n\nA Calder bridge is green."
+    )
+    results = await record(
+        {"text": "The Calder bridge is green.", "span_refs": [first_span]},
+        {"text": "A Calder bridge is green.", "span_refs": [second_span]},
+    )
+    assert not any("error" in r for r in results), results
+    assert results[1].get("duplicate") and results[1]["premise_id"] == results[0]["premise_id"]
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1

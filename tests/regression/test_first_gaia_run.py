@@ -274,7 +274,9 @@ def test_g10_the_last_subagent_turn_is_reserved_for_the_report(ask):
     assert [f["text"] for f in _findings(run)] == [BRIDGE]
     row = run["conn"].execute("SELECT status, reason FROM coverage WHERE sq_id='sq-1'").fetchone()
     assert row["status"] == "partial"
-    assert "before submit_report" not in (row["reason"] or "")
+    # the row says what is still missing, not that the report was lost
+    assert NO_LENGTH in (row["reason"] or "")
+    assert "before submit_report" not in row["reason"]
 
 
 @pytest.mark.xfail(strict=True, reason="G11: fixed by the honest run status (run_status 1)")

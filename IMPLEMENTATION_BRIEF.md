@@ -59,7 +59,7 @@ First PR, before any fix: make `test_the_newest_pinned_release_is_what_new_sessi
 
 - `FUNCTION_WORDS = frozenset({"a", "an", "the"})`. Articles only. Prepositions, conjunctions, auxiliaries, modals, quantifiers and pronouns stay content: above/below, and/or, may/will and is/was all change the claim.
 - `content_tokens(text) -> list[str]`: `dup_token_list` minus function words, order kept.
-- Level-3 rule: numbers equal **and** content-token lists identical. Jaccard stays as a pre-filter. Ordered similarity is not needed at this level.
+- Level-3 rule: numbers equal **and** content-token lists identical. Neither the Jaccard pre-filter nor ordered similarity runs at this level. Jaccard is computed over every token, articles included, so it would reject a short article-only variant before the content comparison ("The bridge" / "bridge" scores 0.5), and list equality is already exact and cheap. Levels 1 and 2 keep their pre-filter unchanged.
 - Add `level: int | None = None` beside the existing `order_aware: bool` (which maps to level 2 when `level` is None), so current callers and tests are untouched. Levels 1 and 2 stay exactly as shipped.
 
 `tools/record_premises.py:339`: pass `behaviour_level(ctx.config.claim_credence)`.
@@ -67,7 +67,7 @@ First PR, before any fix: make `test_the_newest_pinned_release_is_what_new_sessi
 Tests:
 
 - The four doc rows, the short negation, the long Alder/Birch swap, above/below and may/will: not merged.
-- Case, punctuation and article variants: merged.
+- Case, punctuation and article variants: merged, including in a short sentence where the article is a large share of the tokens.
 - Hypothesis property: inserting a negation or substituting, deleting or reordering any content token never matches.
 - Through intake: rose/fell from two documents gives two premises, and a declared conflict discounts the claim.
 
