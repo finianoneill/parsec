@@ -141,6 +141,8 @@ def effort_limits(effort: str, budgets: Budgets) -> EffortLimits:
 # Released so far:
 #   0.1.0  everything in LEGACY_BEHAVIOUR
 #   0.2.0  sentence_check 1, claim_credence 2, derivations 2, recency 2
+# In development for 0.2.1 (recorded as "<n>-dev" until it ships):
+#   claim_credence 3
 # The prompt and schema bytes of both are pinned in
 # tests/unit/test_prompt_golden.py, and recordings made by each are replayed
 # on every run (tests/fixtures/recordings/).
@@ -161,7 +163,9 @@ CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
     "sentence_check": 1,
     # 2: a claim is as credible as the weakest distinct fact it cites (no
     # corroboration from citing more refs); intake dedup respects word order.
-    "claim_credence": 2,
+    # 3: intake merges two premises only when their content words are
+    # identical — one changed word is a different fact (verify.propositions).
+    "claim_credence": "3-dev",
     # 2: premises are verbatim (no transform_note); a derived figure is a
     # `computes` finding the harness recomputes; a finding's numbers must
     # come from its premises.
