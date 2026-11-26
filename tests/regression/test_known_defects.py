@@ -1,7 +1,7 @@
 """One test per known correctness defect, each asserting the CORRECT
 behaviour and marked as a strict expected failure until its fix lands.
-Every defect listed here is now fixed, so no test carries the marker; each
-stays as its fix's regression test.
+The WS0, WS1 and WS3 defects are fixed, so their tests carry no marker and
+stay as regression tests. The G1 tests below are still expected failures.
 
 These are the "before" half of every remediation change: the bug is pinned
 by a failing test before the fix is written, so the fix is measured rather
@@ -14,6 +14,11 @@ Workstreams (see the remediation design brief):
   WS1  claim credence double-counts cited evidence; intake dedup ignores
        word order
   WS3  any transform_note exempts every number in a premise
+  G1   intake merges premises that differ by one content word, or by a
+       subject/object swap in a long sentence (claim_credence 3)
+
+The defects found by the first GAIA run (G9, G10, G11) need a full run each
+and live in tests/regression/test_first_gaia_run.py.
 
 Two fixes are covered end to end elsewhere, because they need a full run:
 the WS2 recency pair (one 2019 observation asked about "now" and about
@@ -152,40 +157,50 @@ DOC_TEXT = (
 
 
 @pytest.fixture
-def intake(db, blobs, event_log, ledger, sessions, config, clock):
-    """record_premises over one document with three single-sentence spans,
-    in a session recording today's behaviour versions."""
-    config = config.model_copy(update=CURRENT_BEHAVIOUR)
-    sessions.create(config)
-    documents = DocumentStore(db, clock)
-    spans = SpanStore(db)
-    dag = DagStore(db, event_log)
-    raw = DOC_TEXT.encode()
-    doc_hash = ids.doc_hash(raw)
-    blobs.put(raw)
-    url = "https://example.test/doc"
-    documents.put_document(doc_hash, url, "text/plain", 200, len(raw), blobs.put(DOC_TEXT), {})
-    documents.cache_put(ids.cache_key(url), url, doc_hash, "record")
-    rows, span_ids, pos = [], [], 0
-    for sentence in DOC_TEXT.split("\n\n"):
-        start, end = pos, pos + len(sentence)
-        span_id = ids.span_id(doc_hash, start, end)
-        rows.append((span_id, start, end, sentence))
-        span_ids.append(span_id)
-        pos = end + 2
-    spans.put_spans(doc_hash, rows)
-    registry = ToolRegistry([RecordPremisesTool(dag, spans, documents)])
-    ctx = ToolContext(db, blobs, event_log, ledger, config, clock)
+def intake_over(db, blobs, event_log, ledger, sessions, config, clock):
+    """record_premises over one document whose paragraphs are its spans, in
+    a session recording today's behaviour versions. Call it with the text."""
 
-    async def record(*premises: dict) -> list[dict]:
-        intent = ToolIntent(
-            tool_use_id="tu", tool_name="record_premises", input={"premises": list(premises)}
-        )
-        result = await registry.dispatch(intent, ctx)
-        assert result.ok
-        return json.loads(blobs.get_text(result.full_blob))["results"]
+    def build(doc_text: str):
+        current = config.model_copy(update=CURRENT_BEHAVIOUR)
+        sessions.create(current)
+        documents = DocumentStore(db, clock)
+        spans = SpanStore(db)
+        dag = DagStore(db, event_log)
+        raw = doc_text.encode()
+        doc_hash = ids.doc_hash(raw)
+        blobs.put(raw)
+        url = "https://example.test/doc"
+        documents.put_document(doc_hash, url, "text/plain", 200, len(raw), blobs.put(doc_text), {})
+        documents.cache_put(ids.cache_key(url), url, doc_hash, "record")
+        rows, span_ids, pos = [], [], 0
+        for sentence in doc_text.split("\n\n"):
+            start, end = pos, pos + len(sentence)
+            span_id = ids.span_id(doc_hash, start, end)
+            rows.append((span_id, start, end, sentence))
+            span_ids.append(span_id)
+            pos = end + 2
+        spans.put_spans(doc_hash, rows)
+        registry = ToolRegistry([RecordPremisesTool(dag, spans, documents)])
+        ctx = ToolContext(db, blobs, event_log, ledger, current, clock)
 
-    return record, dag, span_ids
+        async def record(*premises: dict) -> list[dict]:
+            intent = ToolIntent(
+                tool_use_id="tu", tool_name="record_premises", input={"premises": list(premises)}
+            )
+            result = await registry.dispatch(intent, ctx)
+            assert result.ok
+            return json.loads(blobs.get_text(result.full_blob))["results"]
+
+        return record, dag, span_ids
+
+    return build
+
+
+@pytest.fixture
+def intake(intake_over):
+    """The three single-sentence spans of DOC_TEXT."""
+    return intake_over(DOC_TEXT)
 
 
 async def test_ws1_reversed_propositions_are_not_merged_at_intake(intake, config):
@@ -225,3 +240,93 @@ async def test_ws3_the_transform_note_field_is_gone(intake, config):
             }
         )
     assert dag.nodes_for_session(config.session_id, tier=1) == []
+
+
+# -- G1: intake dedup merges different facts ----------------------------------
+
+# Each pair differs by one content word, or by which entity did what. The
+# two sentences say different things, so intake must keep two premises: a
+# merge attaches the second sentence's span to the first premise as
+# corroboration, raising its credence on evidence that says the opposite.
+DIFFERENT_FACTS = {
+    "negation": (
+        "The vaccine is safe for children under five.",
+        "The vaccine is not safe for children under five.",
+    ),
+    "negation in a short sentence": (
+        "The Calder vaccine is safe.",
+        "The Calder vaccine is not safe.",
+    ),
+    "antonym": (
+        "Revenue at Alder Corp rose 12 percent in fiscal 2025 compared with 2024.",
+        "Revenue at Alder Corp fell 12 percent in fiscal 2025 compared with 2024.",
+    ),
+    "entity": (
+        "The drug was approved by the FDA in March 2024 for adults with severe asthma.",
+        "The drug was approved by the EMA in March 2024 for adults with severe asthma.",
+    ),
+    "affixed negation": (
+        "The Calder study found the treatment was effective in patients over 65 years old.",
+        "The Calder study found the treatment was ineffective in patients over 65 years old.",
+    ),
+    "subject and object swapped in a long sentence": (
+        "Alder acquired Birch in the 2019 merger that was approved by regulators in Europe.",
+        "Birch acquired Alder in the 2019 merger that was approved by regulators in Europe.",
+    ),
+    "direction": (
+        "The central bank said inflation will stay above the target through the end of 2025.",
+        "The central bank said inflation will stay below the target through the end of 2025.",
+    ),
+    "modality": (
+        "The central bank said that inflation may fall before the end of the year 2025.",
+        "The central bank said that inflation will fall before the end of the year 2025.",
+    ),
+}
+
+
+@pytest.mark.xfail(strict=True, reason="G1: fixed by the level-3 matcher (claim_credence 3)")
+@pytest.mark.parametrize("kind", sorted(DIFFERENT_FACTS))
+async def test_g1_different_facts_are_not_merged_at_intake(kind, intake_over, config):
+    first, second = DIFFERENT_FACTS[kind]
+    record, dag, (first_span, second_span) = intake_over(f"{first}\n\n{second}")
+    results = await record(
+        {"text": first, "span_refs": [first_span]},
+        {"text": second, "span_refs": [second_span]},
+    )
+    assert not any("error" in r for r in results), results
+    assert not any(r.get("duplicate") for r in results)
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 2
+
+
+async def test_g1_the_same_fact_reworded_only_in_articles_and_case_still_merges(
+    intake_over, config
+):
+    """The guard on the other side of the G1 fix: dropping an article,
+    changing case or punctuation is the same proposition, and its span is
+    corroboration. Passes before the fix and must pass after it."""
+    record, dag, (first_span, second_span) = intake_over(
+        "The Calder bridge is painted green.\n\nCalder Bridge is painted green"
+    )
+    results = await record(
+        {"text": "The Calder bridge is painted green.", "span_refs": [first_span]},
+        {"text": "Calder Bridge is painted green", "span_refs": [second_span]},
+    )
+    assert results[1].get("duplicate") and results[1]["premise_id"] == results[0]["premise_id"]
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1
+
+
+@pytest.mark.xfail(strict=True, reason="G1: fixed by the level-3 matcher (claim_credence 3)")
+async def test_g1_an_article_swap_in_a_short_sentence_merges(intake_over, config):
+    """"The" for "A" changes nothing a premise says. In a five-word sentence
+    the article is a large enough share of the tokens that the level-2
+    overlap test splits the pair; level 3 compares content words only."""
+    record, dag, (first_span, second_span) = intake_over(
+        "The Calder bridge is green.\n\nA Calder bridge is green."
+    )
+    results = await record(
+        {"text": "The Calder bridge is green.", "span_refs": [first_span]},
+        {"text": "A Calder bridge is green.", "span_refs": [second_span]},
+    )
+    assert not any("error" in r for r in results), results
+    assert results[1].get("duplicate") and results[1]["premise_id"] == results[0]["premise_id"]
+    assert len(dag.nodes_for_session(config.session_id, tier=1)) == 1

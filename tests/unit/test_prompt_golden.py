@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import pytest
 
+from parsec import __version__
 from parsec.canonical import hash_obj, sha256_hex
 from parsec.config import CURRENT_BEHAVIOUR, LEGACY_BEHAVIOUR, RunConfig
 from parsec.loop import prompts
@@ -148,10 +149,54 @@ def test_every_prompt_piece_is_pinned(release):
     assert set(_actual(behaviour)) == set(golden)
 
 
+NEWEST_RELEASE = "0.2.0"
+
+
+def unpinned_behaviour(current: dict, version: str, pinned: dict) -> list[str]:
+    """Why `current` is not what the newest pinned release records, as a list
+    of problems (empty when it is). `pinned` is that release's behaviour over
+    every key, with the legacy value for keys the release never set.
+
+    Between releases the package version is a development version
+    ("0.2.1.dev0") and a behaviour may record "<n>-dev": that is work merged
+    since the newest release, and it carries no replay guarantee. Everything
+    else must still be exactly what that release pinned. A released version
+    may record no -dev value at all, so the release that turns a -dev into
+    an integer has to pin that integer's prompt bytes first."""
+    in_development = {key for key, value in current.items() if str(value).endswith("-dev")}
+    problems = []
+    if in_development and ".dev" not in version:
+        problems.append(
+            f"version {version} is a release but records -dev behaviour for "
+            f"{', '.join(sorted(in_development))}: fine between releases, never in one"
+        )
+    for key, value in current.items():
+        if key not in in_development and value != pinned.get(key):
+            problems.append(
+                f"{key} is {value!r}, which no pinned release records "
+                f"(the newest pins {pinned.get(key)!r}): add a golden set for it"
+            )
+    return problems
+
+
 def test_the_newest_pinned_release_is_what_new_sessions_record():
     """If CURRENT_BEHAVIOUR moves on, its bytes need a pinned set of their
     own before the release that ships them."""
-    assert {k: v for k, v in CURRENT_BEHAVIOUR.items() if not str(v).endswith("-dev")} == (
-        CURRENT_BEHAVIOUR
-    ), "a -dev version is current: fine between releases, never in one"
-    assert CURRENT_BEHAVIOUR == V0_2_0
+    newest, _ = RELEASES[NEWEST_RELEASE]
+    assert unpinned_behaviour(CURRENT_BEHAVIOUR, __version__, {**LEGACY_BEHAVIOUR, **newest}) == []
+
+
+def test_the_pin_check_allows_dev_versions_only_between_releases():
+    pinned = {**LEGACY_BEHAVIOUR, **V0_2_0}
+    in_progress = {**pinned, "claim_credence": "3-dev"}
+    assert unpinned_behaviour(pinned, "0.2.0", pinned) == []
+    assert unpinned_behaviour(in_progress, "0.2.1.dev0", pinned) == []
+    # a release may not ship a -dev behaviour
+    assert len(unpinned_behaviour(in_progress, "0.2.1", pinned)) == 1
+    # an integer no release pinned is caught, in development or not
+    unpinned = {**pinned, "claim_credence": 3}
+    assert len(unpinned_behaviour(unpinned, "0.2.1.dev0", pinned)) == 1
+    assert len(unpinned_behaviour(unpinned, "0.2.1", pinned)) == 1
+    # so is a behaviour key the release never had, once it stops being -dev
+    assert unpinned_behaviour({**pinned, "run_status": "1-dev"}, "0.2.1.dev0", pinned) == []
+    assert len(unpinned_behaviour({**pinned, "run_status": 1}, "0.2.1.dev0", pinned)) == 1
