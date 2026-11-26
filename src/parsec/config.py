@@ -137,6 +137,13 @@ def effort_limits(effort: str, budgets: Budgets) -> EffortLimits:
 #   - A released integer is never redefined. Work merged between releases
 #     records a "<n>-dev" string, which carries no replay guarantee; the
 #     release turns it into the integer.
+#
+# Released so far:
+#   0.1.0  everything in LEGACY_BEHAVIOUR
+#   0.2.0  sentence_check 1, claim_credence 2, derivations 2, recency 2
+# The prompt and schema bytes of both are pinned in
+# tests/unit/test_prompt_golden.py, and recordings made by each are replayed
+# on every run (tests/fixtures/recordings/).
 BehaviourVersion = int | str
 
 LEGACY_BEHAVIOUR: dict[str, BehaviourVersion] = {
@@ -151,17 +158,17 @@ CURRENT_BEHAVIOUR: dict[str, BehaviourVersion] = {
     **LEGACY_BEHAVIOUR,
     # 1: every number and quote in a report sentence must appear in what the
     # sentence cites; failures go through repair, then are marked unverified.
-    "sentence_check": "1-dev",
+    "sentence_check": 1,
     # 2: a claim is as credible as the weakest distinct fact it cites (no
     # corroboration from citing more refs); intake dedup respects word order.
-    "claim_credence": "2-dev",
+    "claim_credence": 2,
     # 2: premises are verbatim (no transform_note); a derived figure is a
     # `computes` finding the harness recomputes; a finding's numbers must
     # come from its premises.
-    "derivations": "2-dev",
+    "derivations": 2,
     # 2: decay runs on when each observation was made, measured against the
     # time the subquestion asks about (as_of_ts for "now") — not fetch time.
-    "recency": "2-dev",
+    "recency": 2,
 }
 
 

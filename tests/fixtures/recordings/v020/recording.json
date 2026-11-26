@@ -1,0 +1,18 @@
+{
+  "parsec_version": "0.2.0",
+  "behaviour": {
+    "sentence_check": 1,
+    "claim_credence": 2,
+    "derivations": 2,
+    "recency": 2
+  },
+  "sessions": [
+    "frozen-v020"
+  ],
+  "status": {
+    "frozen-v020": "done"
+  },
+  "aux": {
+    "queries.json": "queries.json"
+  }
+}

@@ -110,14 +110,38 @@ _WRITER_SENTENCE_RULES = (
 _WRITER_CLAIM_RULES = (
     "- A sentence is only as credible as the weakest premise or finding it cites, and citing "
     "more of them does not strengthen it. Write one fact per sentence: do not join unrelated "
-    "facts in one sentence, and cite every premise that sentence depends on.\n"
+    "facts in one sentence.\n"
+)
+# derivations >= 2: an unverified derivation is shown, but is not evidence.
+_WRITER_DERIVATION_RULES = (
+    "- A finding whose confidence says \"unverified derivation\" is a figure nobody could "
+    "recompute. It is not evidence for that figure: do not state the figure.\n"
+)
+# recency >= 2: premises carry time notes.
+_WRITER_DATING_RULES = (
+    "- A premise may carry a time note. \"time frame\" is the period that premise is evidence "
+    "for; \"observed\" is the date its source gives for the fact. Never mix figures from "
+    "different time frames in one sentence, and say which period a figure belongs to when the "
+    "answer covers more than one. You may state an observed year for a premise you cite.\n"
 )
 assert WRITER_SYSTEM.count(_WRITER_CONTRACT_V1_TAIL) == 1
 
 
-def _writer_system(sentence_rules: bool, claim_rules: bool) -> str:
-    extra = (_WRITER_SENTENCE_RULES if sentence_rules else "") + (
-        _WRITER_CLAIM_RULES if claim_rules else ""
+def _writer_system(
+    sentence_rules: bool,
+    claim_rules: bool,
+    derivation_rules: bool = False,
+    dating_rules: bool = False,
+) -> str:
+    extra = "".join(
+        text
+        for on, text in (
+            (sentence_rules, _WRITER_SENTENCE_RULES),
+            (claim_rules, _WRITER_CLAIM_RULES),
+            (derivation_rules, _WRITER_DERIVATION_RULES),
+            (dating_rules, _WRITER_DATING_RULES),
+        )
+        if on
     )
     return WRITER_SYSTEM.replace(_WRITER_CONTRACT_V1_TAIL, _WRITER_CONTRACT_V1_TAIL + extra)
 
@@ -210,6 +234,8 @@ def writer_system(config: RunConfig) -> str:
     return _writer_system(
         sentence_rules=behaviour_level(config.sentence_check) >= 1,
         claim_rules=behaviour_level(config.claim_credence) >= 2,
+        derivation_rules=behaviour_level(config.derivations) >= 2,
+        dating_rules=behaviour_level(config.recency) >= 2,
     )
 
 

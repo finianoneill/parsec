@@ -1,0 +1,6 @@
+{"created_seq":29,"dst_node_id":"sourcespan:ce229a72644cfc14","edge_id":"22ab8396c38be687","edge_type":"extracts","payload_json":{"date_source":"unknown"},"session_id":"frozen-v020","src_node_id":"premise:0cd52e817bc0d64f"}
+{"created_seq":40,"dst_node_id":"premise:0cd52e817bc0d64f","edge_id":"3a1e77aa6768d18a","edge_type":"computes","payload_json":{},"session_id":"frozen-v020","src_node_id":"finding:25b840bccd5f834e"}
+{"created_seq":68,"dst_node_id":"sourcespan:722e192ee3403ac0","edge_id":"9e7f2522d5b7e16d","edge_type":"extracts","payload_json":{"date_source":"as_of","observed_at":"2019-01-01/2019-12-31"},"session_id":"frozen-v020","src_node_id":"premise:da2830ededf299a3"}
+{"created_seq":89,"dst_node_id":"premise:0cd52e817bc0d64f","edge_id":"a5153358faf1ff08","edge_type":"aggregates","payload_json":{},"session_id":"frozen-v020","src_node_id":"reportclaim:8fe7440ec5ee651e"}
+{"created_seq":91,"dst_node_id":"finding:25b840bccd5f834e","edge_id":"19b49038dfe94a01","edge_type":"aggregates","payload_json":{},"session_id":"frozen-v020","src_node_id":"reportclaim:f1813b51fc416e71"}
+{"created_seq":93,"dst_node_id":"premise:da2830ededf299a3","edge_id":"0b0850c7f95951aa","edge_type":"aggregates","payload_json":{},"session_id":"frozen-v020","src_node_id":"reportclaim:63178fe0817ed4b8"}
